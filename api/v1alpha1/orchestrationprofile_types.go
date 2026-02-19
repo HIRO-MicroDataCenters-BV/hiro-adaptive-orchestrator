@@ -20,42 +20,85 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// Application Reference
+type ApplicationReference struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	Namespace  string `json:"namespace"`
+}
+
+// Placement Awareness
+type Awareness struct {
+	CPU    bool `json:"cpu,omitempty"`
+	Memory bool `json:"memory,omitempty"`
+	GPU    bool `json:"gpu,omitempty"`
+	Energy bool `json:"energy,omitempty"`
+}
+
+// Placement Spec
+type PlacementSpec struct {
+	Strategy  string    `json:"strategy"`
+	Awareness Awareness `json:"awareness,omitempty"`
+}
+
+// Rebalancing Spec
+type RebalancingSpec struct {
+	Enabled           bool     `json:"enabled"`
+	TriggerConditions []string `json:"triggerConditions,omitempty"`
+	CooldownSeconds   int      `json:"cooldownSeconds,omitempty"`
+}
 
 // OrchestrationProfileSpec defines the desired state of OrchestrationProfile
 type OrchestrationProfileSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+	// applicationRef references the application for which this orchestration profile is defined.
+	// +required
+	ApplicationRef ApplicationReference `json:"applicationRef"`
 
-	// foo is an example field of OrchestrationProfile. Edit orchestrationprofile_types.go to remove/update
+	// placement defines the placement strategy and awareness for the application.
+	// +required
+	Placement PlacementSpec `json:"placement"`
+
+	// rebalancing defines the rebalancing strategy for the application.
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	Rebalancing RebalancingSpec `json:"rebalancing,omitempty"`
+}
+
+// Pod Status
+type PodStatus struct {
+	Id        string `json:"id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// Placement Status
+type PlacementStatus struct {
+	Strategy     string      `json:"strategy,omitempty"`
+	ObservedPods int         `json:"observedPods,omitempty"`
+	ReadyPods    int         `json:"readyPods,omitempty"`
+	PendingPods  int         `json:"pendingPods,omitempty"`
+	PodStatuses  []PodStatus `json:"podStatuses,omitempty"`
+}
+
+// Rebalancing Status
+type RebalancingStatus struct {
+	LastTriggeredAt string `json:"lastTriggeredAt,omitempty"`
+	Reason          string `json:"reason,omitempty"`
 }
 
 // OrchestrationProfileStatus defines the observed state of OrchestrationProfile.
 type OrchestrationProfileStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the OrchestrationProfile resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
-	// +listType=map
-	// +listMapKey=type
+	// placementStatus provides details about the current placement of the application.
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	PlacementStatus PlacementStatus `json:"placementStatus,omitempty"`
+
+	// rebalancingStatus provides details about the current rebalancing state of the application.
+	// +optional
+	RebalancingStatus RebalancingStatus `json:"rebalancingStatus,omitempty"`
+	LastUpdatedTime   metav1.Time       `json:"lastUpdatedTime,omitempty"`
 }
 
 // +kubebuilder:object:root=true
