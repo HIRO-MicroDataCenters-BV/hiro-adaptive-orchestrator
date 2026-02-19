@@ -1,0 +1,9 @@
+apiVersion: orchestration.orchestration.hiro.io/v1alpha1
+kind: OrchestrationProfile
+metadata:
+  labels:
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+    app.kubernetes.io/managed-by: kustomize
+  name: orchestrationprofile-sample
+spec:
+  # TODO(user): Add fields here
