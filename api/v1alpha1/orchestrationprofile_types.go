@@ -90,6 +90,8 @@ type RebalancingStatus struct {
 
 // OrchestrationProfileStatus defines the observed state of OrchestrationProfile.
 type OrchestrationProfileStatus struct {
+	// status indicates the status of the orchestration profile (e.g., "Pending", "Active", "Error").
+	Status string `json:"status,omitempty"`
 
 	// placementStatus provides details about the current placement of the application.
 	// +optional
@@ -103,6 +105,7 @@ type OrchestrationProfileStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Cluster,shortName=op
 
 // OrchestrationProfile is the Schema for the orchestrationprofiles API
 type OrchestrationProfile struct {

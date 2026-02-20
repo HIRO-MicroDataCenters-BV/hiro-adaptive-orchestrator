@@ -7,3 +7,14 @@ metadata:
   name: orchestrationprofile-sample
 spec:
   # TODO(user): Add fields here
+  applicationRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx
+    namespace: default
+
+  placement:
+    strategy: balanced
+
+  rebalancing:
+    enabled: true
