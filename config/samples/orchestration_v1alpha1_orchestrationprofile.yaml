@@ -1,4 +1,4 @@
-apiVersion: orchestration.orchestration.hiro.io/v1alpha1
+apiVersion: orchestration.hiro.io/v1alpha1
 kind: OrchestrationProfile
 metadata:
   labels:

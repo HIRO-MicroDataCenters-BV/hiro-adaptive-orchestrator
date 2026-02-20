@@ -90,7 +90,7 @@ type RebalancingStatus struct {
 
 // OrchestrationProfileStatus defines the observed state of OrchestrationProfile.
 type OrchestrationProfileStatus struct {
-	// status indicates the status of the orchestration profile (e.g., "Pending", "Active", "Error").
+	// status indicates the status of the orchestration profile (e.g., "Pending", "Active", "Error", "InUse").
 	Status string `json:"status,omitempty"`
 
 	// placementStatus provides details about the current placement of the application.

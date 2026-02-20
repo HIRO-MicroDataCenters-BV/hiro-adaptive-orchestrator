@@ -146,7 +146,7 @@ spec:
                 type: object
               status:
                 description: status indicates the status of the orchestration profile
-                  (e.g., "Pending", "Active", "Error").
+                  (e.g., "Pending", "Active", "Error", "InUse").
                 type: string
             type: object
         required:
