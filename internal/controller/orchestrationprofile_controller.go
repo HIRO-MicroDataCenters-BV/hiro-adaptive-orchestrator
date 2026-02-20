@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,9 +34,9 @@ type OrchestrationProfileReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=orchestration.orchestration.hiro.io,resources=orchestrationprofiles,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=orchestration.orchestration.hiro.io,resources=orchestrationprofiles/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=orchestration.orchestration.hiro.io,resources=orchestrationprofiles/finalizers,verbs=update
+// +kubebuilder:rbac:groups=orchestration.hiro.io,resources=orchestrationprofiles,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=orchestration.hiro.io,resources=orchestrationprofiles/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=orchestration.hiro.io,resources=orchestrationprofiles/finalizers,verbs=update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -47,9 +48,33 @@ type OrchestrationProfileReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.1/pkg/reconcile
 func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	logger := logf.FromContext(ctx)
 
-	// TODO(user): your logic here
+	profile := &orchestrationv1alpha1.OrchestrationProfile{}
+	if err := r.Get(ctx, req.NamespacedName, profile); err != nil {
+		logger.Error(err, "unable to fetch OrchestrationProfile")
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	err := r.Get(ctx, req.NamespacedName, profile)
+	if err != nil {
+		logger.Error(err, "failed to reconcile OrchestrationProfile")
+		return ctrl.Result{}, err
+	}
+
+	logger.Info("Reconciling OrchestrationProfile",
+		"name", profile.Name,
+		"strategy", profile.Spec.Placement.Strategy,
+		"awareness", profile.Spec.Placement.Awareness,
+	)
+
+	profile.Status.Status = "Active"
+	profile.Status.LastUpdatedTime = metav1.Now()
+
+	if err := r.Status().Update(ctx, profile); err != nil {
+		logger.Error(err, "failed to update OrchestrationProfile status")
+		return ctrl.Result{}, err
+	}
 
 	return ctrl.Result{}, nil
 }
