@@ -14,6 +14,9 @@ GITHUB_USERNAME=${GITHUB_USERNAME:-sskrishnav}
 DOCKER_REGISTRY=ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator
 HIRO_OPERATOR_IMAGE=hiro-adaptive-orchestrator-controller:latest
 SOURCE_REPO_URL=https://github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator
+# The namespace where the operator will be deployed. 
+# Check config/default/kustomization.yaml for the default namespace used in the manifests.
+NAMESPACE=hiro-adaptive-orchestrator-system. 
 
 export KUBECONFIG=${2:-~/.kube/config}
 # Export Name has to be IMG as it is used in the Makefile for docker-build and docker-push targets
@@ -72,16 +75,20 @@ echo ""
 echo "Build the Operator image and push to the registry..."
 make docker-build docker-push IMG=$IMG
 
-# Add label to the Image
-# echo ""
-# echo "Adding label to the Operator image..."
-# docker container create --name temp-container $IMG
-# docker container commit \
-#   --change "LABEL org.opencontainers.image.source=$SOURCE_REPO_URL" \
-#   temp-container \
-#   $IMG
-# docker container rm temp-container
-# docker push $IMG
+echo ""
+echo "Creating image pull secret..."
+kubectl create secret docker-registry ghcr-secret \
+  --docker-server=ghcr.io \
+  --docker-username=$GITHUB_USERNAME \
+  --docker-password=$GITHUB_PAT_TOKEN \
+  --namespace=$NAMESPACE \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+echo ""
+echo "Patching service account..."
+kubectl patch serviceaccount default \
+  -p '{"imagePullSecrets": [{"name": "ghcr-secret"}]}' \
+  --namespace=$NAMESPACE
 
 # echo ""
 # echo "Loading the Operator image into the kind cluster..."
