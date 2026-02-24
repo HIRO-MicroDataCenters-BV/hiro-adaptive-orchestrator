@@ -16,7 +16,10 @@ HIRO_OPERATOR_IMAGE=hiro-adaptive-orchestrator-controller:latest
 SOURCE_REPO_URL=https://github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator
 # The namespace where the operator will be deployed. 
 # Check config/default/kustomization.yaml for the default namespace used in the manifests.
-NAMESPACE=hiro-adaptive-orchestrator-system. 
+NAMESPACE=hiro-adaptive-orchestrator-system
+# The service account name used by the operator. 
+# Check config/default/manager_auth_proxy_patch.yaml for the default service account name.
+SERVICE_ACCOUNT_NAME=hiro-adaptive-orchestrator-controller-manager
 
 export KUBECONFIG=${2:-~/.kube/config}
 # Export Name has to be IMG as it is used in the Makefile for docker-build and docker-push targets
@@ -75,21 +78,6 @@ echo ""
 echo "Build the Operator image and push to the registry..."
 make docker-build docker-push IMG=$IMG
 
-echo ""
-echo "Creating image pull secret..."
-kubectl create secret docker-registry ghcr-secret \
-  --docker-server=ghcr.io \
-  --docker-username=$GITHUB_USERNAME \
-  --docker-password=$GITHUB_PAT_TOKEN \
-  --namespace=$NAMESPACE \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-echo ""
-echo "Patching service account..."
-kubectl patch serviceaccount default \
-  -p '{"imagePullSecrets": [{"name": "ghcr-secret"}]}' \
-  --namespace=$NAMESPACE
-
 # echo ""
 # echo "Loading the Operator image into the kind cluster..."
 # kind load docker-image $IMG --name $CLUSTER_NAME
@@ -102,5 +90,20 @@ echo ""
 echo "Deployment completed successfully."
 
 echo ""
+echo "Creating image pull secret..."
+kubectl create secret docker-registry ghcr-secret \
+  --docker-server=ghcr.io \
+  --docker-username=$GITHUB_USERNAME \
+  --docker-password=$GITHUB_PAT_TOKEN \
+  --namespace=$NAMESPACE \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+echo ""
+echo "Patching service account..."
+kubectl patch serviceaccount $SERVICE_ACCOUNT_NAME \
+  -p '{"imagePullSecrets": [{"name": "ghcr-secret"}]}' \
+  --namespace=$NAMESPACE
+
+echo ""
 echo "Verifying operator deployment..."
-kubectl get pods -n hiro-adaptive-orchestrator-system
+kubectl get pods -n $NAMESPACE
