@@ -105,5 +105,9 @@ kubectl patch serviceaccount $SERVICE_ACCOUNT_NAME \
   --namespace=$NAMESPACE
 
 echo ""
+echo "Restarting operator pod to pick up new image..."
+kubectl delete pod -l control-plane=controller-manager -n $NAMESPACE --ignore-not-found
+
+echo ""
 echo "Verifying operator deployment..."
 kubectl get pods -n $NAMESPACE
