@@ -35,9 +35,14 @@ type OrchestrationProfileReconciler struct {
 	Scheme *runtime.Scheme
 }
 
+// Never Ever delete this comments as they are used by kubebuilder to generate RBAC permissions for the controller.
+// If you need to change the permissions,
+// modify the verbs and resources in the comments below and then run "make generate" to update the generated code.
+
 // +kubebuilder:rbac:groups=orchestration.hiro.io,resources=orchestrationprofiles,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=orchestration.hiro.io,resources=orchestrationprofiles/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=orchestration.hiro.io,resources=orchestrationprofiles/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.

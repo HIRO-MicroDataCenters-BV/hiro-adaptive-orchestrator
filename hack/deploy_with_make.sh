@@ -52,21 +52,9 @@ echo ""
 echo "Verifying deployment..."
 kubectl get crd orchestrationprofiles.orchestration.hiro.io
 
-echo ""
-echo "Applying sample OrchestrationProfile"
-kubectl apply -f config/samples/orchestration_v1alpha1_orchestrationprofile.yaml
-
-echo ""
-echo "Verify CRD resource is created..."
-kubectl get orchestrationprofiles
-
 # echo ""
 # echo "Running operator locally..."
 # make run
-
-echo ""
-echo "Describe the created OrchestrationProfile resource..."
-kubectl get orchestrationprofiles -o yaml
 
 # Authenticate with GitHub Container Registry (GHCR) using the provided Personal Access Token (PAT)
 echo ""
@@ -111,3 +99,19 @@ kubectl delete pod -l control-plane=controller-manager -n $NAMESPACE --ignore-no
 echo ""
 echo "Verifying operator deployment..."
 kubectl get pods -n $NAMESPACE
+
+echo ""
+echo "Waiting for operator pod to be running (label: app.kubernetes.io/name=hiro-adaptive-orchestrator)..."
+kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=hiro-adaptive-orchestrator -n $NAMESPACE --timeout=180s
+
+echo ""
+echo "Applying sample OrchestrationProfile"
+kubectl apply -f config/samples/orchestration_v1alpha1_orchestrationprofile.yaml
+
+echo ""
+echo "Verify CRD resource is created..."
+kubectl get orchestrationprofiles
+
+echo ""
+echo "Describe the created OrchestrationProfile resource..."
+kubectl get orchestrationprofiles -o yaml
