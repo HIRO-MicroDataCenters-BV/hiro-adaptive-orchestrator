@@ -47,12 +47,6 @@ func (r *OrchestrationProfileReconciler) applicationExists(
 		Namespace: appRef.Namespace,
 	}
 
-	logf.FromContext(ctx).Info("checking existence of application",
-		"kind", appRef.Kind,
-		"name", appRef.Name,
-		"namespace", appRef.Namespace,
-	)
-
 	var obj client.Object
 	switch appRef.Kind {
 	case "Deployment":
