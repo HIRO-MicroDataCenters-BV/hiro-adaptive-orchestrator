@@ -135,14 +135,14 @@ func buildPlacementStatus(
 // deriveProfileStatus maps the observed pod states to a single profile-level
 // status string, following this transition table:
 //
-//	0 pods              → Pending   (app exists but no pods scheduled yet)
+//	0 pods              → NoPods   (app exists but no pods scheduled yet)
 //	all pods running    → Active
 //	any failed pods     → Degraded
-//	mix pending+running → Degraded  (partial rollout or mixed health)
+//	mix pending+running → Partial  (partial rollout or mixed health)
 //	all pods pending    → Pending   (still scheduling)
 func deriveProfileStatus(pods []corev1.Pod) string {
 	if len(pods) == 0 {
-		return StatusPending
+		return StatusNoPods
 	}
 
 	running, failed, pending := 0, 0, 0

@@ -179,10 +179,10 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 	// Step 5: Build placement status and derive overall profile status.
 	//
 	// Status transition table:
-	//   0 pods              → Pending   (app exists but no pods scheduled yet)
+	//   0 pods              → NoPods   (app exists but no pods scheduled yet)
 	//   all pods running    → Active
 	//   any failed pods     → Degraded
-	//   mix pending+running → Degraded  (partial rollout)
+	//   mix pending+running → Partial  (partial rollout)
 	//   all pods pending    → Pending
 	// -------------------------------------------------------------------------
 	placementStatus := buildPlacementStatus(profile, pods)
