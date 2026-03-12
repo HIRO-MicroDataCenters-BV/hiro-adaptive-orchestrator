@@ -106,7 +106,8 @@ kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=hiro-adaptive-o
 
 echo ""
 echo "Applying sample OrchestrationProfile"
-kubectl apply -f config/samples/orchestration_v1alpha1_orchestrationprofile.yaml
+# kubectl apply -f config/samples/orchestration_v1alpha1_orchestrationprofile.yaml
+kubectl apply -k config/samples/
 
 echo ""
 echo "Verify CRD resource is created..."
