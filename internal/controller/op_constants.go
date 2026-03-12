@@ -21,10 +21,16 @@ package controller
 // -----------------------------------------------------------------------------
 
 const (
+	// app exists but no pods scheduled yet
+	StatusNoPods = "NoPods"
+
+	// Few Pods are running and few are in pending
+	StatusPartial = "Partial"
+
 	// StatusActive indicates all pods of the referenced application are running and ready.
 	StatusActive = "Active"
 
-	// StatusPending indicates the application or its pods do not exist yet.
+	// StatusPending indicates the application or its pods do not exist yet. All pods pending (still scheduling)
 	StatusPending = "Pending"
 
 	// StatusDegraded indicates the application is partially running (some pods failed or pending).

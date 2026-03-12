@@ -161,11 +161,13 @@ func deriveProfileStatus(pods []corev1.Pod) string {
 	case failed > 0:
 		return StatusDegraded
 	case pending > 0 && running > 0:
-		return StatusDegraded // partial rollout
-	case pending > 0 && running == 0:
-		return StatusPending // all pods still scheduling
-	default:
+		return StatusPartial
+	case running > 0 && pending == 0:
 		return StatusActive
+	case pending > len(pods):
+		return StatusPending
+	default:
+		return StatusError
 	}
 }
 

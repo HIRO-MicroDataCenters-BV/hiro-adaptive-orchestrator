@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -46,6 +47,7 @@ type OrchestrationProfileReconciler struct {
 // +kubebuilder:rbac:groups=orchestration.hiro.io,resources=orchestrationprofiles/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="apps",resources=deployments;replicasets;statefulsets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="batch",resources=jobs,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -148,7 +150,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 			"namespace", profile.Spec.ApplicationRef.Namespace,
 		)
 		return r.updateStatus(ctx, profile, func(s *orchestrationv1alpha1.OrchestrationProfileStatus) {
-			s.Status = StatusPending
+			s.Status = StatusNoPods
 			s.PlacementStatus = orchestrationv1alpha1.PlacementStatus{
 				Strategy:     profile.Spec.Placement.Strategy,
 				ObservedPods: 0,
@@ -213,7 +215,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 //     reconciliation of all profiles whose appRef.Namespace matches the pod's
 //     namespace. This keeps PlacementStatus up to date as pods come and go.
 //
-//  3. Deployment / StatefulSet / ReplicaSet — workload events trigger
+//  3. Deployment / StatefulSet / ReplicaSet / Job — workload events trigger
 //     reconciliation of profiles that reference that exact workload. This ensures
 //     profiles react immediately when their application is first created or deleted,
 //     rather than waiting for pod events (which arrive later in the lifecycle).
@@ -224,6 +226,7 @@ func (r *OrchestrationProfileReconciler) SetupWithManager(mgr ctrl.Manager) erro
 		Watches(&appsv1.Deployment{}, r.appToProfileMapper()).
 		Watches(&appsv1.StatefulSet{}, r.appToProfileMapper()).
 		Watches(&appsv1.ReplicaSet{}, r.appToProfileMapper()).
+		Watches(&batchv1.Job{}, r.appToProfileMapper()).
 		Named("orchestrationprofile").
 		Complete(r)
 }
