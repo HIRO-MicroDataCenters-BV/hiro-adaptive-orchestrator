@@ -79,6 +79,7 @@ type PlacementStatus struct {
 	ObservedPods int         `json:"observedPods,omitempty"`
 	ReadyPods    int         `json:"readyPods,omitempty"`
 	PendingPods  int         `json:"pendingPods,omitempty"`
+	FailedPods   int         `json:"failedPods,omitempty"`
 	PodStatuses  []PodStatus `json:"podStatuses,omitempty"`
 }
 

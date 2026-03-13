@@ -110,6 +110,8 @@ spec:
                 description: placementStatus provides details about the current placement
                   of the application.
                 properties:
+                  failedPods:
+                    type: integer
                   observedPods:
                     type: integer
                   pendingPods:

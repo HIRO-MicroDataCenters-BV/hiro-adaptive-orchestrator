@@ -156,6 +156,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 				ObservedPods: 0,
 				ReadyPods:    0,
 				PendingPods:  0,
+				FailedPods:   0,
 				PodStatuses:  nil,
 			}
 		})
@@ -186,7 +187,12 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 	//   all pods pending    → Pending
 	// -------------------------------------------------------------------------
 	placementStatus := buildPlacementStatus(profile, pods)
-	overallStatus := deriveProfileStatus(pods)
+	overallStatus := deriveProfileStatus(
+		placementStatus.ObservedPods,
+		placementStatus.ReadyPods,
+		placementStatus.FailedPods,
+		placementStatus.PendingPods,
+	)
 
 	logger.Info("updating OrchestrationProfile status",
 		"name", profile.Name,
@@ -194,6 +200,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 		"observed", placementStatus.ObservedPods,
 		"ready", placementStatus.ReadyPods,
 		"pending", placementStatus.PendingPods,
+		"failed", placementStatus.FailedPods,
 	)
 
 	return r.updateStatus(ctx, profile, func(s *orchestrationv1alpha1.OrchestrationProfileStatus) {

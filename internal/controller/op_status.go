@@ -66,6 +66,52 @@ func (r *OrchestrationProfileReconciler) updateStatus(
 // Placement Status Builder
 // -----------------------------------------------------------------------------
 
+// fetchPodStatuses processes the list of pods and counts how many are ready, pending, or failed.
+// It also constructs a detailed list of PodStatus for each observed pod.
+func fetchPodStatuses(
+	pods []corev1.Pod,
+) (ready, pending, failed int, podStatuses []orchestrationv1alpha1.PodStatus) {
+	podStatuses = make([]orchestrationv1alpha1.PodStatus, 0, len(pods))
+	for _, pod := range pods {
+		ps := orchestrationv1alpha1.PodStatus{
+			Id:        string(pod.UID),
+			Name:      pod.Name,
+			Namespace: pod.Namespace,
+			Status:    string(pod.Status.Phase),
+			Reason:    pod.Status.Reason,
+		}
+		switch pod.Status.Phase {
+		case corev1.PodRunning:
+			if isPodReady(pod) {
+				ready++
+			}
+		case corev1.PodPending:
+			pending++
+			// Surface the scheduling failure message when the pod is Unschedulable.
+			for _, cond := range pod.Status.Conditions {
+				if cond.Type == corev1.PodScheduled &&
+					cond.Status == corev1.ConditionFalse &&
+					cond.Message != "" {
+					ps.Reason = cond.Message
+					break
+				}
+			}
+		case corev1.PodFailed:
+			failed++
+			// Prefer the detailed message over the short reason field.
+			if pod.Status.Message != "" {
+				ps.Reason = pod.Status.Message
+			}
+		}
+		podStatuses = append(podStatuses, ps)
+	}
+	return ready, pending, failed, podStatuses
+}
+
+// -----------------------------------------------------------------------------
+// Placement Status Builder
+// -----------------------------------------------------------------------------
+
 // buildPlacementStatus constructs a full PlacementStatus from the observed pod list.
 //
 // For each pod it captures:
@@ -78,52 +124,14 @@ func buildPlacementStatus(
 	profile *orchestrationv1alpha1.OrchestrationProfile,
 	pods []corev1.Pod,
 ) orchestrationv1alpha1.PlacementStatus {
-	podStatuses := make([]orchestrationv1alpha1.PodStatus, 0, len(pods))
-	readyCount := 0
-	pendingCount := 0
-
-	for _, pod := range pods {
-		ps := orchestrationv1alpha1.PodStatus{
-			Id:        string(pod.UID),
-			Name:      pod.Name,
-			Namespace: pod.Namespace,
-			Status:    string(pod.Status.Phase),
-			Reason:    pod.Status.Reason,
-		}
-
-		switch pod.Status.Phase {
-		case corev1.PodRunning:
-			if isPodReady(pod) {
-				readyCount++
-			}
-
-		case corev1.PodPending:
-			pendingCount++
-			// Surface the scheduling failure message when the pod is Unschedulable.
-			for _, cond := range pod.Status.Conditions {
-				if cond.Type == corev1.PodScheduled &&
-					cond.Status == corev1.ConditionFalse &&
-					cond.Message != "" {
-					ps.Reason = cond.Message
-					break
-				}
-			}
-
-		case corev1.PodFailed:
-			// Prefer the detailed message over the short reason field.
-			if pod.Status.Message != "" {
-				ps.Reason = pod.Status.Message
-			}
-		}
-
-		podStatuses = append(podStatuses, ps)
-	}
+	readyCount, pendingCount, failedCount, podStatuses := fetchPodStatuses(pods)
 
 	return orchestrationv1alpha1.PlacementStatus{
 		Strategy:     profile.Spec.Placement.Strategy,
 		ObservedPods: len(pods),
 		ReadyPods:    readyCount,
 		PendingPods:  pendingCount,
+		FailedPods:   failedCount,
 		PodStatuses:  podStatuses,
 	}
 }
@@ -140,23 +148,7 @@ func buildPlacementStatus(
 //	any failed pods     → Degraded
 //	mix pending+running → Partial  (partial rollout or mixed health)
 //	all pods pending    → Pending   (still scheduling)
-func deriveProfileStatus(pods []corev1.Pod) string {
-	if len(pods) == 0 {
-		return StatusNoPods
-	}
-
-	running, failed, pending := 0, 0, 0
-	for _, pod := range pods {
-		switch pod.Status.Phase {
-		case corev1.PodRunning:
-			running++
-		case corev1.PodFailed:
-			failed++
-		case corev1.PodPending:
-			pending++
-		}
-	}
-
+func deriveProfileStatus(total, running, failed, pending int) string {
 	switch {
 	case failed > 0:
 		return StatusDegraded
@@ -164,7 +156,7 @@ func deriveProfileStatus(pods []corev1.Pod) string {
 		return StatusPartial
 	case running > 0 && pending == 0:
 		return StatusActive
-	case pending > len(pods):
+	case pending > total:
 		return StatusPending
 	default:
 		return StatusError
