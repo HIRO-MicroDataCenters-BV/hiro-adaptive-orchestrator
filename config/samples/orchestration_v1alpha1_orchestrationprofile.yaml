@@ -14,6 +14,7 @@ spec:
     namespace: default
 
   placement:
+    # EnergyAware/BestFit/MostFit/LeastFit/Spread
     strategy: EnergyAware
     awareness:
       cpu: false
@@ -24,5 +25,6 @@ spec:
   rebalancing:
     enabled: true
     cooldownSeconds: 300
+    # EnergyThreshold/CPUThreshold/MemoryThreshold/NodeFailure/Scheduled
     triggerConditions:
       - "EnergyThreshold"
