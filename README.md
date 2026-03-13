@@ -1,4 +1,4 @@
 # hiro-adaptive-orchestrator
 
 ### Finalised Architecutre
-![Architecture](image.png)
+![Architecture](./K8S_%20adaptive_orchestrator_new-Integrate-EnergyAwareOrchestrator-1.gif)
