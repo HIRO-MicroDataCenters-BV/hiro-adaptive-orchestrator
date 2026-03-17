@@ -72,7 +72,7 @@ func (r *OrchestrationProfileReconciler) appToProfileMapFunc(
 	ctx context.Context,
 	obj client.Object,
 ) []reconcile.Request {
-	return r.profilesReferencingApp(ctx, obj.GetNamespace(), obj.GetName())
+	return r.profilesReferencingApp(ctx, obj.GetObjectKind().GroupVersionKind().Kind, obj.GetNamespace(), obj.GetName())
 }
 
 // -----------------------------------------------------------------------------
@@ -127,6 +127,7 @@ func (r *OrchestrationProfileReconciler) profilesReferencingNamespace(
 // Used by appToProfileMapFunc to map workload events to profiles that reference them.
 func (r *OrchestrationProfileReconciler) profilesReferencingApp(
 	ctx context.Context,
+	kind string,
 	namespace string,
 	appName string,
 ) []reconcile.Request {
@@ -135,6 +136,7 @@ func (r *OrchestrationProfileReconciler) profilesReferencingApp(
 	profileList := &orchestrationv1alpha1.OrchestrationProfileList{}
 	if err := r.List(ctx, profileList); err != nil {
 		logger.Error(err, "Failed to list OrchestrationProfiles during app event mapping",
+			"appKind", kind,
 			"app", appName,
 			"namespace", namespace,
 		)
@@ -155,6 +157,7 @@ func (r *OrchestrationProfileReconciler) profilesReferencingApp(
 
 	if len(requests) > 0 {
 		logger.Info("Workload event triggered profile reconciliation",
+			"workloadKind", kind,
 			"workload", appName,
 			"namespace", namespace,
 			"profilesEnqueued", len(requests),
