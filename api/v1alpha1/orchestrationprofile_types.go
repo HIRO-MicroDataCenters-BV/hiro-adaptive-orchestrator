@@ -94,6 +94,9 @@ type OrchestrationProfileStatus struct {
 	// status indicates the status of the orchestration profile (e.g., "Pending", "Active", "Error", "InUse").
 	Status string `json:"status,omitempty"`
 
+	// reason provides additional details when the status is not "Active" (e.g., error messages).
+	Reason string `json:"reason,omitempty"`
+
 	// placementStatus provides details about the current placement of the application.
 	// +optional
 	PlacementStatus PlacementStatus `json:"placementStatus,omitempty"`

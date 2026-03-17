@@ -137,6 +137,10 @@ spec:
                   strategy:
                     type: string
                 type: object
+              reason:
+                description: reason provides additional details when the status is
+                  not "Active" (e.g., error messages).
+                type: string
               rebalancingStatus:
                 description: rebalancingStatus provides details about the current
                   rebalancing state of the application.

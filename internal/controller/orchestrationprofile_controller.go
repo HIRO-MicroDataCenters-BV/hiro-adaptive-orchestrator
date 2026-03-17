@@ -117,6 +117,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 		)
 		return r.updateStatus(ctx, profile, func(s *orchestrationv1alpha1.OrchestrationProfileStatus) {
 			s.Status = StatusError
+			s.Reason = validationErrs.ToAggregate().Error()
 			s.PlacementStatus = orchestrationv1alpha1.PlacementStatus{
 				Strategy: profile.Spec.Placement.Strategy,
 			}
@@ -137,6 +138,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 		)
 		return r.updateStatus(ctx, profile, func(s *orchestrationv1alpha1.OrchestrationProfileStatus) {
 			s.Status = StatusError
+			s.Reason = fmt.Sprintf("error checking application existence: %v", err)
 			s.PlacementStatus = orchestrationv1alpha1.PlacementStatus{
 				Strategy: profile.Spec.Placement.Strategy,
 			}
@@ -173,6 +175,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 		)
 		return r.updateStatus(ctx, profile, func(s *orchestrationv1alpha1.OrchestrationProfileStatus) {
 			s.Status = StatusError
+			s.Reason = fmt.Sprintf("error finding pods for application: %v", err)
 		})
 	}
 
