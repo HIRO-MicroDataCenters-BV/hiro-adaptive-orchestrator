@@ -79,6 +79,7 @@ type PlacementStatus struct {
 	ObservedPods int         `json:"observedPods,omitempty"`
 	ReadyPods    int         `json:"readyPods,omitempty"`
 	PendingPods  int         `json:"pendingPods,omitempty"`
+	FailedPods   int         `json:"failedPods,omitempty"`
 	PodStatuses  []PodStatus `json:"podStatuses,omitempty"`
 }
 
@@ -92,6 +93,9 @@ type RebalancingStatus struct {
 type OrchestrationProfileStatus struct {
 	// status indicates the status of the orchestration profile (e.g., "Pending", "Active", "Error", "InUse").
 	Status string `json:"status,omitempty"`
+
+	// reason provides additional details when the status is not "Active" (e.g., error messages).
+	Reason string `json:"reason,omitempty"`
 
 	// placementStatus provides details about the current placement of the application.
 	// +optional

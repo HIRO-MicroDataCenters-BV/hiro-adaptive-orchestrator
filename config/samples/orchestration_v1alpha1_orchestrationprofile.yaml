@@ -10,11 +10,21 @@ spec:
   applicationRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: nginx
+    name: nginx-deployment
     namespace: default
 
   placement:
-    strategy: balanced
+    # Balanced/Packed/Spread
+    strategy: Spread
+    awareness:
+      cpu: false
+      memory: false
+      gpu: false
+      energy: true
 
   rebalancing:
     enabled: true
+    cooldownSeconds: 300
+    # EnergyThreshold/CPUThreshold/MemoryThreshold/NodeFailure/Scheduled
+    triggerConditions:
+      - "EnergyThreshold"
