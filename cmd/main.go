@@ -196,6 +196,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register field indexes for efficient lookups in mappers.
+	// 	This must be done before mgr.Start() so the cache is properly indexed at startup.
+	if err := controller.RegisterProfileIndexes(mgr); err != nil {
+		setupLog.Error(err, "unable to register profile indexes")
+		os.Exit(1)
+	}
+
 	setupLog.Info("Starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Failed to run manager")

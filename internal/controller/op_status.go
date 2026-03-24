@@ -63,7 +63,7 @@ func (r *OrchestrationProfileReconciler) updateStatus(
 }
 
 // -----------------------------------------------------------------------------
-// Placement Status Builder
+// Fetching Observed Pod Statuses
 // -----------------------------------------------------------------------------
 
 // fetchPodStatuses processes the list of pods and counts how many are ready, pending, or failed.
@@ -149,17 +149,20 @@ func buildPlacementStatus(
 //	mix pending+running → Partial  (partial rollout or mixed health)
 //	all pods pending    → Pending   (still scheduling)
 func deriveProfileStatus(total, running, failed, pending int) string {
+	if total == 0 {
+		return StatusNoPods
+	}
 	switch {
-	case failed > 0:
-		return StatusDegraded
-	case pending > 0 && running > 0:
-		return StatusPartial
-	case running > 0 && pending == 0:
-		return StatusActive
-	case pending > total:
-		return StatusPending
+	case failed > 0 && running == 0:
+		return StatusDegraded // all pods failed
+	case failed > 0 || (pending > 0 && running > 0):
+		return StatusPartial // mix of states
+	case pending > 0 && running == 0:
+		return StatusPending // all still scheduling
+	case running == total:
+		return StatusActive // all ready
 	default:
-		return StatusError
+		return StatusPartial // running but not all ready yet
 	}
 }
 

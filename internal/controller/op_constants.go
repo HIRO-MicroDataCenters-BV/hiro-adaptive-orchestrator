@@ -40,6 +40,10 @@ const (
 	StatusError = "Error"
 )
 
+// ProfileByAppRefIndex is the field index key for OrchestrationProfile applicationRef lookups
+// Index value: "<appNamespace>/<appName>" derived from spec.applicationRef
+const ProfileByAppRefIndex = ".spec.applicationRef.namespacedName"
+
 // -----------------------------------------------------------------------------
 // Validation Maps
 // -----------------------------------------------------------------------------

@@ -79,11 +79,11 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	err := r.Get(ctx, req.NamespacedName, profile)
-	if err != nil {
-		logger.Error(err, "failed to reconcile OrchestrationProfile")
-		return ctrl.Result{}, err
-	}
+	// err := r.Get(ctx, req.NamespacedName, profile)
+	// if err != nil {
+	// 	logger.Error(err, "failed to reconcile OrchestrationProfile")
+	// 	return ctrl.Result{}, err
+	// }
 
 	logger.Info("Reconciling OrchestrationProfile",
 		"name", profile.Name,
