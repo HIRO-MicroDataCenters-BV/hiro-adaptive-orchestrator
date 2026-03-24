@@ -14,7 +14,7 @@ spec:
     namespace: default
 
   placement:
-    # EnergyAware/BestFit/MostFit/LeastFit/Spread
+    # Balanced/Packed/Spread
     strategy: DummyStrategy # Invalid strategy to trigger error status
     awareness:
       cpu: true

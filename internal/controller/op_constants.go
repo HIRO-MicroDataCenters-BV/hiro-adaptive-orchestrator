@@ -46,11 +46,9 @@ const (
 
 // validStrategies defines the supported placement strategies.
 var validStrategies = map[string]bool{
-	"BestFit":     true,
-	"MostFit":     true,
-	"LeastFit":    true,
-	"EnergyAware": true,
-	"Spread":      true,
+	"Balanced": true,
+	"Packed":   true,
+	"Spread":   true,
 }
 
 // validTriggerConditions defines the supported rebalancing trigger conditions.

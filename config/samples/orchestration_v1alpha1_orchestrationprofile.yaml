@@ -14,8 +14,8 @@ spec:
     namespace: default
 
   placement:
-    # EnergyAware/BestFit/MostFit/LeastFit/Spread
-    strategy: EnergyAware
+    # Balanced/Packed/Spread
+    strategy: Spread
     awareness:
       cpu: false
       memory: false

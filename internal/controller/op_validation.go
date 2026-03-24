@@ -127,14 +127,14 @@ func validatePlacement(
 		))
 	}
 
-	// EnergyAware strategy requires energy awareness explicitly enabled.
-	if spec.Placement.Strategy == "EnergyAware" && !spec.Placement.Awareness.Energy {
-		errs = append(errs, field.Invalid(
-			placementPath.Child("awareness").Child("energy"),
-			false,
-			"energy awareness must be enabled when strategy is EnergyAware",
-		))
-	}
+	// // EnergyAware strategy requires energy awareness explicitly enabled.
+	// if spec.Placement.Strategy == "EnergyAware" && !spec.Placement.Awareness.Energy {
+	// 	errs = append(errs, field.Invalid(
+	// 		placementPath.Child("awareness").Child("energy"),
+	// 		false,
+	// 		"energy awareness must be enabled when strategy is EnergyAware",
+	// 	))
+	// }
 
 	return errs
 }
