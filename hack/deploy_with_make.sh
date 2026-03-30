@@ -119,3 +119,13 @@ kubectl get orchestrationprofiles
 echo ""
 echo "Describe the created OrchestrationProfile resource..."
 kubectl get orchestrationprofiles -o yaml
+
+echo ""
+# Print the line in orange color (ANSI escape code for orange is 33 for yellow, as true orange is not standard)
+echo -e "\033[33m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\033[0m"
+echo -e "\033[33m++++ Deployment and sample applied.                                ++++\033[0m"
+echo -e "\033[33m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\033[0m"
+
+echo ""
+echo "Generate Corresponding Helm charts"
+kubebuilder edit --plugins=helm/v2-alpha

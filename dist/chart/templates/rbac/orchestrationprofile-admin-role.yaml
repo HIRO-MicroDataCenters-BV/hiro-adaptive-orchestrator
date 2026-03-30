@@ -1,0 +1,24 @@
+{{- if .Values.rbacHelpers.enable }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+    labels:
+        app.kubernetes.io/managed-by: {{ .Release.Service }}
+        app.kubernetes.io/name: {{ include "hiro-adaptive-orchestrator.name" . }}
+        helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    name: {{ include "hiro-adaptive-orchestrator.resourceName" (dict "suffix" "orchestrationprofile-admin-role" "context" $) }}
+rules:
+    - apiGroups:
+        - orchestration.orchestration.hiro.io
+      resources:
+        - orchestrationprofiles
+      verbs:
+        - '*'
+    - apiGroups:
+        - orchestration.orchestration.hiro.io
+      resources:
+        - orchestrationprofiles/status
+      verbs:
+        - get
+{{- end }}

@@ -1,0 +1,548 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+    control-plane: controller-manager
+  name: hiro-adaptive-orchestrator-system
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: orchestrationprofiles.orchestration.hiro.io
+spec:
+  group: orchestration.hiro.io
+  names:
+    kind: OrchestrationProfile
+    listKind: OrchestrationProfileList
+    plural: orchestrationprofiles
+    shortNames:
+    - op
+    singular: orchestrationprofile
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: OrchestrationProfile is the Schema for the orchestrationprofiles
+          API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of OrchestrationProfile
+            properties:
+              applicationRef:
+                description: applicationRef references the application for which this
+                  orchestration profile is defined.
+                properties:
+                  apiVersion:
+                    type: string
+                  kind:
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                - namespace
+                type: object
+              placement:
+                description: placement defines the placement strategy and awareness
+                  for the application.
+                properties:
+                  awareness:
+                    description: Placement Awareness
+                    properties:
+                      cpu:
+                        type: boolean
+                      energy:
+                        type: boolean
+                      gpu:
+                        type: boolean
+                      memory:
+                        type: boolean
+                    type: object
+                  strategy:
+                    type: string
+                required:
+                - strategy
+                type: object
+              rebalancing:
+                description: rebalancing defines the rebalancing strategy for the
+                  application.
+                properties:
+                  cooldownSeconds:
+                    type: integer
+                  enabled:
+                    type: boolean
+                  triggerConditions:
+                    items:
+                      type: string
+                    type: array
+                required:
+                - enabled
+                type: object
+            required:
+            - applicationRef
+            - placement
+            type: object
+          status:
+            description: status defines the observed state of OrchestrationProfile
+            properties:
+              lastUpdatedTime:
+                format: date-time
+                type: string
+              placementStatus:
+                description: placementStatus provides details about the current placement
+                  of the application.
+                properties:
+                  failedPods:
+                    type: integer
+                  observedPods:
+                    type: integer
+                  pendingPods:
+                    type: integer
+                  podStatuses:
+                    items:
+                      description: Pod Status
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        nodeName:
+                          type: string
+                        reason:
+                          type: string
+                        status:
+                          type: string
+                      type: object
+                    type: array
+                  readyPods:
+                    type: integer
+                  strategy:
+                    type: string
+                type: object
+              reason:
+                description: reason provides additional details when the status is
+                  not "Active" (e.g., error messages).
+                type: string
+              rebalancingStatus:
+                description: rebalancingStatus provides details about the current
+                  rebalancing state of the application.
+                properties:
+                  lastTriggeredAt:
+                    type: string
+                  reason:
+                    type: string
+                type: object
+              status:
+                description: status indicates the status of the orchestration profile
+                  (e.g., "Pending", "Active", "Error", "InUse").
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+  name: hiro-adaptive-orchestrator-controller-manager
+  namespace: hiro-adaptive-orchestrator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+  name: hiro-adaptive-orchestrator-leader-election-role
+  namespace: hiro-adaptive-orchestrator-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hiro-adaptive-orchestrator-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - replicasets
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - orchestration.hiro.io
+  resources:
+  - orchestrationprofiles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - orchestration.hiro.io
+  resources:
+  - orchestrationprofiles/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - orchestration.hiro.io
+  resources:
+  - orchestrationprofiles/status
+  verbs:
+  - get
+  - patch
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hiro-adaptive-orchestrator-metrics-auth-role
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hiro-adaptive-orchestrator-metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+  name: hiro-adaptive-orchestrator-orchestrationprofile-admin-role
+rules:
+- apiGroups:
+  - orchestration.orchestration.hiro.io
+  resources:
+  - orchestrationprofiles
+  verbs:
+  - '*'
+- apiGroups:
+  - orchestration.orchestration.hiro.io
+  resources:
+  - orchestrationprofiles/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+  name: hiro-adaptive-orchestrator-orchestrationprofile-editor-role
+rules:
+- apiGroups:
+  - orchestration.orchestration.hiro.io
+  resources:
+  - orchestrationprofiles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - orchestration.orchestration.hiro.io
+  resources:
+  - orchestrationprofiles/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+  name: hiro-adaptive-orchestrator-orchestrationprofile-viewer-role
+rules:
+- apiGroups:
+  - orchestration.orchestration.hiro.io
+  resources:
+  - orchestrationprofiles
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - orchestration.orchestration.hiro.io
+  resources:
+  - orchestrationprofiles/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+  name: hiro-adaptive-orchestrator-leader-election-rolebinding
+  namespace: hiro-adaptive-orchestrator-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hiro-adaptive-orchestrator-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: hiro-adaptive-orchestrator-controller-manager
+  namespace: hiro-adaptive-orchestrator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+  name: hiro-adaptive-orchestrator-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hiro-adaptive-orchestrator-manager-role
+subjects:
+- kind: ServiceAccount
+  name: hiro-adaptive-orchestrator-controller-manager
+  namespace: hiro-adaptive-orchestrator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hiro-adaptive-orchestrator-metrics-auth-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hiro-adaptive-orchestrator-metrics-auth-role
+subjects:
+- kind: ServiceAccount
+  name: hiro-adaptive-orchestrator-controller-manager
+  namespace: hiro-adaptive-orchestrator-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+    control-plane: controller-manager
+  name: hiro-adaptive-orchestrator-controller-manager-metrics-service
+  namespace: hiro-adaptive-orchestrator-system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  - name: placement-api
+    port: 8090
+    protocol: TCP
+    targetPort: 8090
+  selector:
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+    control-plane: controller-manager
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: placement-server
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+    control-plane: controller-manager
+  name: hiro-adaptive-orchestrator-controller-manager-placement-service
+  namespace: hiro-adaptive-orchestrator-system
+spec:
+  ports:
+  - name: placement-api
+    port: 8090
+    protocol: TCP
+    targetPort: 8090
+  selector:
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+    control-plane: controller-manager
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+    control-plane: controller-manager
+  name: hiro-adaptive-orchestrator-controller-manager
+  namespace: hiro-adaptive-orchestrator-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hiro-adaptive-orchestrator
+      control-plane: controller-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        app.kubernetes.io/name: hiro-adaptive-orchestrator
+        control-plane: controller-manager
+    spec:
+      containers:
+      - args:
+        - --metrics-bind-address=:8443
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        command:
+        - /manager
+        env:
+        - name: DECISION_AGENT_URL
+          value: http://decision-agent:8080
+        - name: PLACEMENT_SERVER_PORT
+          value: :8090
+        image: controller:latest
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: manager
+        ports:
+        - containerPort: 8090
+          name: placement-srv
+          protocol: TCP
+        - containerPort: 8081
+          name: health-probe
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts: []
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: hiro-adaptive-orchestrator-controller-manager
+      terminationGracePeriodSeconds: 10
+      volumes: []

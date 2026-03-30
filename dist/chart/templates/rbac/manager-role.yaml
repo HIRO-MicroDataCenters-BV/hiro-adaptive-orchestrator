@@ -1,0 +1,57 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+    name: {{ include "hiro-adaptive-orchestrator.resourceName" (dict "suffix" "manager-role" "context" $) }}
+rules:
+    - apiGroups:
+        - ""
+      resources:
+        - pods
+      verbs:
+        - get
+        - list
+        - watch
+    - apiGroups:
+        - apps
+      resources:
+        - deployments
+        - replicasets
+        - statefulsets
+      verbs:
+        - get
+        - list
+        - watch
+    - apiGroups:
+        - batch
+      resources:
+        - jobs
+      verbs:
+        - get
+        - list
+        - watch
+    - apiGroups:
+        - orchestration.hiro.io
+      resources:
+        - orchestrationprofiles
+      verbs:
+        - create
+        - delete
+        - get
+        - list
+        - patch
+        - update
+        - watch
+    - apiGroups:
+        - orchestration.hiro.io
+      resources:
+        - orchestrationprofiles/finalizers
+      verbs:
+        - update
+    - apiGroups:
+        - orchestration.hiro.io
+      resources:
+        - orchestrationprofiles/status
+      verbs:
+        - get
+        - patch
+        - update
