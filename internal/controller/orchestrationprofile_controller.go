@@ -30,12 +30,15 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/decision"
 )
 
 // OrchestrationProfileReconciler reconciles a OrchestrationProfile object
 type OrchestrationProfileReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme         *runtime.Scheme
+	ContextBuilder *decision.DecisionContextBuilder
+	DecisionClient *decision.DecisionClient
 }
 
 // Never Ever delete this comments as they are used by kubebuilder to generate RBAC permissions for the controller.

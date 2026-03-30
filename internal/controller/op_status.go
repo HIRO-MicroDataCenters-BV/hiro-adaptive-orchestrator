@@ -77,6 +77,7 @@ func fetchPodStatuses(
 			Id:        string(pod.UID),
 			Name:      pod.Name,
 			Namespace: pod.Namespace,
+			NodeName:  pod.Spec.NodeName,
 			Status:    string(pod.Status.Phase),
 			Reason:    pod.Status.Reason,
 		}

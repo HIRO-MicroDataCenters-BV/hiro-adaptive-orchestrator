@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
 )
 
 // validateProfile performs deep field-level validation of the OrchestrationProfile spec.
@@ -84,7 +85,7 @@ func validateApplicationRef(
 		errs = append(errs, field.NotSupported(
 			appRefPath.Child("kind"),
 			appRef.Kind,
-			keysOf(supportedAppKinds),
+			utils.KeysOf(supportedAppKinds),
 		))
 	}
 
@@ -123,7 +124,7 @@ func validatePlacement(
 		errs = append(errs, field.NotSupported(
 			placementPath.Child("strategy"),
 			spec.Placement.Strategy,
-			keysOf(validStrategies),
+			utils.KeysOf(validStrategies),
 		))
 	}
 
@@ -165,7 +166,7 @@ func validateRebalancing(
 			errs = append(errs, field.NotSupported(
 				rebalancingPath.Child("triggerConditions").Index(i),
 				condition,
-				keysOf(validTriggerConditions),
+				utils.KeysOf(validTriggerConditions),
 			))
 		}
 	}

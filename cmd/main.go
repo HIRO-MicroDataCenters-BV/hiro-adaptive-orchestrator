@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -37,6 +38,7 @@ import (
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/controller"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/decision"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -178,6 +180,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	// -------------------------------------------------------------------------
+	// Register ProfileByAppRefIndex BEFORE SetupWithManager and mgr.Start().
+	//
+	// This field index enables O(1) profile lookups in:
+	//   - internal/controller/op_watchers.go  (pod/workload → profile mapping)
+	//   - internal/decision/builder.go        (pod → governing profile lookup)
+	//
+	// IMPORTANT: must be registered before the cache starts (before mgr.Start).
+	// Registering after cache start will panic.
+	// -------------------------------------------------------------------------
+	if err := controller.RegisterProfileIndexes(mgr); err != nil {
+		setupLog.Error(err, "unable to register profile indexes")
+		os.Exit(1)
+	}
+
 	if err := (&controller.OrchestrationProfileReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -186,6 +203,54 @@ func main() {
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
+
+	// -------------------------------------------------------------------------
+	// Decision Layer — PlacementServer
+	//
+	// HTTP server that receives PlacementContext from the kube-scheduler
+	// custom scoring plugin and returns NodeScores.
+	//
+	// Independent from the reconciler — runs as a separate goroutine alongside
+	// the controller manager. Shares the same informer cache (mgr.GetClient()).
+	//
+	// Environment variables:
+	//   DECISION_AGENT_URL     — base URL of the External AI Agent (required)
+	//                            e.g. "http://ai-agent.hiro-system.svc:8080"
+	//   PLACEMENT_SERVER_PORT  — listening address (optional, default ":8090")
+	//                            e.g. ":8090"
+	// -------------------------------------------------------------------------
+	decisionAgentURL := os.Getenv("DECISION_AGENT_URL")
+	if decisionAgentURL == "" {
+		setupLog.Error(nil, "DECISION_AGENT_URL environment variable is required")
+		os.Exit(1)
+	}
+
+	contextBuilder := decision.NewDecisionContextBuilder(
+		mgr.GetClient(),
+		controller.ProfileByAppRefIndex,
+	)
+
+	decisionClient := decision.NewDecisionClient(
+		decisionAgentURL,
+		8*time.Second, // must be < PlacementServer requestTimeout (10s)
+	)
+
+	placementServer := decision.NewPlacementServer(
+		contextBuilder,
+		decisionClient,
+		os.Getenv("PLACEMENT_SERVER_PORT"), // defaults to ":8090" if empty
+	)
+
+	// Start PlacementServer alongside the manager.
+	// Shuts down gracefully when the manager context is cancelled.
+	ctx := ctrl.SetupSignalHandler()
+	go func() {
+		setupLog.Info("starting placement decision server", "addr", placementServer.Addr)
+		if err := placementServer.Start(ctx); err != nil {
+			setupLog.Error(err, "placement decision server stopped unexpectedly")
+			os.Exit(1)
+		}
+	}()
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")
@@ -196,15 +261,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Register field indexes for efficient lookups in mappers.
-	// 	This must be done before mgr.Start() so the cache is properly indexed at startup.
-	if err := controller.RegisterProfileIndexes(mgr); err != nil {
-		setupLog.Error(err, "unable to register profile indexes")
-		os.Exit(1)
-	}
-
+	// -------------------------------------------------------------------------
+	// Start the manager — blocks until context cancelled.
+	// Starts: informer cache, reconciler, leader election, health probes.
+	// -------------------------------------------------------------------------
 	setupLog.Info("Starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}

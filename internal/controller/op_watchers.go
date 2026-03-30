@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
 )
 
 // -----------------------------------------------------------------------------
@@ -144,37 +144,7 @@ func (r *OrchestrationProfileReconciler) resolveAppFromPod(
 	ctx context.Context,
 	pod *corev1.Pod,
 ) (appName, appNamespace string) {
-	logger := logf.FromContext(ctx)
-
-	for _, ref := range pod.OwnerReferences {
-		switch ref.Kind {
-
-		case "ReplicaSet":
-			// Fetch the RS to check if a Deployment owns it above
-			rs := &appsv1.ReplicaSet{}
-			if err := r.Get(ctx, types.NamespacedName{
-				Name: ref.Name, Namespace: pod.Namespace,
-			}, rs); err != nil {
-				// Transient error — fall back to RS name itself
-				logger.V(1).Info("could not fetch owner ReplicaSet, using RS name",
-					"rs", ref.Name, "pod", pod.Name, "err", err)
-				return ref.Name, pod.Namespace
-			}
-			for _, rsOwner := range rs.OwnerReferences {
-				if rsOwner.Kind == "Deployment" {
-					return rsOwner.Name, pod.Namespace // Pod belongs to a Deployment
-				}
-			}
-			return rs.Name, pod.Namespace // standalone ReplicaSet
-
-		case "StatefulSet":
-			return ref.Name, pod.Namespace
-
-		case "Job":
-			return ref.Name, pod.Namespace
-		}
-	}
-	return "", ""
+	return utils.ResolveAppFromPod(ctx, r.Client, pod)
 }
 
 // =============================================================================

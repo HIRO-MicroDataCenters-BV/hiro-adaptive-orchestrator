@@ -26,6 +26,9 @@ export KUBECONFIG=${2:-~/.kube/config}
 export IMG=${DOCKER_REGISTRY}/${HIRO_OPERATOR_IMAGE}
 export CR_PAT=$GITHUB_PAT_TOKEN
 
+export DECISION_AGENT_URL="http://your-decision-agent-url"
+
+
 echo "========================================"
 echo "HIRO Adaptive Orchestrator Deployment"
 echo "========================================"
