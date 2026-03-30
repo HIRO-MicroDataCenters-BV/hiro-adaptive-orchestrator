@@ -504,7 +504,7 @@ spec:
           value: http://decision-agent:8080
         - name: PLACEMENT_SERVER_PORT
           value: :8090
-        image: controller:latest
+        image: ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/hiro-adaptive-orchestrator-controller:latest
         livenessProbe:
           httpGet:
             path: /healthz
