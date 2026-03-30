@@ -13,10 +13,6 @@ spec:
     port: 8443
     protocol: TCP
     targetPort: 8443
-  - name: placement-api
-    port: 8090
-    protocol: TCP
-    targetPort: 8090
   selector:
     control-plane: controller-manager
     app.kubernetes.io/name: hiro-adaptive-orchestrator
