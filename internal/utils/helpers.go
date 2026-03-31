@@ -86,3 +86,16 @@ func ResolveAppFromPod(
 	}
 	return "", ""
 }
+
+// NodeNames extracts the names of a list of nodes as a slice.
+func NodeNames(nodes []*corev1.Node) []string {
+	if len(nodes) == 0 {
+		return nil
+	}
+
+	names := make([]string, len(nodes)) // Pre-allocate exact size
+	for i, node := range nodes {
+		names[i] = node.Name
+	}
+	return names
+}

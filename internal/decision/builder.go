@@ -90,12 +90,13 @@ func (b *DecisionContextBuilder) Build(
 
 	pod := placementCtx.Pod
 	nodes := placementCtx.CandidateNodes
+	nodeNames := utils.NodeNames(nodes)
 
 	logger.Info("building decision request",
 		"requestId", requestID,
-		"pod", placementCtx.Pod.Name,
-		"namespace", placementCtx.Pod.Namespace,
-		"candidateNodes", len(placementCtx.CandidateNodes),
+		"pod", pod.Name,
+		"namespace", pod.Namespace,
+		"candidateNodes", nodeNames,
 	)
 
 	// -------------------------------------------------------------------------
@@ -159,7 +160,7 @@ func (b *DecisionContextBuilder) Build(
 		"pod", pod.Name,
 		"profile", profile.Name,
 		"strategy", aoProfile.Strategy,
-		"candidateNodes", len(req.CandidateNodes),
+		"candidateNodes", nodeNames,
 		"currentPlacementNode", aoProfile.CurrentPlacement.NodeName,
 		"energyEnabled", profile.Spec.Placement.Awareness.Energy,
 		"eaoDataAttached", eaoProfile != nil,

@@ -50,6 +50,10 @@ make install
 echo ""
 echo "Building operator image..."
 make build
+
+echo ""
+echo "Generate Corresponding Helm charts"
+kubebuilder edit --plugins=helm/v2-alpha
     
 echo ""
 echo "Verifying deployment..."
@@ -125,7 +129,3 @@ echo ""
 echo -e "\033[33m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\033[0m"
 echo -e "\033[33m++++ Deployment and sample applied.                                ++++\033[0m"
 echo -e "\033[33m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\033[0m"
-
-echo ""
-echo "Generate Corresponding Helm charts"
-kubebuilder edit --plugins=helm/v2-alpha
