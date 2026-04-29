@@ -219,10 +219,10 @@ func main() {
 	//   DECISION_AGENT_PATH     — HTTP path on the AI agent (optional)
 	//                             default: "/api/v1/agent/placement/decision"
 	//   PLACEMENT_SERVER_PORT   — listening address (optional, default ":8090")
-	//   PLACEMENT_DECISION_PATH — HTTP path for placement decisions (optional)
-	//                             default: "/api/v1/placement/decision"
-	//   PLACEMENT_HEALTH_PATH   — HTTP path for health probes (optional)
-	//                             default: "/healthz"
+	//   PLACEMENT_SERVER_PATH        — HTTP path for placement decisions (optional)
+	//                                  default: "/api/v1/placement/decision"
+	//   PLACEMENT_SERVER_HEALTH_PATH — HTTP path for health probes (optional)
+	//                                  default: "/healthz"
 	//   EAO_GROUP               — API group of EnergyAwareOrchestration CRD
 	//                             (optional, default "eas.hiro.io")
 	//   EAO_VERSION             — API version of EnergyAwareOrchestration CRD
@@ -241,14 +241,19 @@ func main() {
 		decisionAgentPath = "/api/v1/agent/placement/decision"
 	}
 
-	placementDecisionPath := os.Getenv("PLACEMENT_DECISION_PATH")
-	if placementDecisionPath == "" {
-		placementDecisionPath = "/api/v1/placement/decision"
+	placementServerPort := os.Getenv("PLACEMENT_SERVER_PORT")
+	if placementServerPort == "" {
+		placementServerPort = ":8090"
 	}
 
-	placementHealthPath := os.Getenv("PLACEMENT_HEALTH_PATH")
-	if placementHealthPath == "" {
-		placementHealthPath = "/healthz"
+	placementServerPath := os.Getenv("PLACEMENT_SERVER_PATH")
+	if placementServerPath == "" {
+		placementServerPath = "/api/v1/placement/decision"
+	}
+
+	placementServerHealthPath := os.Getenv("PLACEMENT_SERVER_HEALTH_PATH")
+	if placementServerHealthPath == "" {
+		placementServerHealthPath = "/healthz"
 	}
 
 	eaoGroup := os.Getenv("EAO_GROUP")
@@ -271,8 +276,8 @@ func main() {
 	setupLog.Info("decision layer configured",
 		"agentURL", decisionAgentURL,
 		"agentPath", decisionAgentPath,
-		"placementDecisionPath", placementDecisionPath,
-		"placementHealthPath", placementHealthPath,
+		"placementDecisionPath", placementServerPath,
+		"placementHealthPath", placementServerHealthPath,
 		"eaoGroup", eaoGVK.Group,
 		"eaoVersion", eaoGVK.Version,
 		"eaoKind", eaoGVK.Kind,
@@ -297,9 +302,9 @@ func main() {
 	placementServer := decision.NewPlacementServer(
 		contextBuilder,
 		decisionClient,
-		os.Getenv("PLACEMENT_SERVER_PORT"), // defaults to ":8090" if empty
-		placementDecisionPath,
-		placementHealthPath,
+		placementServerPort,
+		placementServerPath,
+		placementServerHealthPath,
 		10*time.Second, // requestTimeout: must be > DecisionClient timeout
 	)
 

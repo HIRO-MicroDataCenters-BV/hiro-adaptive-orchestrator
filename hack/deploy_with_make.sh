@@ -50,6 +50,12 @@ export EAO_GROUP="${EAO_GROUP:-eas.hiro.io}"
 export EAO_VERSION="${EAO_VERSION:-v1}"
 export EAO_KIND="${EAO_KIND:-EnergyAwareOrchestration}"
 
+// PlacementServer configuration (override if needed)
+export PLACEMENT_SERVER_PORT=${PLACEMENT_SERVER_PORT:-:8090}
+export DECISION_AGENT_PATH=${DECISION_AGENT_PATH:-/api/v1/agent/placement/decision}
+export PLACEMENT_SERVER_PATH=${PLACEMENT_SERVER_PATH:-/api/v1/placement/decision}
+export PLACEMENT_SERVER_HEALTH_PATH=${PLACEMENT_SERVER_HEALTH_PATH:-/healthz}
+
 
 echo "========================================"
 echo "HIRO Adaptive Orchestrator Deployment"
@@ -145,9 +151,6 @@ kubectl patch serviceaccount $SERVICE_ACCOUNT_NAME \
   -p '{"imagePullSecrets": [{"name": "ghcr-secret"}]}' \
   --namespace=$NAMESPACE
 
-DECISION_AGENT_PATH=${DECISION_AGENT_PATH:-/api/v1/agent/placement/decision}
-PLACEMENT_DECISION_PATH=${PLACEMENT_DECISION_PATH:-/api/v1/placement/decision}
-PLACEMENT_HEALTH_PATH=${PLACEMENT_HEALTH_PATH:-/healthz}
 
 echo ""
 echo "Injecting environment variables into operator deployment..."
@@ -155,9 +158,9 @@ kubectl set env deployment/hiro-adaptive-orchestrator-controller-manager \
   -n "$NAMESPACE" \
   DECISION_AGENT_URL="$DECISION_AGENT_URL" \
   DECISION_AGENT_PATH="$DECISION_AGENT_PATH" \
-  PLACEMENT_SERVER_PORT=":8090" \
-  PLACEMENT_DECISION_PATH="$PLACEMENT_DECISION_PATH" \
-  PLACEMENT_HEALTH_PATH="$PLACEMENT_HEALTH_PATH" \
+  PLACEMENT_SERVER_PORT="$PLACEMENT_SERVER_PORT" \
+  PLACEMENT_SERVER_PATH="$PLACEMENT_SERVER_PATH" \
+  PLACEMENT_SERVER_HEALTH_PATH="$PLACEMENT_SERVER_HEALTH_PATH" \
   EAO_GROUP="$EAO_GROUP" \
   EAO_VERSION="$EAO_VERSION" \
   EAO_KIND="$EAO_KIND"

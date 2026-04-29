@@ -517,9 +517,9 @@ spec:
           value: /api/v1/agent/placement/decision
         - name: PLACEMENT_SERVER_PORT
           value: :8090
-        - name: PLACEMENT_DECISION_PATH
+        - name: PLACEMENT_SERVER_PATH
           value: /api/v1/placement/decision
-        - name: PLACEMENT_HEALTH_PATH
+        - name: PLACEMENT_SERVER_HEALTH_PATH
           value: /healthz
         - name: EAO_GROUP
           value: eas.hiro.io
