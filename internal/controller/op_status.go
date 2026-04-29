@@ -45,21 +45,65 @@ func (r *OrchestrationProfileReconciler) updateStatus(
 ) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 
+	previousStatus := profile.Status.Status
+
 	mutate(&profile.Status)
 	profile.Status.LastUpdatedTime = metav1.Now()
 
+	// Emit an event whenever the status transitions to a new value.
+	if profile.Status.Status != previousStatus {
+		r.emitStatusTransitionEvent(profile)
+	}
+
 	if err := r.Status().Update(ctx, profile); err != nil {
 		if apierrors.IsConflict(err) {
-			// Concurrent writer (e.g. rebalancer) updated the status.
-			// Requeue so we re-read the latest version and retry.
-			logger.Info("status update conflict, requeuing", "name", profile.Name)
+			logger.Info("Status update conflict, requeuing", "name", profile.Name)
 			return ctrl.Result{Requeue: true}, nil
 		}
-		logger.Error(err, "failed to update OrchestrationProfile status", "name", profile.Name)
+		logger.Error(err, "Failed to update OrchestrationProfile status", "name", profile.Name)
 		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// emitStatusTransitionEvent fires a Kubernetes event describing the new status.
+// Called only when the status value actually changes to avoid event spam.
+func (r *OrchestrationProfileReconciler) emitStatusTransitionEvent(
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+) {
+	ps := profile.Status.PlacementStatus
+	switch profile.Status.Status {
+	case StatusActive:
+		r.Recorder.Eventf(profile, corev1.EventTypeNormal, EventReasonPlacementActive,
+			"All %d pod(s) are running and ready (%s strategy)",
+			ps.ReadyPods, ps.Strategy,
+		)
+	case StatusPending:
+		r.Recorder.Eventf(profile, corev1.EventTypeNormal, EventReasonPlacementPending,
+			"%d pod(s) are still being scheduled (%s strategy)",
+			ps.PendingPods, ps.Strategy,
+		)
+	case StatusNoPods:
+		r.Recorder.Eventf(profile, corev1.EventTypeNormal, EventReasonApplicationNoPods,
+			"Application has no pods yet (%s strategy)",
+			ps.Strategy,
+		)
+	case StatusPartial:
+		r.Recorder.Eventf(profile, corev1.EventTypeWarning, EventReasonPlacementPartial,
+			"%d/%d pod(s) ready, %d pending, %d failed (%s strategy)",
+			ps.ReadyPods, ps.ObservedPods, ps.PendingPods, ps.FailedPods, ps.Strategy,
+		)
+	case StatusDegraded:
+		r.Recorder.Eventf(profile, corev1.EventTypeWarning, EventReasonPlacementDegraded,
+			"%d pod(s) failed out of %d observed (%s strategy)",
+			ps.FailedPods, ps.ObservedPods, ps.Strategy,
+		)
+	case StatusError:
+		r.Recorder.Eventf(profile, corev1.EventTypeWarning, EventReasonPlacementError,
+			"Profile entered error state: %s", profile.Status.Reason,
+		)
+	}
 }
 
 // -----------------------------------------------------------------------------
