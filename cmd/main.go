@@ -22,6 +22,8 @@ import (
 	"os"
 	"time"
 
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -217,7 +219,12 @@ func main() {
 	//   DECISION_AGENT_URL     — base URL of the External AI Agent (required)
 	//                            e.g. "http://ai-agent.hiro-system.svc:8080"
 	//   PLACEMENT_SERVER_PORT  — listening address (optional, default ":8090")
-	//                            e.g. ":8090"
+	//   EAO_GROUP              — API group of EnergyAwareOrchestration CRD
+	//                            (optional, default "eas.hiro.io")
+	//   EAO_VERSION            — API version of EnergyAwareOrchestration CRD
+	//                            (optional, default "v1")
+	//   EAO_KIND               — Kind of EnergyAwareOrchestration CRD
+	//                            (optional, default "EnergyAwareOrchestration")
 	// -------------------------------------------------------------------------
 	decisionAgentURL := os.Getenv("DECISION_AGENT_URL")
 	if decisionAgentURL == "" {
@@ -225,9 +232,33 @@ func main() {
 		os.Exit(1)
 	}
 
+	eaoGroup := os.Getenv("EAO_GROUP")
+	if eaoGroup == "" {
+		eaoGroup = "eas.hiro.io"
+	}
+	eaoVersion := os.Getenv("EAO_VERSION")
+	if eaoVersion == "" {
+		eaoVersion = "v1"
+	}
+	eaoKind := os.Getenv("EAO_KIND")
+	if eaoKind == "" {
+		eaoKind = "EnergyAwareOrchestration"
+	}
+	eaoGVK := schema.GroupVersionKind{
+		Group:   eaoGroup,
+		Version: eaoVersion,
+		Kind:    eaoKind + "List",
+	}
+	setupLog.Info("EAO GVK configured",
+		"group", eaoGVK.Group,
+		"version", eaoGVK.Version,
+		"kind", eaoGVK.Kind,
+	)
+
 	contextBuilder := decision.NewDecisionContextBuilder(
 		mgr.GetClient(),
 		controller.ProfileByAppRefIndex,
+		eaoGVK,
 	)
 
 	decisionClient := decision.NewDecisionClient(

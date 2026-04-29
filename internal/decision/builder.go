@@ -22,6 +22,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -56,18 +58,26 @@ type DecisionContextBuilder struct {
 	// profileIndexField is the field index key used to look up profiles by app.
 	// Passed in so the builder does not depend on the controller package directly.
 	profileIndexField string
+
+	// eaoGVK is the GroupVersionKind used to list EnergyAwareOrchestration resources.
+	// Configurable via EAO_GROUP / EAO_VERSION / EAO_KIND environment variables.
+	eaoGVK schema.GroupVersionKind
 }
 
 // NewDecisionContextBuilder creates a new builder.
 //
 // client:             the same client.Client the reconciler uses (informer cache)
 // profileIndexField:  the ProfileByAppRefIndex constant from op_index.go
-//
-//	pass as: controller.ProfileByAppRefIndex
-func NewDecisionContextBuilder(c client.Client, profileIndexField string) *DecisionContextBuilder {
+// eaoGVK:             GVK for EnergyAwareOrchestration list queries
+func NewDecisionContextBuilder(
+	c client.Client,
+	profileIndexField string,
+	eaoGVK schema.GroupVersionKind,
+) *DecisionContextBuilder {
 	return &DecisionContextBuilder{
 		client:            c,
 		profileIndexField: profileIndexField,
+		eaoGVK:            eaoGVK,
 	}
 }
 
@@ -133,7 +143,7 @@ func (b *DecisionContextBuilder) Build(
 	// -------------------------------------------------------------------------
 	var eaoProfile *EAOProfileContext
 	if profile.Spec.Placement.Awareness.Energy {
-		eaoProfile, err = b.fetchEAOProfile(ctx, placementCtx.CandidateNodes)
+		eaoProfile, err = b.fetchEAOProfile(ctx, pod)
 		if err != nil {
 			// Log and continue — energy context is optional
 			logger.Info("EAO profile unavailable, proceeding without energy data",
@@ -186,7 +196,7 @@ func (b *DecisionContextBuilder) findProfileForPod(
 	pod *corev1.Pod,
 ) (*orchestrationv1alpha1.OrchestrationProfile, error) {
 	logger := logf.FromContext(ctx)
-	appName, appNamespace := utils.ResolveAppFromPod(ctx, b.client, pod)
+	appName, appNamespace, _ := utils.ResolveAppFromPod(ctx, b.client, pod)
 	if appName == "" {
 		// Pod has no recognized workload owner — not governed by any profile
 		logger.V(1).Info("pod has no recognised workload owner, skipping",
@@ -261,41 +271,137 @@ func buildCurrentPlacement(
 // EAOProfileContext fetcher
 // =============================================================================
 
-// fetchEAOProfile fetches per-node energy metrics from the Energy Aware
-// Orchestrator for the given candidate nodes.
+// fetchEAOProfile finds the EnergyAwareOrchestration CRD that governs the
+// pod's application and maps its spec/status into an EAOProfileContext.
 //
 // Only called when profile.Awareness.Energy == true.
-//
-// Current implementation: stub — returns nil.
-// TODO: fetch from the EAO CRD (EnergyAwareProfile or equivalent) once
-// the E.A.O CRD types are available in this module.
+// Returns nil (no error) when no matching EAO is found.
 func (b *DecisionContextBuilder) fetchEAOProfile(
 	ctx context.Context,
-	candidateNodes []*corev1.Node,
+	pod *corev1.Pod,
 ) (*EAOProfileContext, error) {
 	logger := logf.FromContext(ctx)
 
-	// Build the list of node names we need energy data for
-	nodeNames := make([]string, 0, len(candidateNodes))
-	for _, n := range candidateNodes {
-		nodeNames = append(nodeNames, n.Name)
-	}
-
-	logger.Info("fetching EAO energy data for candidate nodes",
-		"nodes", nodeNames,
+	logger.Info("fetching EAO profile for pod",
+		"pod", pod.Name,
+		"namespace", pod.Namespace,
 	)
 
-	// TODO: replace this stub with a real EAO CRD or HTTP fetch.
-	// Example when EAO CRD is available:
-	//
-	//   eaoList := &eaov1alpha1.EnergyAwareProfileList{}
-	//   if err := b.client.List(ctx, eaoList); err != nil {
-	//       return nil, fmt.Errorf("listing EAO profiles: %w", err)
-	//   }
-	//   nodeEnergyData := extractNodeEnergyData(eaoList, nodeNames)
-	//   return &EAOProfileContext{NodeEnergyData: nodeEnergyData}, nil
+	eao, err := b.fetchEAOForPod(ctx, pod)
+	if err != nil {
+		return nil, err
+	}
+	if eao == nil {
+		return nil, nil
+	}
 
-	return nil, nil // stub — no EAO data yet
+	return mapEAOToProfileContext(eao), nil
+}
+
+// fetchEAOForPod resolves the pod's root application via ResolveAppFromPod,
+// then lists all EnergyAwareOrchestration CRDs and returns the one whose
+// spec.applicationRef matches that application.
+//
+// Returns nil (no error) when no matching EAO exists.
+//
+// +kubebuilder:rbac:groups=eas.hiro.io,resources=energyawareorchestrations,verbs=get;list;watch
+func (b *DecisionContextBuilder) fetchEAOForPod(
+	ctx context.Context,
+	pod *corev1.Pod,
+) (*unstructured.Unstructured, error) {
+	logger := logf.FromContext(ctx)
+
+	// Step 1: walk OwnerReferences to find the top-level workload name, namespace, and kind.
+	appName, appNamespace, appKind := utils.ResolveAppFromPod(ctx, b.client, pod)
+	if appName == "" {
+		logger.V(1).Info("pod has no recognised workload owner, skipping EAO lookup",
+			"pod", pod.Name,
+			"namespace", pod.Namespace,
+		)
+		return nil, nil
+	}
+
+	// Step 2: list all EnergyAwareOrchestration resources across all namespaces.
+	eaoList := &unstructured.UnstructuredList{}
+	eaoList.SetGroupVersionKind(b.eaoGVK)
+	if err := b.client.List(ctx, eaoList); err != nil {
+		return nil, fmt.Errorf("listing EnergyAwareOrchestration resources: %w", err)
+	}
+
+	// Step 3: find the EAO whose spec.applicationRef matches the resolved app
+	// by name, namespace, and kind.
+	for i := range eaoList.Items {
+		eao := &eaoList.Items[i]
+
+		refName, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "name")
+		refKind, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "kind")
+		refNamespace, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "namespace")
+		if refNamespace == "" {
+			refNamespace = eao.GetNamespace()
+		}
+
+		if refName == appName && refNamespace == appNamespace && refKind == appKind {
+			logger.V(1).Info("found matching EAO for pod",
+				"eao", eao.GetName(),
+				"eaoNamespace", eao.GetNamespace(),
+				"appName", appName,
+				"appNamespace", appNamespace,
+				"appKind", appKind,
+			)
+			return eao, nil
+		}
+	}
+
+	logger.V(1).Info("no EAO found for pod application",
+		"pod", pod.Name,
+		"appName", appName,
+		"appNamespace", appNamespace,
+		"appKind", appKind,
+	)
+	return nil, nil
+}
+
+// mapEAOToProfileContext maps the relevant spec and status fields of an
+// EnergyAwareOrchestration resource into an EAOProfileContext.
+func mapEAOToProfileContext(eao *unstructured.Unstructured) *EAOProfileContext {
+	ctx := &EAOProfileContext{}
+
+	// --- spec fields ---
+	ctx.Priority, _, _ = unstructured.NestedString(eao.Object, "spec", "priority")
+
+	if watts, found, _ := unstructured.NestedInt64(eao.Object, "spec", "energyConsumption"); found {
+		ctx.EnergyConsumptionWatts = watts
+	}
+
+	// --- status.decision ---
+	action, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "action")
+	reason, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "reason")
+	nextEval, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "nextEvaluationTime")
+	if action != "" {
+		ctx.Decision = &EAODecision{
+			Action:             action,
+			Reason:             reason,
+			NextEvaluationTime: nextEval,
+		}
+	}
+
+	// --- status.energyMetrics ---
+	requiredWatts, foundRequired, _ := unstructured.NestedFloat64(eao.Object, "status", "energyMetrics", "requiredWatts")
+	sufficient, foundSufficient, _ := unstructured.NestedBool(eao.Object, "status", "energyMetrics", "sufficient")
+	if foundRequired || foundSufficient {
+		ctx.EnergyMetrics = &EAOEnergyMetrics{
+			RequiredWatts: requiredWatts,
+			Sufficient:    sufficient,
+		}
+		ctx.EnergyMetrics.CurrentSlotAvailableWatts, _, _ = unstructured.NestedFloat64(
+			eao.Object, "status", "energyMetrics", "currentSlotAvailableWatts",
+		)
+		ctx.EnergyMetrics.CurrentSlotConsumedWatts, _, _ = unstructured.NestedFloat64(
+			eao.Object, "status", "energyMetrics", "currentSlotConsumedWatts",
+		)
+	}
+
+	return ctx
 }
 
 // =============================================================================

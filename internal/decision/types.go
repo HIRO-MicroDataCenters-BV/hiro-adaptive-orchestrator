@@ -174,11 +174,53 @@ type RebalancingConfig struct {
 // E.A.O Profile data — sourced from the Energy Aware Orchestrator
 // =============================================================================
 
-// EAOProfileContext carries per-node energy metrics from the E.A.O.
+// EAOProfileContext carries energy data from the EnergyAwareOrchestration CRD
+// (eas.hiro.io/v1) for the pod's governing application.
 // Only assembled when AOProfile.Awareness.Energy == true.
 type EAOProfileContext struct {
-	// NodeEnergyData is the list of per-node energy metrics.
-	NodeEnergyData []NodeEnergyData `json:"nodeEnergyData"`
+	// NodeEnergyData is optional per-node energy scoring (populated by future sources).
+	NodeEnergyData []NodeEnergyData `json:"nodeEnergyData,omitempty"`
+
+	// Priority is the scheduling priority from the EAO spec (Critical | Preferred | Optional).
+	Priority string `json:"priority,omitempty"`
+
+	// EnergyConsumptionWatts is the estimated energy requirement declared in the EAO spec.
+	EnergyConsumptionWatts int64 `json:"energyConsumptionWatts,omitempty"`
+
+	// Decision is the scheduling decision produced by the EnergyAwareOrchestrator.
+	// nil when the EAO status has not yet been populated.
+	Decision *EAODecision `json:"decision,omitempty"`
+
+	// EnergyMetrics holds the energy availability snapshot from the EAO status.
+	// nil when the EAO status has not yet been populated.
+	EnergyMetrics *EAOEnergyMetrics `json:"energyMetrics,omitempty"`
+}
+
+// EAODecision is the scheduling decision from the EnergyAwareOrchestrator.
+type EAODecision struct {
+	// Action is one of: DeployImmediately | Scheduled | Delayed | Waiting.
+	Action string `json:"action"`
+
+	// Reason is a human-readable explanation for the decision.
+	Reason string `json:"reason"`
+
+	// NextEvaluationTime is when the EAO will re-evaluate (ISO 8601), if applicable.
+	NextEvaluationTime string `json:"nextEvaluationTime,omitempty"`
+}
+
+// EAOEnergyMetrics is the energy availability snapshot from the EAO status.
+type EAOEnergyMetrics struct {
+	// RequiredWatts is the energy the workload needs.
+	RequiredWatts float64 `json:"requiredWatts"`
+
+	// Sufficient indicates whether current energy supply meets the requirement.
+	Sufficient bool `json:"sufficient"`
+
+	// CurrentSlotAvailableWatts is the energy available in the current 6-hour slot.
+	CurrentSlotAvailableWatts float64 `json:"currentSlotAvailableWatts,omitempty"`
+
+	// CurrentSlotConsumedWatts is the energy currently being consumed.
+	CurrentSlotConsumedWatts float64 `json:"currentSlotConsumedWatts,omitempty"`
 }
 
 // NodeEnergyData holds energy metrics for a single node.

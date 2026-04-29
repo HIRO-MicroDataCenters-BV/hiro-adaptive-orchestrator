@@ -28,6 +28,11 @@ export CR_PAT=$GITHUB_PAT_TOKEN
 
 export DECISION_AGENT_URL="http://your-decision-agent-url"
 
+# EnergyAwareOrchestration CRD coordinates (override if your EAO operator uses different values)
+export EAO_GROUP="${EAO_GROUP:-eas.hiro.io}"
+export EAO_VERSION="${EAO_VERSION:-v1}"
+export EAO_KIND="${EAO_KIND:-EnergyAwareOrchestration}"
+
 
 echo "========================================"
 echo "HIRO Adaptive Orchestrator Deployment"

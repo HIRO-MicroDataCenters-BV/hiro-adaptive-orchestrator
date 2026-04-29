@@ -144,7 +144,8 @@ func (r *OrchestrationProfileReconciler) resolveAppFromPod(
 	ctx context.Context,
 	pod *corev1.Pod,
 ) (appName, appNamespace string) {
-	return utils.ResolveAppFromPod(ctx, r.Client, pod)
+	appName, appNamespace, _ = utils.ResolveAppFromPod(ctx, r.Client, pod)
+	return
 }
 
 // =============================================================================

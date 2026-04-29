@@ -37,8 +37,8 @@ func KeysOf(m map[string]bool) []string {
 	return keys
 }
 
-// ResolveAppFromPod walks the pod's OwnerReferences to find the name of the
-// top-level workload (Deployment, StatefulSet, Job, or standalone ReplicaSet).
+// ResolveAppFromPod walks the pod's OwnerReferences to find the name, namespace,
+// and kind of the top-level workload (Deployment, StatefulSet, Job, or standalone ReplicaSet).
 //
 // Walk logic:
 //
@@ -47,13 +47,12 @@ func KeysOf(m map[string]bool) []string {
 //	Pod.OwnerRef → StatefulSet  (direct)
 //	Pod.OwnerRef → Job          (direct)
 //
-// Returns ("", "") if no recognized workload owner is found.
-// This is a utility function that can be used by other packages.
+// Returns ("", "", "") if no recognized workload owner is found.
 func ResolveAppFromPod(
 	ctx context.Context,
 	client client.Client,
 	pod *corev1.Pod,
-) (appName, appNamespace string) {
+) (appName, appNamespace, appKind string) {
 	logger := logf.FromContext(ctx)
 
 	for _, ref := range pod.OwnerReferences {
@@ -68,23 +67,23 @@ func ResolveAppFromPod(
 				// Transient error — fall back to RS name itself
 				logger.V(1).Info("could not fetch owner ReplicaSet, using RS name",
 					"rs", ref.Name, "pod", pod.Name, "err", err)
-				return ref.Name, pod.Namespace
+				return ref.Name, pod.Namespace, "ReplicaSet"
 			}
 			for _, rsOwner := range rs.OwnerReferences {
 				if rsOwner.Kind == "Deployment" {
-					return rsOwner.Name, pod.Namespace // Pod belongs to a Deployment
+					return rsOwner.Name, pod.Namespace, "Deployment"
 				}
 			}
-			return rs.Name, pod.Namespace // standalone ReplicaSet
+			return rs.Name, pod.Namespace, "ReplicaSet" // standalone ReplicaSet
 
 		case "StatefulSet":
-			return ref.Name, pod.Namespace
+			return ref.Name, pod.Namespace, "StatefulSet"
 
 		case "Job":
-			return ref.Name, pod.Namespace
+			return ref.Name, pod.Namespace, "Job"
 		}
 	}
-	return "", ""
+	return "", "", ""
 }
 
 // NodeNames extracts the names of a list of nodes as a slice.
