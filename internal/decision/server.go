@@ -27,22 +27,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-const (
-	// PlacementDecisionPath is the endpoint the kube-scheduler plugin calls.
-	PlacementDecisionPath = "/api/v1/placement/decision"
-
-	// HealthPath is for liveness/readiness probes.
-	HealthPath = "/healthz"
-
-	// defaultServerPort is the default listening port.
-	defaultServerPort = ":8090"
-
-	// requestTimeout is applied per request.
-	// Must be longer than DecisionClient timeout but shorter than the
-	// scheduler's own scoring phase timeout.
-	requestTimeout = 10 * time.Second
-)
-
 // =============================================================================
 // PlacementServer
 //
@@ -62,31 +46,35 @@ type PlacementServer struct {
 	// Addr is the listening address (default ":8090").
 	Addr string
 
+	// placementPath is the HTTP path for placement decisions.
+	placementPath string
+
+	// healthPath is the HTTP path for liveness/readiness probes.
+	healthPath string
+
 	builder *DecisionContextBuilder
 	client  *DecisionClient
 	server  *http.Server
+
+	// requestTimeout is applied per request.
+	// Must be longer than DecisionClient timeout but shorter than the
+	// scheduler's own scoring phase timeout.
+	requestTimeout time.Duration
 }
 
 // NewPlacementServer creates a PlacementServer.
 //
-// addr: listening address e.g. ":8090". Pass "" to use the default.
-//
-// In cmd/main.go:
-//
-//	placementServer := decision.NewPlacementServer(
-//	    contextBuilder,
-//	    decisionClient,
-//	    os.Getenv("PLACEMENT_SERVER_PORT"),
-//	)
-//	go placementServer.Start(ctx)
+// port:          listening address e.g. ":8090". Pass "" to use the default.
+// placementPath: HTTP path for placement decisions. Pass "" to use the default.
+// healthPath:    HTTP path for health probes. Pass "" to use the default.
 func NewPlacementServer(
 	builder *DecisionContextBuilder,
 	client *DecisionClient,
 	port string,
+	placementPath string,
+	healthPath string,
+	timeout time.Duration,
 ) *PlacementServer {
-	if port == "" {
-		port = defaultServerPort
-	}
 	var addr string
 	if len(port) > 0 && port[0] != ':' {
 		addr = ":" + port
@@ -94,9 +82,12 @@ func NewPlacementServer(
 		addr = port
 	}
 	return &PlacementServer{
-		Addr:    addr,
-		builder: builder,
-		client:  client,
+		Addr:           addr,
+		placementPath:  placementPath,
+		healthPath:     healthPath,
+		builder:        builder,
+		client:         client,
+		requestTimeout: timeout,
 	}
 }
 
@@ -106,8 +97,8 @@ func (s *PlacementServer) Start(ctx context.Context) error {
 	logger := logf.FromContext(ctx)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc(PlacementDecisionPath, s.handlePlacementDecision)
-	mux.HandleFunc(HealthPath, s.handleHealth)
+	mux.HandleFunc(s.placementPath, s.handlePlacementDecision)
+	mux.HandleFunc(s.healthPath, s.handleHealth)
 
 	s.server = &http.Server{
 		Addr:    s.Addr,
@@ -116,7 +107,7 @@ func (s *PlacementServer) Start(ctx context.Context) error {
 
 	logger.Info("placement server starting",
 		"addr", s.Addr,
-		"endpoint", PlacementDecisionPath,
+		"endpoint", s.placementPath,
 	)
 
 	// Graceful shutdown when manager context is cancelled
@@ -150,7 +141,7 @@ func (s *PlacementServer) handlePlacementDecision(w http.ResponseWriter, r *http
 	}
 
 	// Per-request timeout — prevents slow AI agent from blocking scheduler
-	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
 	defer cancel()
 
 	logger := logf.FromContext(ctx)

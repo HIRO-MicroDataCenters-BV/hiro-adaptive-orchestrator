@@ -1,0 +1,141 @@
+---
+# Mock Decision Agent — for local / CI testing only.
+#
+# Deployed in the same namespace as the operator so the short DNS name
+# "decision-agent" resolves from the operator pod.
+#
+# Set: DECISION_AGENT_URL=http://decision-agent:8080
+#
+# Behaviour:
+#   POST /api/v1/placement/decision  → parses DecisionRequest, scores every
+#                                       candidate node at 50, returns DecisionResponse
+#   GET  /healthz                    → 200 ok
+#
+# Deploy:  kubectl apply -f hack/mock-decision-agent.yaml
+# Remove:  kubectl delete -f hack/mock-decision-agent.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mock-decision-agent
+  namespace: hiro-adaptive-orchestrator-system
+data:
+  server.py: |
+    #!/usr/bin/env python3
+    import json
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    PLACEMENT_PATH = "/api/v1/placement/decision"
+    HEALTH_PATH    = "/healthz"
+
+    class Handler(BaseHTTPRequestHandler):
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            raw    = self.rfile.read(length) if length else b"{}"
+
+            try:
+                req = json.loads(raw)
+            except json.JSONDecodeError:
+                req = {}
+
+            request_id = req.get("requestId", "mock-id")
+
+            # CandidateNodes is a list of full Kubernetes Node objects.
+            # Extract the name from metadata.name.
+            candidate_nodes = req.get("candidateNodes", [])
+            node_scores = [
+                {
+                    "nodeName": node.get("metadata", {}).get("name", f"node-{i}"),
+                    "score": 50.0,
+                }
+                for i, node in enumerate(candidate_nodes)
+            ]
+
+            # Fallback when the request carries no nodes (shouldn't happen in practice)
+            if not node_scores:
+                node_scores = [{"nodeName": "fallback-node", "score": 50.0}]
+
+            resp = {
+                "requestId": request_id,
+                "nodeScores": node_scores,
+                "reason": "mock: all candidate nodes scored equally at 50",
+            }
+
+            body = json.dumps(resp).encode()
+            self._reply(200, "application/json", body)
+            self.log_message(
+                "POST %s → 200  requestId=%s  nodes=%s",
+                self.path, request_id,
+                [s["nodeName"] for s in node_scores],
+            )
+
+        def do_GET(self):
+            self._reply(200, "text/plain", b"ok")
+
+        def _reply(self, code, content_type, body):
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *args):
+            import sys
+            print(f"[mock-decision-agent] {fmt % args}", flush=True, file=sys.stdout)
+
+    if __name__ == "__main__":
+        addr = ("0.0.0.0", 8080)
+        print(f"[mock-decision-agent] listening on {addr[0]}:{addr[1]}", flush=True)
+        HTTPServer(addr, Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: decision-agent
+  namespace: hiro-adaptive-orchestrator-system
+  labels:
+    app: decision-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: decision-agent
+  template:
+    metadata:
+      labels:
+        app: decision-agent
+    spec:
+      containers:
+        - name: mock-agent
+          image: python:3.11-slim
+          command: ["python3", "/app/server.py"]
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: script
+              mountPath: /app
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+      volumes:
+        - name: script
+          configMap:
+            name: mock-decision-agent
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: decision-agent
+  namespace: hiro-adaptive-orchestrator-system
+  labels:
+    app: decision-agent
+spec:
+  selector:
+    app: decision-agent
+  ports:
+    - port: 8080
+      targetPort: 8080

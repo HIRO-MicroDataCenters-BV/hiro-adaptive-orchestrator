@@ -26,7 +26,24 @@ export KUBECONFIG=${2:-~/.kube/config}
 export IMG=${DOCKER_REGISTRY}/${HIRO_OPERATOR_IMAGE}
 export CR_PAT=$GITHUB_PAT_TOKEN
 
-export DECISION_AGENT_URL="http://your-decision-agent-url"
+# --------------------------------------------------------------------------
+# Decision Agent
+#
+# USE_MOCK_AGENT=true  (default) — deploys hack/mock-decision-agent.yaml
+#                                   into the operator namespace and sets the
+#                                   URL automatically. No external service needed.
+#
+# USE_MOCK_AGENT=false            — uses the value of DECISION_AGENT_URL.
+#                                   You must export it before running the script:
+#                                     export DECISION_AGENT_URL="http://my-agent:8080"
+# --------------------------------------------------------------------------
+USE_MOCK_AGENT=${USE_MOCK_AGENT:-true}
+
+if [ "$USE_MOCK_AGENT" = "true" ]; then
+  export DECISION_AGENT_URL="http://decision-agent:8080"
+else
+  : "${DECISION_AGENT_URL:?DECISION_AGENT_URL must be set when USE_MOCK_AGENT=false}"
+fi
 
 # EnergyAwareOrchestration CRD coordinates (override if your EAO operator uses different values)
 export EAO_GROUP="${EAO_GROUP:-eas.hiro.io}"
@@ -37,6 +54,12 @@ export EAO_KIND="${EAO_KIND:-EnergyAwareOrchestration}"
 echo "========================================"
 echo "HIRO Adaptive Orchestrator Deployment"
 echo "========================================"
+
+if [ "$USE_MOCK_AGENT" = "true" ]; then
+  echo "Decision Agent : MOCK  ($DECISION_AGENT_URL)"
+else
+  echo "Decision Agent : REAL  ($DECISION_AGENT_URL)"
+fi
 
 echo "Using kubeconfig: $KUBECONFIG"
 
@@ -89,6 +112,24 @@ make deploy IMG=$IMG
 echo ""
 echo "Deployment completed successfully."
 
+# --------------------------------------------------------------------------
+# Mock Decision Agent (deployed before operator restart so it is reachable
+# the moment the operator pod comes back up)
+# --------------------------------------------------------------------------
+if [ "$USE_MOCK_AGENT" = "true" ]; then
+  echo ""
+  echo "Deploying mock decision agent..."
+  kubectl apply -f hack/mock-decision-agent.yaml
+
+  echo ""
+  echo "Waiting for mock decision agent to be ready..."
+  kubectl wait --for=condition=Ready pod \
+    -l app=decision-agent \
+    -n "$NAMESPACE" \
+    --timeout=120s
+  echo "Mock decision agent is ready."
+fi
+
 echo ""
 echo "Creating image pull secret..."
 kubectl create secret docker-registry ghcr-secret \
@@ -104,8 +145,25 @@ kubectl patch serviceaccount $SERVICE_ACCOUNT_NAME \
   -p '{"imagePullSecrets": [{"name": "ghcr-secret"}]}' \
   --namespace=$NAMESPACE
 
+DECISION_AGENT_PATH=${DECISION_AGENT_PATH:-/api/v1/agent/placement/decision}
+PLACEMENT_DECISION_PATH=${PLACEMENT_DECISION_PATH:-/api/v1/placement/decision}
+PLACEMENT_HEALTH_PATH=${PLACEMENT_HEALTH_PATH:-/healthz}
+
 echo ""
-echo "Restarting operator pod to pick up new image..."
+echo "Injecting environment variables into operator deployment..."
+kubectl set env deployment/hiro-adaptive-orchestrator-controller-manager \
+  -n "$NAMESPACE" \
+  DECISION_AGENT_URL="$DECISION_AGENT_URL" \
+  DECISION_AGENT_PATH="$DECISION_AGENT_PATH" \
+  PLACEMENT_SERVER_PORT=":8090" \
+  PLACEMENT_DECISION_PATH="$PLACEMENT_DECISION_PATH" \
+  PLACEMENT_HEALTH_PATH="$PLACEMENT_HEALTH_PATH" \
+  EAO_GROUP="$EAO_GROUP" \
+  EAO_VERSION="$EAO_VERSION" \
+  EAO_KIND="$EAO_KIND"
+
+echo ""
+echo "Restarting operator pod to pick up new image and env vars..."
 kubectl delete pod -l control-plane=controller-manager -n $NAMESPACE --ignore-not-found
 
 echo ""

@@ -169,11 +169,17 @@ func (b *DecisionContextBuilder) Build(
 		"requestId", requestID,
 		"pod", pod.Name,
 		"profile", profile.Name,
-		"strategy", aoProfile.Strategy,
+		"aoStrategy", aoProfile.Strategy,
+		"aoAwareness", aoProfile.Awareness,
+		"rebalancingEnabled", aoProfile.Rebalancing.Enabled,
 		"candidateNodes", nodeNames,
 		"currentPlacementNode", aoProfile.CurrentPlacement.NodeName,
 		"energyEnabled", profile.Spec.Placement.Awareness.Energy,
 		"eaoDataAttached", eaoProfile != nil,
+		"eaoAction", eaoProfile.Decision.Action,
+		"eaoReason", eaoProfile.Decision.Reason,
+		"eaoPriority", eaoProfile.Priority,
+		"eaoEnergyConsumptionWatts", eaoProfile.EnergyConsumptionWatts,
 	)
 
 	return req, nil
@@ -303,8 +309,6 @@ func (b *DecisionContextBuilder) fetchEAOProfile(
 // spec.applicationRef matches that application.
 //
 // Returns nil (no error) when no matching EAO exists.
-//
-// +kubebuilder:rbac:groups=eas.hiro.io,resources=energyawareorchestrations,verbs=get;list;watch
 func (b *DecisionContextBuilder) fetchEAOForPod(
 	ctx context.Context,
 	pod *corev1.Pod,

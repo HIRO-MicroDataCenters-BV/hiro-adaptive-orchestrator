@@ -262,6 +262,14 @@ rules:
   - list
   - watch
 - apiGroups:
+  - eas.hiro.io
+  resources:
+  - energyawareorchestrations
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - orchestration.hiro.io
   resources:
   - orchestrationprofiles
@@ -505,8 +513,20 @@ spec:
         env:
         - name: DECISION_AGENT_URL
           value: http://decision-agent:8080
+        - name: DECISION_AGENT_PATH
+          value: /api/v1/agent/placement/decision
         - name: PLACEMENT_SERVER_PORT
           value: :8090
+        - name: PLACEMENT_DECISION_PATH
+          value: /api/v1/placement/decision
+        - name: PLACEMENT_HEALTH_PATH
+          value: /healthz
+        - name: EAO_GROUP
+          value: eas.hiro.io
+        - name: EAO_VERSION
+          value: v1
+        - name: EAO_KIND
+          value: EnergyAwareOrchestration
         image: ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/hiro-adaptive-orchestrator-controller:latest
         livenessProbe:
           httpGet:

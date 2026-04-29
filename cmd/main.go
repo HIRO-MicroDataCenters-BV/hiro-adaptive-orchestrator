@@ -213,24 +213,42 @@ func main() {
 	// HTTP server that receives PlacementContext from the kube-scheduler
 	// custom scoring plugin and returns NodeScores.
 	//
-	// Independent from the reconciler — runs as a separate goroutine alongside
-	// the controller manager. Shares the same informer cache (mgr.GetClient()).
-	//
 	// Environment variables:
-	//   DECISION_AGENT_URL     — base URL of the External AI Agent (required)
-	//                            e.g. "http://ai-agent.hiro-system.svc:8080"
-	//   PLACEMENT_SERVER_PORT  — listening address (optional, default ":8090")
-	//   EAO_GROUP              — API group of EnergyAwareOrchestration CRD
-	//                            (optional, default "eas.hiro.io")
-	//   EAO_VERSION            — API version of EnergyAwareOrchestration CRD
-	//                            (optional, default "v1")
-	//   EAO_KIND               — Kind of EnergyAwareOrchestration CRD
-	//                            (optional, default "EnergyAwareOrchestration")
+	//   DECISION_AGENT_URL      — base URL of the External AI Agent (required)
+	//                             e.g. "http://ai-agent.hiro-system.svc:8080"
+	//   DECISION_AGENT_PATH     — HTTP path on the AI agent (optional)
+	//                             default: "/api/v1/agent/placement/decision"
+	//   PLACEMENT_SERVER_PORT   — listening address (optional, default ":8090")
+	//   PLACEMENT_DECISION_PATH — HTTP path for placement decisions (optional)
+	//                             default: "/api/v1/placement/decision"
+	//   PLACEMENT_HEALTH_PATH   — HTTP path for health probes (optional)
+	//                             default: "/healthz"
+	//   EAO_GROUP               — API group of EnergyAwareOrchestration CRD
+	//                             (optional, default "eas.hiro.io")
+	//   EAO_VERSION             — API version of EnergyAwareOrchestration CRD
+	//                             (optional, default "v1")
+	//   EAO_KIND                — Kind of EnergyAwareOrchestration CRD
+	//                             (optional, default "EnergyAwareOrchestration")
 	// -------------------------------------------------------------------------
 	decisionAgentURL := os.Getenv("DECISION_AGENT_URL")
 	if decisionAgentURL == "" {
 		setupLog.Error(nil, "DECISION_AGENT_URL environment variable is required")
 		os.Exit(1)
+	}
+
+	decisionAgentPath := os.Getenv("DECISION_AGENT_PATH")
+	if decisionAgentPath == "" {
+		decisionAgentPath = "/api/v1/agent/placement/decision"
+	}
+
+	placementDecisionPath := os.Getenv("PLACEMENT_DECISION_PATH")
+	if placementDecisionPath == "" {
+		placementDecisionPath = "/api/v1/placement/decision"
+	}
+
+	placementHealthPath := os.Getenv("PLACEMENT_HEALTH_PATH")
+	if placementHealthPath == "" {
+		placementHealthPath = "/healthz"
 	}
 
 	eaoGroup := os.Getenv("EAO_GROUP")
@@ -250,10 +268,14 @@ func main() {
 		Version: eaoVersion,
 		Kind:    eaoKind + "List",
 	}
-	setupLog.Info("EAO GVK configured",
-		"group", eaoGVK.Group,
-		"version", eaoGVK.Version,
-		"kind", eaoGVK.Kind,
+	setupLog.Info("decision layer configured",
+		"agentURL", decisionAgentURL,
+		"agentPath", decisionAgentPath,
+		"placementDecisionPath", placementDecisionPath,
+		"placementHealthPath", placementHealthPath,
+		"eaoGroup", eaoGVK.Group,
+		"eaoVersion", eaoGVK.Version,
+		"eaoKind", eaoGVK.Kind,
 	)
 
 	contextBuilder := decision.NewDecisionContextBuilder(
@@ -262,15 +284,23 @@ func main() {
 		eaoGVK,
 	)
 
+	// Create the DecisionClient with the External AI Agent URL and path.
+	// The client will be used by the PlacementServer to send placement decision requests to the AI agent.
 	decisionClient := decision.NewDecisionClient(
 		decisionAgentURL,
+		decisionAgentPath,
 		8*time.Second, // must be < PlacementServer requestTimeout (10s)
 	)
 
+	// Create the PlacementServer with the context builder and decision client.
+	// The server will use these to handle incoming placement decision requests from the kube-scheduler plugin.
 	placementServer := decision.NewPlacementServer(
 		contextBuilder,
 		decisionClient,
 		os.Getenv("PLACEMENT_SERVER_PORT"), // defaults to ":8090" if empty
+		placementDecisionPath,
+		placementHealthPath,
+		10*time.Second, // requestTimeout: must be > DecisionClient timeout
 	)
 
 	// Start PlacementServer alongside the manager.

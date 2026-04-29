@@ -43,11 +43,11 @@ import (
 //      which translates it into a ValidPlacementDecision (step 7)
 // =============================================================================
 
-const (
-	// decisionEndpoint is the path on the External AI Agent that receives
-	// per-pod DecisionRequests.
-	decisionEndpoint = "/api/v1/placement/decision"
-)
+// const (
+// 	// DefaultDecisionAgentPath is the default path on the External AI Agent that
+// 	// receives per-pod DecisionRequests. Override via DECISION_AGENT_PATH env var.
+// 	DefaultDecisionAgentPath = "/api/v1/agent/placement/decision"
+// )
 
 // DecisionClient sends a per-pod DecisionRequest to the External Decision/AI
 // Agent and returns the scored node list.
@@ -56,6 +56,10 @@ type DecisionClient struct {
 	// Example: "http://ai-decision-agent.hiro-system.svc.cluster.local:8080"
 	agentURL string
 
+	// agentPath is the URL path on the External AI Agent endpoint.
+	// Configurable via DECISION_AGENT_PATH env var.
+	agentPath string
+
 	// httpClient is the underlying HTTP client.
 	// Timeout is set at construction — it applies per-request.
 	httpClient *http.Client
@@ -63,18 +67,13 @@ type DecisionClient struct {
 
 // NewDecisionClient creates a new DecisionClient.
 //
-// agentURL: base URL of the External Decision/AI Agent.
-// timeout:  per-request timeout. Recommended: 5–30s depending on AI agent SLA.
-//
-// Example:
-//
-//	client := decision.NewDecisionClient(
-//	    os.Getenv("DECISION_AGENT_URL"),
-//	    15 * time.Second,
-//	)
-func NewDecisionClient(agentURL string, timeout time.Duration) *DecisionClient {
+// agentURL:  base URL of the External Decision/AI Agent.
+// agentPath: HTTP path on the agent (e.g. "/api/v1/agent/placement/decision").
+// timeout:   per-request timeout. Recommended: 5–30s depending on AI agent SLA.
+func NewDecisionClient(agentURL, agentPath string, timeout time.Duration) *DecisionClient {
 	return &DecisionClient{
-		agentURL: agentURL,
+		agentURL:  agentURL,
+		agentPath: agentPath,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
@@ -129,7 +128,7 @@ func (c *DecisionClient) RequestDecision(
 	// Build and send the HTTP POST request
 	// The caller's ctx is attached so cancellation propagates cleanly
 	// -------------------------------------------------------------------------
-	url := c.agentURL + decisionEndpoint
+	url := c.agentURL + c.agentPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("building HTTP request for pod %s/%s: %w",
