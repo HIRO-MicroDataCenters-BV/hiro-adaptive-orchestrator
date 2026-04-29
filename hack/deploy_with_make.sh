@@ -50,10 +50,10 @@ export EAO_GROUP="${EAO_GROUP:-eas.hiro.io}"
 export EAO_VERSION="${EAO_VERSION:-v1}"
 export EAO_KIND="${EAO_KIND:-EnergyAwareOrchestration}"
 
-// PlacementServer configuration (override if needed)
+# PlacementServer configuration (override if needed)
 export PLACEMENT_SERVER_PORT=${PLACEMENT_SERVER_PORT:-:8090}
-export DECISION_AGENT_PATH=${DECISION_AGENT_PATH:-/api/v1/agent/placement/decision}
 export PLACEMENT_SERVER_PATH=${PLACEMENT_SERVER_PATH:-/api/v1/placement/decision}
+export DECISION_AGENT_PATH=${DECISION_AGENT_PATH:-/api/v1/agent/placement/decision}
 export PLACEMENT_SERVER_HEALTH_PATH=${PLACEMENT_SERVER_HEALTH_PATH:-/healthz}
 
 
