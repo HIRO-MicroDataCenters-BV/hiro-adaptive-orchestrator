@@ -17,34 +17,35 @@ The operator runs as two concurrent services inside a single binary:
 
 ```
 kube-scheduler plugin
-        │
-        │  POST /placement  { pod, candidateNodes }
-        ▼
+        |
+        |  POST /api/v1/placement/decision  { pod, candidateNodes }
+        v
 PlacementServer (:8090)
-        │
-        │  Build DecisionRequest
-        │  ├── OrchestrationProfile  (O(1) field index)
-        │  ├── AOProfileContext      (strategy + awareness + current placement)
-        │  └── EAOProfileContext     (energy data, if energy awareness enabled)
-        ▼
+        |
+        |  Build DecisionRequest
+        |  +-- OrchestrationProfile  (O(1) field index)
+        |  +-- AOProfileContext      (strategy + awareness + current placement)
+        +-- EAOProfileContext     (energy data, if energy awareness enabled)
+        v
 External AI / Decision Agent  (DECISION_AGENT_URL)
-        │
-        │  { nodeScores }
-        ▼
-kube-scheduler plugin  →  schedules pod
+        |
+        |  { nodeScores }
+        v
+kube-scheduler plugin  ->  schedules pod
 ```
 
 ---
 
 ## Features
 
-- **Placement strategies** — `Balanced`, `Packed`, `Spread`
-- **Multi-dimensional resource awareness** — CPU, Memory, GPU, Energy
-- **Energy-aware orchestration** — optional integration with an Energy-Aware Orchestrator
-- **Dynamic rebalancing** — trigger-based (energy threshold, CPU/memory threshold, node failure, scheduled)
-- **AI-delegated scoring** — pluggable external decision agent via HTTP
-- **Status observability** — rich per-profile status (`NoPods` → `Pending` → `Active` → `Partial` → `Degraded` → `Error`)
-- **Production-ready** — leader election, HTTPS metrics (port 8443), Prometheus/ServiceMonitor support, restricted pod security
+- **Placement strategies** -- `Balanced`, `Packed`, `Spread`
+- **Multi-dimensional resource awareness** -- CPU, Memory, GPU, Energy
+- **Energy-aware orchestration** -- optional integration with an `EnergyAwareOrchestration` CRD from an external EAO operator
+- **Dynamic rebalancing** -- trigger-based (energy threshold, CPU/memory threshold, node failure, scheduled)
+- **AI-delegated scoring** -- pluggable external decision agent via HTTP
+- **Status observability** -- rich per-profile status (`NoPods` -> `Pending` -> `Active` -> `Partial` -> `Degraded` -> `Error`)
+- **Kubernetes events** -- status transitions and errors recorded as Kubernetes events on the `OrchestrationProfile` resource
+- **Production-ready** -- leader election, HTTPS metrics (port 8443), Prometheus/ServiceMonitor support, restricted pod security
 
 ---
 
@@ -62,11 +63,38 @@ kube-scheduler plugin  →  schedules pod
 
 A running Kubernetes cluster (v1.29+) with a `~/.kube/config` pointing to it is required for deployment.
 
-An **external Decision Agent** reachable at a URL you control is required for the placement server to function (see [Configuration](#configuration)).
+An **external Decision Agent** reachable at a URL you control is required for the placement server to function. For local testing, a mock agent can be deployed automatically (see [Quick Start](#quick-start-automated)).
 
 ---
 
-## Getting Started — Local Development
+## Project Initialization
+
+This project was scaffolded using the [Kubebuilder](https://book.kubebuilder.io/) framework. The following commands were used to initialize and scaffold the project:
+
+```bash
+# Initialize the project
+kubebuilder init \
+  --domain orchestration.hiro.io \
+  --repo github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator \
+  --owner "HIRO Adaptive Orchestrator"
+
+# Scaffold the OrchestrationProfile API and controller
+kubebuilder create api \
+  --group orchestration \
+  --version v1alpha1 \
+  --kind OrchestrationProfile \
+  --resource=true \
+  --controller=true
+
+# Add Helm chart generation support
+kubebuilder edit --plugins=helm/v2-alpha
+```
+
+> These commands are recorded here for reference only. Do **not** re-run them on an existing checkout - they modify project scaffolding files. To regenerate the Helm chart from the current config, use `./hack/deploy_with_make.sh` or see [Option B - Helm](#option-b----helm).
+
+---
+
+## Getting Started -- Local Development
 
 ### 1. Clone the repository
 
@@ -127,28 +155,62 @@ kubectl get orchestrationprofiles -o yaml
 
 ## Quick Start (automated)
 
-A shell script automates the full local development cycle — code generation, CRD installation, image build, registry push, and deployment:
+A shell script automates the full deployment cycle: code generation, CRD installation, image build, registry push, Helm chart regeneration, and cluster deployment.
 
 ```bash
 export GITHUB_PAT_TOKEN=<your-ghcr-token>
 export GITHUB_USERNAME=<your-github-username>
-export DECISION_AGENT_URL="http://your-decision-agent:8080"
 
 ./hack/deploy_with_make.sh
 ```
 
-> **Note:** The script builds and pushes to `ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator`. Adjust the `DOCKER_REGISTRY` variable inside the script if you use a different registry.
+By default the script deploys a **mock decision agent** in-cluster so no external AI service is needed. To use a real agent:
+
+```bash
+export USE_MOCK_AGENT=false
+export DECISION_AGENT_URL="http://your-real-agent:8080"
+./hack/deploy_with_make.sh
+```
+
+To deploy to a **custom namespace** or with a different **resource name prefix**:
+
+```bash
+export NAMESPACE=my-custom-namespace
+export NAME_PREFIX=my-org-
+./hack/deploy_with_make.sh
+```
+
+> The script builds and pushes to `ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator`. Adjust `DOCKER_REGISTRY` inside the script if you use a different registry.
 
 ---
 
 ## Configuration
 
-### Environment Variables
+### Deployment Identity
+
+These two variables control the namespace and resource naming for all operator resources. They are applied to `config/default/kustomization.yaml` via `kustomize edit set` before deployment.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NAMESPACE` | `hiro-adaptive-orchestrator-system` | Kubernetes namespace for all operator resources |
+| `NAME_PREFIX` | `hiro-adaptive-orchestrator-` | Prepended to all resource names (Deployment, ServiceAccount, etc.) by Kustomize |
+
+The ServiceAccount and Deployment names are always derived as `<NAME_PREFIX>controller-manager` (kubebuilder convention base name).
+
+### Environment Variables (operator pod)
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DECISION_AGENT_URL` | **Yes** | — | Base URL of the external AI/decision agent (e.g. `http://decision-agent:8080`) |
+| `DECISION_AGENT_URL` | **Yes** | -- | Base URL of the external AI/decision agent (e.g. `http://decision-agent:8080`) |
+| `DECISION_AGENT_PATH` | No | `/api/v1/agent/placement/decision` | HTTP path on the AI agent that receives placement requests |
 | `PLACEMENT_SERVER_PORT` | No | `:8090` | Listening address for the placement server |
+| `PLACEMENT_SERVER_PATH` | No | `/api/v1/placement/decision` | HTTP path the kube-scheduler plugin POSTs to |
+| `PLACEMENT_SERVER_HEALTH_PATH` | No | `/healthz` | HTTP path for placement server liveness/readiness probes |
+| `EAO_GROUP` | No | `eas.hiro.io` | API group of the `EnergyAwareOrchestration` CRD |
+| `EAO_VERSION` | No | `v1` | API version of the `EnergyAwareOrchestration` CRD |
+| `EAO_KIND` | No | `EnergyAwareOrchestration` | Kind name of the `EnergyAwareOrchestration` CRD |
+
+All variables have defaults baked into `config/manager/manager.yaml` and are also injectable via `hack/deploy_with_make.sh`.
 
 ### OrchestrationProfile CRD Reference
 
@@ -201,19 +263,28 @@ spec:
 | `Degraded` | One or more pods failed |
 | `Error` | Spec validation failed or referenced workload not found |
 
+Status transitions are also recorded as **Kubernetes Events** on the `OrchestrationProfile` resource. Inspect them with:
+
+```bash
+kubectl describe orchestrationprofile <name>
+```
+
 ---
 
 ## Deployment
 
-### Option A — Kustomize (recommended for development)
+### Option A -- Kustomize (recommended for development)
 
 ```bash
 # Build image and push to your registry
 export IMG=<registry>/<image>:<tag>
 make docker-build docker-push IMG=$IMG
 
-# Deploy to the cluster
+# Deploy to the cluster (default namespace and name prefix)
 make deploy IMG=$IMG
+
+# Deploy to a custom namespace
+NAMESPACE=my-namespace NAME_PREFIX=my-org- make deploy IMG=$IMG
 
 # Verify
 kubectl get pods -n hiro-adaptive-orchestrator-system
@@ -228,26 +299,35 @@ make undeploy
 make uninstall   # removes CRDs
 ```
 
-### Option B — Helm
+### Option B -- Helm
+
+The Helm chart in `dist/chart/` is **auto-generated** from `config/` on every run of `hack/deploy_with_make.sh`. It picks up all env vars, RBAC rules, and CRD changes automatically. To regenerate it manually:
 
 ```bash
-# Generate the Helm chart (if not already present)
+rm -rf dist/
 kubebuilder edit --plugins=helm/v2-alpha
+```
 
-# Deploy
+Deploy via Helm:
+
+```bash
 export IMG=<registry>/<image>:<tag>
+
+# Deploy to default namespace
 make helm-deploy IMG=$IMG
 
-# Check status
-make helm-status
+# Deploy to a custom namespace
+make helm-deploy IMG=$IMG HELM_NAMESPACE=my-namespace
 
-# Upgrade with custom values
+# Override specific values
 make helm-deploy IMG=$IMG HELM_EXTRA_ARGS="--set manager.replicas=2"
 
-# Rollback
-make helm-rollback
+# Check status / history
+make helm-status
+make helm-history
 
-# Uninstall
+# Rollback / Uninstall
+make helm-rollback
 make helm-uninstall
 ```
 
@@ -260,13 +340,67 @@ make helm-uninstall
 | `manager.replicas` | `1` | Controller replica count |
 | `manager.resources.limits.cpu` | `500m` | CPU limit |
 | `manager.resources.limits.memory` | `128Mi` | Memory limit |
+| `manager.env[].DECISION_AGENT_URL` | `http://decision-agent:8080` | AI agent base URL |
+| `manager.env[].DECISION_AGENT_PATH` | `/api/v1/agent/placement/decision` | AI agent HTTP path |
+| `manager.env[].PLACEMENT_SERVER_PORT` | `:8090` | Placement server port |
+| `manager.env[].PLACEMENT_SERVER_PATH` | `/api/v1/placement/decision` | Placement server path |
+| `manager.env[].PLACEMENT_SERVER_HEALTH_PATH` | `/healthz` | Placement server health path |
+| `manager.env[].EAO_GROUP` | `eas.hiro.io` | EAO CRD API group |
+| `manager.env[].EAO_VERSION` | `v1` | EAO CRD API version |
+| `manager.env[].EAO_KIND` | `EnergyAwareOrchestration` | EAO CRD kind |
 
-### Option C — YAML bundle (single file install)
+To override env vars, supply a custom values file:
+
+```yaml
+# my-values.yaml
+manager:
+  env:
+    - name: DECISION_AGENT_URL
+      value: "http://my-real-agent:8080"
+    - name: DECISION_AGENT_PATH
+      value: "/api/v1/agent/placement/decision"
+    - name: PLACEMENT_SERVER_PORT
+      value: ":8090"
+    - name: PLACEMENT_SERVER_PATH
+      value: "/api/v1/placement/decision"
+    - name: PLACEMENT_SERVER_HEALTH_PATH
+      value: "/healthz"
+    - name: EAO_GROUP
+      value: "eas.hiro.io"
+    - name: EAO_VERSION
+      value: "v1"
+    - name: EAO_KIND
+      value: "EnergyAwareOrchestration"
+```
+
+```bash
+helm install hiro-adaptive-orchestrator dist/chart \
+  --namespace my-namespace \
+  --create-namespace \
+  -f my-values.yaml
+```
+
+### Option C -- YAML bundle (single file install)
 
 ```bash
 make build-installer IMG=<registry>/<image>:<tag>
 kubectl apply -f dist/install.yaml
 ```
+
+---
+
+## Mock Decision Agent
+
+For local and CI testing a mock agent is included. It responds to every placement request with all candidate nodes scored equally at 50.
+
+```bash
+# Deploy the mock agent manually
+kubectl apply -f hack/mock-decision-agent.yaml
+
+# Or use hack/deploy_with_make.sh with the default USE_MOCK_AGENT=true
+```
+
+The mock agent is deployed into the operator namespace under the DNS name `decision-agent`, matching the default `DECISION_AGENT_URL=http://decision-agent:8080`.
 
 ---
 
@@ -290,7 +424,7 @@ E2E tests run against an isolated **Kind** cluster (created and torn down automa
 make test-e2e
 ```
 
-> Always run E2E tests against a dedicated Kind cluster — not your development or production cluster.
+> Always run E2E tests against a dedicated Kind cluster -- not your development or production cluster.
 
 ### Lint
 
@@ -305,22 +439,22 @@ make lint-fix    # auto-fix where possible
 
 ```
 Edit *_types.go or markers
-        │
-        ├── make manifests   (regenerate CRDs / RBAC)
-        └── make generate    (regenerate DeepCopy)
+        |
+        +-- make manifests   (regenerate CRDs / RBAC)
+        +-- make generate    (regenerate DeepCopy)
 
 Edit *.go files
-        │
-        ├── make lint-fix    (auto-fix style)
-        └── make test        (unit tests)
+        |
+        +-- make lint-fix    (auto-fix style)
+        +-- make test        (unit tests)
 
 Ready to deploy
-        │
-        ├── make docker-build docker-push IMG=...
-        └── make deploy IMG=...  OR  make helm-deploy IMG=...
+        |
+        +-- make docker-build docker-push IMG=...
+        +-- make deploy IMG=...  OR  make helm-deploy IMG=...
 ```
 
-> **Never manually edit** auto-generated files: `config/crd/bases/*.yaml`, `config/rbac/role.yaml`, `zz_generated.*.go`.
+> **Never manually edit** auto-generated files: `config/crd/bases/*.yaml`, `config/rbac/role.yaml`, `zz_generated.*.go`, `dist/chart/`, `dist/install.yaml`.
 > Always use `kubebuilder create api` / `kubebuilder create webhook` to scaffold new resources.
 
 ---
@@ -331,32 +465,36 @@ Ready to deploy
 cmd/main.go                          # Entry point: manager + PlacementServer startup
 api/v1alpha1/
   orchestrationprofile_types.go      # CRD schema (OrchestrationProfile)
-  zz_generated.deepcopy.go           # Auto-generated — DO NOT EDIT
+  zz_generated.deepcopy.go           # Auto-generated -- DO NOT EDIT
 internal/
   controller/
     orchestrationprofile_controller.go  # Main reconciler
     op_index.go                         # O(1) field index registration
-    op_watchers.go                      # Pod/Workload → Profile event mapping
+    op_watchers.go                      # Pod/Workload -> Profile event mapping
     op_validation.go                    # Spec validation
-    op_status.go                        # Status computation
+    op_status.go                        # Status computation + event recording
     op_pod_discovery.go                 # Pod resolution (OwnerReference walk)
-    op_constants.go                     # Status enum values
+    op_constants.go                     # Status enum values + event reason constants
   decision/
     server.go                        # HTTP server for kube-scheduler plugin (:8090)
-    builder.go                       # Assembles DecisionRequest from cluster state
+    builder.go                       # Assembles DecisionRequest (incl. EAO profile fetch)
     client.go                        # HTTP client to external AI agent (8s timeout)
     types.go                         # DecisionRequest, DecisionResponse, PlacementContext
   utils/
     helpers.go                       # ResolveAppFromPod, KeysOf, NodeNames
 config/
-  crd/bases/                         # Generated CRDs — DO NOT EDIT
-  rbac/                              # Generated RBAC — DO NOT EDIT
+  crd/bases/                         # Generated CRDs -- DO NOT EDIT
+  rbac/                              # Generated RBAC -- DO NOT EDIT
+  manager/manager.yaml               # Operator Deployment spec (env vars, ports, resources)
   samples/                           # Example OrchestrationProfile + nginx Deployment
-  default/                           # Kustomize base
-dist/chart/                          # Generated Helm chart
+  default/                           # Kustomize base (namespace, namePrefix)
+dist/
+  chart/                             # Generated Helm chart -- regenerated on each deploy
+  install.yaml                       # Generated single-file install bundle
 test/e2e/                            # End-to-end tests (Kind)
 hack/
-  deploy_with_make.sh                # Automated local deployment script
+  deploy_with_make.sh                # Automated full deployment script
+  mock-decision-agent.yaml           # In-cluster mock AI agent for testing
 ```
 
 ---
