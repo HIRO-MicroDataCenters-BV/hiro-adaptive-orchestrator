@@ -2,6 +2,12 @@
 
 set -euo pipefail
 
+# Resolve repo root regardless of where the script is called from.
+# KUSTOMIZE points at the binary downloaded by `make kustomize` (bin/kustomize).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+KUSTOMIZE="$REPO_ROOT/bin/kustomize"
+
 # if [ $# -lt 1 ]; then
 #   echo "Usage: $0 <kubeconfig-path>"
 #   exit 1
@@ -14,12 +20,6 @@ GITHUB_USERNAME=${GITHUB_USERNAME:-sskrishnav}
 DOCKER_REGISTRY=ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator
 HIRO_OPERATOR_IMAGE=hiro-adaptive-orchestrator-controller:latest
 SOURCE_REPO_URL=https://github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator
-# The namespace where the operator will be deployed. 
-# Check config/default/kustomization.yaml for the default namespace used in the manifests.
-NAMESPACE=hiro-adaptive-orchestrator-system
-# The service account name used by the operator. 
-# Check config/default/manager_auth_proxy_patch.yaml for the default service account name.
-SERVICE_ACCOUNT_NAME=hiro-adaptive-orchestrator-controller-manager
 
 export KUBECONFIG=${2:-~/.kube/config}
 # Export Name has to be IMG as it is used in the Makefile for docker-build and docker-push targets
@@ -27,13 +27,34 @@ export IMG=${DOCKER_REGISTRY}/${HIRO_OPERATOR_IMAGE}
 export CR_PAT=$GITHUB_PAT_TOKEN
 
 # --------------------------------------------------------------------------
+# Global deployment identity - the only two values you need to configure.
+#
+# NAME_PREFIX - Kustomize namePrefix applied to every resource name.
+#               The ServiceAccount and Deployment in this project use the
+#               kubebuilder convention base name "controller-manager", so the
+#               full names are always: <NAME_PREFIX>controller-manager
+#
+# NAMESPACE   - Kubernetes namespace for all operator resources.
+#
+# Both are written into config/default/kustomization.yaml via
+# `kustomize edit set` before `make deploy` runs.
+# --------------------------------------------------------------------------
+export NAME_PREFIX=${NAME_PREFIX:-hiro-adaptive-orchestrator-}
+export NAMESPACE=${NAMESPACE:-hiro-adaptive-orchestrator-system}
+
+# Derived - not user-configurable, always NAME_PREFIX + kubebuilder base name.
+SA_NAME="${NAME_PREFIX}controller-manager"
+DEPLOYMENT_NAME="${NAME_PREFIX}controller-manager"
+
+
+# --------------------------------------------------------------------------
 # Decision Agent
 #
-# USE_MOCK_AGENT=true  (default) — deploys hack/mock-decision-agent.yaml
+# USE_MOCK_AGENT=true  (default) - deploys hack/mock-decision-agent.yaml
 #                                   into the operator namespace and sets the
 #                                   URL automatically. No external service needed.
 #
-# USE_MOCK_AGENT=false            — uses the value of DECISION_AGENT_URL.
+# USE_MOCK_AGENT=false            - uses the value of DECISION_AGENT_URL.
 #                                   You must export it before running the script:
 #                                     export DECISION_AGENT_URL="http://my-agent:8080"
 # --------------------------------------------------------------------------
@@ -60,14 +81,22 @@ export PLACEMENT_SERVER_HEALTH_PATH=${PLACEMENT_SERVER_HEALTH_PATH:-/healthz}
 echo "========================================"
 echo "HIRO Adaptive Orchestrator Deployment"
 echo "========================================"
+echo "Namespace        : $NAMESPACE"
+echo "Name Prefix      : $NAME_PREFIX"
+echo "Service Account  : $SA_NAME  (derived)"
+echo "Deployment       : $DEPLOYMENT_NAME  (derived)"
+echo "Operator Image   : $IMG"
+echo "EAO CRD          : $EAO_GROUP/$EAO_VERSION, Kind=$EAO_KIND"
+echo "Placement Server : Port=$PLACEMENT_SERVER_PORT, Path=$PLACEMENT_SERVER_PATH, HealthPath=$PLACEMENT_SERVER_HEALTH_PATH"
+echo "Use Mock Agent   : $USE_MOCK_AGENT"
 
 if [ "$USE_MOCK_AGENT" = "true" ]; then
-  echo "Decision Agent : MOCK  ($DECISION_AGENT_URL)"
+  echo "Decision Agent   : MOCK  ($DECISION_AGENT_URL)"
 else
-  echo "Decision Agent : REAL  ($DECISION_AGENT_URL)"
+  echo "Decision Agent   : REAL  ($DECISION_AGENT_URL)"
 fi
 
-echo "Using kubeconfig: $KUBECONFIG"
+echo "Using kubeconfig : $KUBECONFIG"
 
 echo ""
 echo "Generating code..."
@@ -86,9 +115,10 @@ echo "Building operator image..."
 make build
 
 echo ""
-echo "Generate Corresponding Helm charts"
+echo "Regenerating Helm charts..."
+rm -rf "$REPO_ROOT/dist"
 kubebuilder edit --plugins=helm/v2-alpha
-    
+
 echo ""
 echo "Verifying deployment..."
 kubectl get crd orchestrationprofiles.orchestration.hiro.io
@@ -112,6 +142,11 @@ make docker-build docker-push IMG=$IMG
 # kind load docker-image $IMG --name $CLUSTER_NAME
 
 echo ""
+echo "Configuring Kustomize: namespace=$NAMESPACE  namePrefix=$NAME_PREFIX"
+(cd "$REPO_ROOT/config/default" && "$KUSTOMIZE" edit set namespace "$NAMESPACE")
+(cd "$REPO_ROOT/config/default" && "$KUSTOMIZE" edit set nameprefix "$NAME_PREFIX")
+
+echo ""
 echo "Deploying operator..."
 make deploy IMG=$IMG
 
@@ -124,8 +159,9 @@ echo "Deployment completed successfully."
 # --------------------------------------------------------------------------
 if [ "$USE_MOCK_AGENT" = "true" ]; then
   echo ""
-  echo "Deploying mock decision agent..."
-  kubectl apply -f hack/mock-decision-agent.yaml
+  echo "Deploying mock decision agent into namespace '$NAMESPACE'..."
+  sed "s/namespace: hiro-adaptive-orchestrator-system/namespace: $NAMESPACE/g" \
+    hack/mock-decision-agent.yaml | kubectl apply -f -
 
   echo ""
   echo "Waiting for mock decision agent to be ready..."
@@ -147,14 +183,14 @@ kubectl create secret docker-registry ghcr-secret \
 
 echo ""
 echo "Patching service account..."
-kubectl patch serviceaccount $SERVICE_ACCOUNT_NAME \
+kubectl patch serviceaccount "$SA_NAME" \
   -p '{"imagePullSecrets": [{"name": "ghcr-secret"}]}' \
-  --namespace=$NAMESPACE
+  --namespace="$NAMESPACE"
 
 
 echo ""
 echo "Injecting environment variables into operator deployment..."
-kubectl set env deployment/hiro-adaptive-orchestrator-controller-manager \
+kubectl set env deployment/"$DEPLOYMENT_NAME" \
   -n "$NAMESPACE" \
   DECISION_AGENT_URL="$DECISION_AGENT_URL" \
   DECISION_AGENT_PATH="$DECISION_AGENT_PATH" \

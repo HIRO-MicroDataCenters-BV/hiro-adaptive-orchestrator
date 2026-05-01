@@ -51,7 +51,7 @@ data:
                 for i, node in enumerate(candidate_nodes)
             ]
 
-            # Fallback when the request carries no nodes (shouldn't happen in practice)
+            # Fallback when the request carries no nodes (shouldn't happen in production, but just in case)
             if not node_scores:
                 node_scores = [{"nodeName": "fallback-node", "score": 50.0}]
 
