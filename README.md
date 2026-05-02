@@ -13,7 +13,42 @@ The operator runs as two concurrent services inside a single binary:
 | **Reconciliation Controller** | Watches `OrchestrationProfile` CRDs and associated workloads (Deployments, StatefulSets, Jobs). Validates specs, discovers pods, and maintains profile status. |
 | **Placement Server** (`HTTP :8090`) | Receives `PlacementContext` from a custom kube-scheduler plugin (pod + candidate nodes), enriches it with profile data via O(1) field-indexed cache lookups, delegates scoring to an external AI agent, and returns `NodeScores` to the scheduler. |
 
-### Request Flow
+### Flow 1 -- Reconciliation Controller (status tracking)
+
+The controller continuously watches workloads and keeps `OrchestrationProfile.status` in sync:
+
+```
+Kubernetes API server
+        |
+        |  OrchestrationProfile created / updated
+        |  Deployment / StatefulSet / Job updated
+        |  Pod phase changed
+        v
+Reconciliation Controller
+        |
+        +-- Validate spec (applicationRef, strategy, awareness)
+        |       on failure -> status=Error + Kubernetes Event
+        |
+        +-- Resolve workload (Deployment / StatefulSet / Job)
+        |       not found -> status=Error + Kubernetes Event
+        |
+        +-- Discover pods via OwnerReference walk
+        |       no pods   -> status=NoPods
+        |
+        +-- Compute pod health (ready / pending / failed counts)
+        |       all ready  -> status=Active
+        |       some ready -> status=Partial
+        |       none ready -> status=Pending
+        |       any failed -> status=Degraded
+        v
+OrchestrationProfile.status updated
+        |
+        +-- Status transition -> Kubernetes Event emitted
+```
+
+### Flow 2 -- Placement Server (AI-driven scheduling)
+
+Called by the kube-scheduler scoring plugin for every pending pod:
 
 ```
 kube-scheduler plugin
@@ -22,16 +57,18 @@ kube-scheduler plugin
         v
 PlacementServer (:8090)
         |
-        |  Build DecisionRequest
-        |  +-- OrchestrationProfile  (O(1) field index)
-        |  +-- AOProfileContext      (strategy + awareness + current placement)
-        +-- EAOProfileContext     (energy data, if energy awareness enabled)
+        +-- Look up OrchestrationProfile for the pod (O(1) field index)
+        |
+        +-- Build DecisionRequest
+        |   +-- AOProfileContext   (strategy + awareness + current placement)
+        |   +-- EAOProfileContext  (energy data, if energy awareness enabled)
+        |   +-- CandidateNodes     (full Node objects from scheduler)
         v
 External AI / Decision Agent  (DECISION_AGENT_URL)
         |
         |  { nodeScores }
         v
-kube-scheduler plugin  ->  schedules pod
+kube-scheduler plugin  ->  selects highest-scored node  ->  schedules pod
 ```
 
 ---
