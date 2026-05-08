@@ -26,6 +26,11 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+const kindReplicaSet = "ReplicaSet"
+const kindDeployment = "Deployment"
+const kindStatefulSet = "StatefulSet"
+const kindJob = "Job"
+
 // KeysOf extracts the keys of a string→bool map as a slice.
 // Used for generating field.NotSupported error messages with the full list
 // of accepted values.
@@ -50,7 +55,7 @@ func KeysOf(m map[string]bool) []string {
 // Returns ("", "", "") if no recognized workload owner is found.
 func ResolveAppFromPod(
 	ctx context.Context,
-	client client.Client,
+	k8sClient client.Client,
 	pod *corev1.Pod,
 ) (appName, appNamespace, appKind string) {
 	logger := logf.FromContext(ctx)
@@ -58,29 +63,29 @@ func ResolveAppFromPod(
 	for _, ref := range pod.OwnerReferences {
 		switch ref.Kind {
 
-		case "ReplicaSet":
+		case kindReplicaSet:
 			// Fetch the RS to check if a Deployment owns it above
 			rs := &appsv1.ReplicaSet{}
-			if err := client.Get(ctx, types.NamespacedName{
+			if err := k8sClient.Get(ctx, types.NamespacedName{
 				Name: ref.Name, Namespace: pod.Namespace,
 			}, rs); err != nil {
 				// Transient error — fall back to RS name itself
 				logger.V(1).Info("could not fetch owner ReplicaSet, using RS name",
 					"rs", ref.Name, "pod", pod.Name, "err", err)
-				return ref.Name, pod.Namespace, "ReplicaSet"
+				return ref.Name, pod.Namespace, kindReplicaSet
 			}
 			for _, rsOwner := range rs.OwnerReferences {
-				if rsOwner.Kind == "Deployment" {
-					return rsOwner.Name, pod.Namespace, "Deployment"
+				if rsOwner.Kind == kindDeployment {
+					return rsOwner.Name, pod.Namespace, kindDeployment
 				}
 			}
-			return rs.Name, pod.Namespace, "ReplicaSet" // standalone ReplicaSet
+			return rs.Name, pod.Namespace, kindReplicaSet // standalone ReplicaSet
 
-		case "StatefulSet":
-			return ref.Name, pod.Namespace, "StatefulSet"
+		case kindStatefulSet:
+			return ref.Name, pod.Namespace, kindStatefulSet
 
-		case "Job":
-			return ref.Name, pod.Namespace, "Job"
+		case kindJob:
+			return ref.Name, pod.Namespace, kindJob
 		}
 	}
 	return "", "", ""

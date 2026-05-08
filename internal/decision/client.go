@@ -142,7 +142,7 @@ func (c *DecisionClient) RequestDecision(
 		return nil, fmt.Errorf("calling external decision agent at %s for pod %s/%s: %w",
 			url, req.Pod.Namespace, req.Pod.Name, err)
 	}
-	defer httpResp.Body.Close()
+	defer func() { _ = httpResp.Body.Close() }()
 
 	// -------------------------------------------------------------------------
 	// Handle non-200 responses

@@ -200,7 +200,7 @@ func main() {
 	if err := (&controller.OrchestrationProfileReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("orchestrationprofile-controller"),
+		Recorder: mgr.GetEventRecorderFor("orchestrationprofile-controller"), //nolint:staticcheck
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "OrchestrationProfile")
 		os.Exit(1)

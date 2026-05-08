@@ -99,6 +99,10 @@ fi
 echo "Using kubeconfig : $KUBECONFIG"
 
 echo ""
+echo "Running linter..."
+make lint
+
+echo ""
 echo "Generating code..."
 make generate
 
