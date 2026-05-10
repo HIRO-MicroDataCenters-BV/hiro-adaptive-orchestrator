@@ -37,13 +37,17 @@ import (
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 )
 
-// makeDeployment creates a bare Deployment with a label selector of {"app": name}.
-// envtest does not run the Deployment controller, so no ReplicaSet or Pods are
-// created automatically — tests control pod creation explicitly.
-func makeDeployment(name, namespace string) *appsv1.Deployment {
+// testNamespace is the namespace used by all helpers and assertions in this file.
+const testNamespace = "default"
+
+// makeDeployment creates a bare Deployment with a label selector of {"app": name}
+// in the "default" namespace. envtest does not run the Deployment controller, so
+// no ReplicaSet or Pods are created automatically — tests control pod creation
+// explicitly.
+func makeDeployment(name string) *appsv1.Deployment {
 	labels := map[string]string{"app": name}
 	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
 		Spec: appsv1.DeploymentSpec{
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
@@ -56,11 +60,12 @@ func makeDeployment(name, namespace string) *appsv1.Deployment {
 	}
 }
 
-// makePod creates a pod with the given labels and sets its Phase via the status
-// subresource after creation. ready=true additionally sets the PodReady condition.
-func makePod(ctx context.Context, name, namespace string, labels map[string]string, phase corev1.PodPhase, ready bool) *corev1.Pod {
+// makePod creates a pod in the "default" namespace with the given labels and
+// sets its Phase via the status subresource after creation. ready=true
+// additionally sets the PodReady condition.
+func makePod(ctx context.Context, name string, labels map[string]string, phase corev1.PodPhase, ready bool) {
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace, Labels: labels},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "app", Image: "nginx:latest"}},
 		},
@@ -74,7 +79,6 @@ func makePod(ctx context.Context, name, namespace string, labels map[string]stri
 		}
 	}
 	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
-	return pod
 }
 
 // reconcileRequest builds the reconcile.Request for a cluster-scoped profile.
@@ -184,7 +188,7 @@ var _ = Describe("OrchestrationProfile Reconciler", func() {
 		)
 
 		BeforeEach(func() {
-			Expect(k8sClient.Create(testCtx, makeDeployment(deployName, "default"))).To(Succeed())
+			Expect(k8sClient.Create(testCtx, makeDeployment(deployName))).To(Succeed())
 			profile := &orchestrationv1alpha1.OrchestrationProfile{
 				ObjectMeta: metav1.ObjectMeta{Name: profileName},
 				Spec:       baseSpec(deployName),
@@ -226,9 +230,9 @@ var _ = Describe("OrchestrationProfile Reconciler", func() {
 
 		BeforeEach(func() {
 			labels := map[string]string{"app": deployName}
-			Expect(k8sClient.Create(testCtx, makeDeployment(deployName, "default"))).To(Succeed())
-			makePod(testCtx, deployName+"-pod-1", "default", labels, corev1.PodRunning, true)
-			makePod(testCtx, deployName+"-pod-2", "default", labels, corev1.PodRunning, true)
+			Expect(k8sClient.Create(testCtx, makeDeployment(deployName))).To(Succeed())
+			makePod(testCtx, deployName+"-pod-1", labels, corev1.PodRunning, true)
+			makePod(testCtx, deployName+"-pod-2", labels, corev1.PodRunning, true)
 			profile := &orchestrationv1alpha1.OrchestrationProfile{
 				ObjectMeta: metav1.ObjectMeta{Name: profileName},
 				Spec:       baseSpec(deployName),
@@ -280,8 +284,8 @@ var _ = Describe("OrchestrationProfile Reconciler", func() {
 
 		BeforeEach(func() {
 			labels := map[string]string{"app": deployName}
-			Expect(k8sClient.Create(testCtx, makeDeployment(deployName, "default"))).To(Succeed())
-			makePod(testCtx, deployName+"-pod-1", "default", labels, corev1.PodPending, false)
+			Expect(k8sClient.Create(testCtx, makeDeployment(deployName))).To(Succeed())
+			makePod(testCtx, deployName+"-pod-1", labels, corev1.PodPending, false)
 			profile := &orchestrationv1alpha1.OrchestrationProfile{
 				ObjectMeta: metav1.ObjectMeta{Name: profileName},
 				Spec:       baseSpec(deployName),
@@ -327,8 +331,8 @@ var _ = Describe("OrchestrationProfile Reconciler", func() {
 
 		BeforeEach(func() {
 			labels := map[string]string{"app": deployName}
-			Expect(k8sClient.Create(testCtx, makeDeployment(deployName, "default"))).To(Succeed())
-			makePod(testCtx, deployName+"-pod-1", "default", labels, corev1.PodFailed, false)
+			Expect(k8sClient.Create(testCtx, makeDeployment(deployName))).To(Succeed())
+			makePod(testCtx, deployName+"-pod-1", labels, corev1.PodFailed, false)
 			profile := &orchestrationv1alpha1.OrchestrationProfile{
 				ObjectMeta: metav1.ObjectMeta{Name: profileName},
 				Spec:       baseSpec(deployName),
@@ -374,9 +378,9 @@ var _ = Describe("OrchestrationProfile Reconciler", func() {
 
 		BeforeEach(func() {
 			labels := map[string]string{"app": deployName}
-			Expect(k8sClient.Create(testCtx, makeDeployment(deployName, "default"))).To(Succeed())
-			makePod(testCtx, deployName+"-pod-ready", "default", labels, corev1.PodRunning, true)
-			makePod(testCtx, deployName+"-pod-pending", "default", labels, corev1.PodPending, false)
+			Expect(k8sClient.Create(testCtx, makeDeployment(deployName))).To(Succeed())
+			makePod(testCtx, deployName+"-pod-ready", labels, corev1.PodRunning, true)
+			makePod(testCtx, deployName+"-pod-pending", labels, corev1.PodPending, false)
 			profile := &orchestrationv1alpha1.OrchestrationProfile{
 				ObjectMeta: metav1.ObjectMeta{Name: profileName},
 				Spec:       baseSpec(deployName),
