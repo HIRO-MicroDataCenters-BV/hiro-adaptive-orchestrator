@@ -28,6 +28,7 @@ import (
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -93,6 +94,37 @@ var _ = AfterSuite(func() {
 		return testEnv.Stop()
 	}, time.Minute, time.Second).Should(Succeed())
 })
+
+// -----------------------------------------------------------------------------
+// Shared test helpers (used across all _test.go files in this package)
+// -----------------------------------------------------------------------------
+
+// newReconciler builds a reconciler wired to the envtest client with a buffered
+// fake event recorder so Recorder.Event() calls never block during tests.
+func newReconciler() *OrchestrationProfileReconciler {
+	return &OrchestrationProfileReconciler{
+		Client:   k8sClient,
+		Scheme:   k8sClient.Scheme(),
+		Recorder: record.NewFakeRecorder(100),
+	}
+}
+
+// baseSpec returns a minimal valid OrchestrationProfileSpec referencing a
+// Deployment in the default namespace. appName must match a real Deployment
+// when the test expects the reconciler to progress past the app-existence check.
+func baseSpec(appName string) orchestrationv1alpha1.OrchestrationProfileSpec {
+	return orchestrationv1alpha1.OrchestrationProfileSpec{
+		ApplicationRef: orchestrationv1alpha1.ApplicationReference{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+			Name:       appName,
+			Namespace:  "default",
+		},
+		Placement: orchestrationv1alpha1.PlacementSpec{
+			Strategy: "Balanced",
+		},
+	}
+}
 
 // getFirstFoundEnvTestBinaryDir locates the first binary in the specified path.
 // ENVTEST-based tests depend on specific binaries, usually located in paths set by

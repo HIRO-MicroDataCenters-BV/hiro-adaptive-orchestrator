@@ -536,6 +536,82 @@ hack/
 
 ---
 
+## Upgrading Go Version
+
+When upgrading the Go version for this project, three files must be kept in sync. They are **not** updated automatically by kubebuilder — each requires a manual edit.
+
+| File | Field | Purpose |
+|------|-------|---------|
+| `go.mod` | `go X.Y.Z` | Minimum Go version required by the project |
+| `Makefile` | `GOLANGCI_LINT_VERSION` | golangci-lint version downloaded by `make lint` |
+| `.custom-gcl.yml` | `version:` | golangci-lint version used to compile the custom linter binary (must match Makefile) |
+
+### Why they must match
+
+`make lint` builds a **custom** golangci-lint binary that includes the `logcheck` plugin. The custom binary embeds the Go language version from golangci-lint's own `go.mod`. If that embedded version is lower than the `go` directive in `go.mod`, golangci-lint refuses to run:
+
+```
+Error: can't load config: the Go language version (go1.24) used to build golangci-lint
+is lower than the targeted Go version (1.25.3)
+```
+
+Each golangci-lint minor version targets a specific minimum Go version. Pick a golangci-lint release whose `go` directive matches or is >= your project's Go version:
+
+| golangci-lint version | Built with Go |
+|-----------------------|---------------|
+| v2.8.x | 1.24 |
+| v2.9.x and later | 1.25 |
+
+### Step-by-step upgrade
+
+**1. Update the Go version in `go.mod`**
+
+```bash
+go mod edit -go=X.Y
+go mod tidy
+```
+
+**2. Find a compatible golangci-lint version**
+
+```bash
+# Check the go directive for a candidate release
+curl -s "https://proxy.golang.org/github.com/golangci/golangci-lint/v2/@v/vX.Y.Z.mod" | grep "^go "
+```
+
+**3. Update `Makefile`** (kubebuilder-generated, but requires manual version bump)
+
+```makefile
+GOLANGCI_LINT_VERSION ?= vX.Y.Z   # line ~203
+```
+
+**4. Update `.custom-gcl.yml`** to the same version
+
+```yaml
+version: vX.Y.Z   # must match GOLANGCI_LINT_VERSION in Makefile
+```
+
+**5. Clear the cached binary and verify**
+
+```bash
+rm -f bin/golangci-lint bin/golangci-lint-v<old-version>
+make lint
+```
+
+### Verify versions at any time
+
+```bash
+# Binary version and its embedded Go version
+bin/golangci-lint version
+go version -m bin/golangci-lint | head -1
+
+# Project and Makefile versions
+grep "^go " go.mod
+grep "GOLANGCI_LINT_VERSION" Makefile
+grep "^version:" .custom-gcl.yml
+```
+
+---
+
 ## Contributing
 
 1. Fork the repository and create a feature branch.
