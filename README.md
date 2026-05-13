@@ -2,6 +2,39 @@
 
 A Kubernetes operator that provides intelligent, AI-driven pod placement and adaptive workload orchestration. It introduces the `OrchestrationProfile` custom resource to bind placement strategies to workloads, and integrates with the Kubernetes scheduler to score nodes using an external AI decision agent.
 
+---
+
+## Table of Contents
+
+- [Architecture](#architecture)
+  - [Flow 1 -- Reconciliation Controller](#flow-1----reconciliation-controller-status-tracking)
+  - [Flow 2 -- Placement Server](#flow-2----placement-server-ai-driven-scheduling)
+- [Features](#features)
+- [Prerequisites](#prerequisites)
+- [Project Initialization](#project-initialization)
+- [Getting Started -- Local Development](#getting-started----local-development)
+- [Quick Start (automated)](#quick-start-automated)
+- [Configuration](#configuration)
+  - [Deployment Identity](#deployment-identity)
+  - [Environment Variables](#environment-variables-operator-pod)
+  - [OrchestrationProfile CRD Reference](#orchestrationprofile-crd-reference)
+- [Deployment](#deployment)
+  - [Option A -- Kustomize](#option-a----kustomize-recommended-for-development)
+  - [Option B -- Helm](#option-b----helm)
+  - [Option C -- YAML Bundle](#option-c----yaml-bundle-single-file-install)
+- [Mock Decision Agent](#mock-decision-agent)
+- [Testing](#testing)
+  - [Unit & Integration Tests](#unit--integration-tests)
+  - [End-to-End Tests](#end-to-end-tests)
+  - [Lint](#lint)
+- [Development Workflow](#development-workflow)
+- [Project Structure](#project-structure)
+- [Upgrading Go Version](#upgrading-go-version)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
 ## Architecture
 
 ![Architecture](./K8S_%20adaptive_orchestrator_new-Integrate-EnergyAwareOrchestrator-1.gif)
