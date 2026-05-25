@@ -409,6 +409,50 @@ func mapEAOToProfileContext(eao *unstructured.Unstructured) *EAOProfileContext {
 }
 
 // =============================================================================
+// Energy gate check
+// =============================================================================
+
+// CheckEnergyGate checks whether the pod's governing OrchestrationProfile has
+// energy awareness enabled and, if so, whether the EAO reports sufficient
+// energy for scheduling.
+//
+// Called by the scheduler extender /filter handler once per pod scheduling event.
+// Returns Allowed=true when:
+//   - no profile governs the pod (unmanaged pods are never gated)
+//   - energy awareness is disabled in the profile
+//   - EAO data is unavailable (best-effort; scheduling is not blocked)
+//   - EAO energy metrics indicate sufficient energy
+func (b *DecisionContextBuilder) CheckEnergyGate(
+	ctx context.Context,
+	pod *corev1.Pod,
+) (EnergyGateResult, error) {
+	profile, err := b.findProfileForPod(ctx, pod)
+	if err != nil {
+		// Allow on lookup error -- do not block scheduling
+		return EnergyGateResult{Allowed: true}, err
+	}
+	if profile == nil || !profile.Spec.Placement.Awareness.Energy {
+		return EnergyGateResult{Allowed: true}, nil
+	}
+
+	eaoProfile, err := b.fetchEAOProfile(ctx, pod)
+	if err != nil || eaoProfile == nil {
+		// EAO data unavailable -- allow scheduling (best-effort energy gating)
+		return EnergyGateResult{Allowed: true}, nil
+	}
+
+	if eaoProfile.EnergyMetrics != nil && !eaoProfile.EnergyMetrics.Sufficient {
+		reason := "insufficient energy available"
+		if eaoProfile.Decision != nil && eaoProfile.Decision.Reason != "" {
+			reason = eaoProfile.Decision.Reason
+		}
+		return EnergyGateResult{Allowed: false, Reason: reason}, nil
+	}
+
+	return EnergyGateResult{Allowed: true}, nil
+}
+
+// =============================================================================
 // PlacementContext builder helper
 //
 // Used by the kube-scheduler scoring plugin to construct the PlacementContext

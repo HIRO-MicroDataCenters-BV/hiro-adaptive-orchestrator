@@ -527,6 +527,10 @@ spec:
           value: v1
         - name: EAO_KIND
           value: EnergyAwareOrchestration
+        - name: EXTENDER_FILTER_PATH
+          value: /extender/filter
+        - name: EXTENDER_PRIORITIZE_PATH
+          value: /extender/prioritize
         image: ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/hiro-adaptive-orchestrator-controller:latest
         livenessProbe:
           httpGet:

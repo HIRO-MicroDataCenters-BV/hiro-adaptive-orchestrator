@@ -82,6 +82,10 @@ spec:
           value: "v1"
         - name: EAO_KIND
           value: "EnergyAwareOrchestration"
+        - name: EXTENDER_FILTER_PATH
+          value: "/extender/filter"
+        - name: EXTENDER_PRIORITIZE_PATH
+          value: "/extender/prioritize"
         ports: 
         - containerPort: 8090 # Update with actual Placement Server port
           name: placement-srv

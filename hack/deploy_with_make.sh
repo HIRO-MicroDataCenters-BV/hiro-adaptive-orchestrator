@@ -2,236 +2,257 @@
 
 set -euo pipefail
 
-# Resolve repo root regardless of where the script is called from.
-# KUSTOMIZE points at the binary downloaded by `make kustomize` (bin/kustomize).
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 KUSTOMIZE="$REPO_ROOT/bin/kustomize"
 
-# if [ $# -lt 1 ]; then
-#   echo "Usage: $0 <kubeconfig-path>"
-#   exit 1
-# fi
+# ---------------------------------------------------------------------------
+# Configuration (override via environment variables)
+# ---------------------------------------------------------------------------
 
-CLUSTER_NAME=${1:-sample}
-GITHUB_PAT_TOKEN=${GITHUB_PAT_TOKEN:-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}
 GITHUB_USERNAME=${GITHUB_USERNAME:-sskrishnav}
-# The image URL format is always ghcr.io/<org-or-user-lowercase>/<repo-name>:<tag>.
+: "${GITHUB_PAT_TOKEN:?GITHUB_PAT_TOKEN must be set (export GITHUB_PAT_TOKEN=<your-ghcr-token>)}"
+
 DOCKER_REGISTRY=ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator
 HIRO_OPERATOR_IMAGE=hiro-adaptive-orchestrator-controller:latest
-SOURCE_REPO_URL=https://github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator
 
 export KUBECONFIG=${2:-~/.kube/config}
-# Export Name has to be IMG as it is used in the Makefile for docker-build and docker-push targets
-export IMG=${DOCKER_REGISTRY}/${HIRO_OPERATOR_IMAGE}
-export CR_PAT=$GITHUB_PAT_TOKEN
+export IMG="${DOCKER_REGISTRY}/${HIRO_OPERATOR_IMAGE}"
+export CR_PAT="$GITHUB_PAT_TOKEN"
 
-# --------------------------------------------------------------------------
-# Global deployment identity - the only two values you need to configure.
-#
-# NAME_PREFIX - Kustomize namePrefix applied to every resource name.
-#               The ServiceAccount and Deployment in this project use the
-#               kubebuilder convention base name "controller-manager", so the
-#               full names are always: <NAME_PREFIX>controller-manager
-#
-# NAMESPACE   - Kubernetes namespace for all operator resources.
-#
-# Both are written into config/default/kustomization.yaml via
-# `kustomize edit set` before `make deploy` runs.
-# --------------------------------------------------------------------------
+# Kustomize deployment identity
 export NAME_PREFIX=${NAME_PREFIX:-hiro-adaptive-orchestrator-}
 export NAMESPACE=${NAMESPACE:-hiro-adaptive-orchestrator-system}
 
-# Derived - not user-configurable, always NAME_PREFIX + kubebuilder base name.
+# Derived names (kubebuilder convention: <NAME_PREFIX>controller-manager)
 SA_NAME="${NAME_PREFIX}controller-manager"
 DEPLOYMENT_NAME="${NAME_PREFIX}controller-manager"
 
-
-# --------------------------------------------------------------------------
-# Decision Agent
-#
-# USE_MOCK_AGENT=true  (default) - deploys hack/mock-decision-agent.yaml
-#                                   into the operator namespace and sets the
-#                                   URL automatically. No external service needed.
-#
-# USE_MOCK_AGENT=false            - uses the value of DECISION_AGENT_URL.
-#                                   You must export it before running the script:
-#                                     export DECISION_AGENT_URL="http://my-agent:8080"
-# --------------------------------------------------------------------------
+# Decision agent
 USE_MOCK_AGENT=${USE_MOCK_AGENT:-true}
-
 if [ "$USE_MOCK_AGENT" = "true" ]; then
   export DECISION_AGENT_URL="http://decision-agent:8080"
 else
   : "${DECISION_AGENT_URL:?DECISION_AGENT_URL must be set when USE_MOCK_AGENT=false}"
 fi
 
-# EnergyAwareOrchestration CRD coordinates (override if your EAO operator uses different values)
+# EnergyAwareOrchestration CRD coordinates
 export EAO_GROUP="${EAO_GROUP:-eas.hiro.io}"
 export EAO_VERSION="${EAO_VERSION:-v1}"
 export EAO_KIND="${EAO_KIND:-EnergyAwareOrchestration}"
 
-# PlacementServer configuration (override if needed)
+# PlacementServer / Extender paths
 export PLACEMENT_SERVER_PORT=${PLACEMENT_SERVER_PORT:-:8090}
 export PLACEMENT_SERVER_PATH=${PLACEMENT_SERVER_PATH:-/api/v1/placement/decision}
-export DECISION_AGENT_PATH=${DECISION_AGENT_PATH:-/api/v1/agent/placement/decision}
 export PLACEMENT_SERVER_HEALTH_PATH=${PLACEMENT_SERVER_HEALTH_PATH:-/healthz}
+export DECISION_AGENT_PATH=${DECISION_AGENT_PATH:-/api/v1/agent/placement/decision}
+export EXTENDER_FILTER_PATH=${EXTENDER_FILTER_PATH:-/extender/filter}
+export EXTENDER_PRIORITIZE_PATH=${EXTENDER_PRIORITIZE_PATH:-/extender/prioritize}
 
+# Set APPLY_SCHEDULER_CONFIG=true to create the hiro-scheduler-config ConfigMap in kube-system
+APPLY_SCHEDULER_CONFIG=${APPLY_SCHEDULER_CONFIG:-false}
 
-echo "========================================"
-echo "HIRO Adaptive Orchestrator Deployment"
-echo "========================================"
-echo "Namespace        : $NAMESPACE"
-echo "Name Prefix      : $NAME_PREFIX"
-echo "Service Account  : $SA_NAME  (derived)"
-echo "Deployment       : $DEPLOYMENT_NAME  (derived)"
-echo "Operator Image   : $IMG"
-echo "EAO CRD          : $EAO_GROUP/$EAO_VERSION, Kind=$EAO_KIND"
-echo "Placement Server : Port=$PLACEMENT_SERVER_PORT, Path=$PLACEMENT_SERVER_PATH, HealthPath=$PLACEMENT_SERVER_HEALTH_PATH"
-echo "Use Mock Agent   : $USE_MOCK_AGENT"
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-if [ "$USE_MOCK_AGENT" = "true" ]; then
-  echo "Decision Agent   : MOCK  ($DECISION_AGENT_URL)"
-else
-  echo "Decision Agent   : REAL  ($DECISION_AGENT_URL)"
-fi
+step() { printf '\n==> %s\n' "$*"; }
 
-echo "Using kubeconfig : $KUBECONFIG"
+# ---------------------------------------------------------------------------
+# Functions
+# ---------------------------------------------------------------------------
 
-echo ""
-echo "Running linter..."
-make lint
+print_config() {
+  echo "========================================"
+  echo "HIRO Adaptive Orchestrator Deployment"
+  echo "========================================"
+  echo "Namespace          : $NAMESPACE"
+  echo "Name Prefix        : $NAME_PREFIX"
+  echo "Service Account    : $SA_NAME  (derived)"
+  echo "Deployment         : $DEPLOYMENT_NAME  (derived)"
+  echo "Operator Image     : $IMG"
+  echo "Kubeconfig         : $KUBECONFIG"
+  echo "EAO CRD            : $EAO_GROUP/$EAO_VERSION, Kind=$EAO_KIND"
+  echo "Placement Server   : Port=$PLACEMENT_SERVER_PORT  Path=$PLACEMENT_SERVER_PATH  Health=$PLACEMENT_SERVER_HEALTH_PATH"
+  echo "Extender Filter    : $EXTENDER_FILTER_PATH"
+  echo "Extender Prioritize: $EXTENDER_PRIORITIZE_PATH"
+  if [ "$USE_MOCK_AGENT" = "true" ]; then
+    echo "Decision Agent     : MOCK  ($DECISION_AGENT_URL)"
+  else
+    echo "Decision Agent     : REAL  ($DECISION_AGENT_URL)"
+  fi
+  echo "Scheduler Config   : APPLY_SCHEDULER_CONFIG=$APPLY_SCHEDULER_CONFIG"
+}
 
-echo ""
-echo "Generating code..."
-make generate
+generate_code() {
+  step "Running linter..."
+  make lint
 
-echo ""
-echo "Generating manifests..."
-make manifests
+  step "Generating code and manifests..."
+  make generate
+  make manifests
 
-echo ""
-echo "Installing CRDs..."
-make install
+  step "Installing CRDs..."
+  make install
+  kubectl get crd orchestrationprofiles.orchestration.hiro.io
 
-echo ""
-echo "Building operator image..."
-make build
+  step "Building operator binary..."
+  make build
 
-echo ""
-echo "Regenerating Helm charts..."
-rm -rf "$REPO_ROOT/dist"
-kubebuilder edit --plugins=helm/v2-alpha
+  step "Regenerating Helm charts..."
+  rm -rf "$REPO_ROOT/dist"
+  kubebuilder edit --plugins=helm/v2-alpha
+}
 
-echo ""
-echo "Verifying deployment..."
-kubectl get crd orchestrationprofiles.orchestration.hiro.io
+build_and_push_image() {
+  step "Authenticating with GitHub Container Registry..."
+  echo "$CR_PAT" | docker login ghcr.io -u "$GITHUB_USERNAME" --password-stdin
 
-# echo ""
-# echo "Running operator locally..."
-# make run
+  step "Building and pushing operator image: $IMG"
+  make docker-build docker-push IMG="$IMG"
+}
 
-# Authenticate with GitHub Container Registry (GHCR) using the provided Personal Access Token (PAT)
-echo ""
-echo "Authenticating with GitHub Container Registry (GHCR)..."
-echo $CR_PAT | docker login ghcr.io -u $GITHUB_USERNAME --password-stdin
+configure_kustomize() {
+  step "Configuring Kustomize (namespace=$NAMESPACE, namePrefix=$NAME_PREFIX)..."
+  (cd "$REPO_ROOT/config/default" && "$KUSTOMIZE" edit set namespace "$NAMESPACE")
+  (cd "$REPO_ROOT/config/default" && "$KUSTOMIZE" edit set nameprefix "$NAME_PREFIX")
+}
 
-# Deploy the operator pod in the Kubernetes cluster (instead of running locally)
-echo ""
-echo "Build the Operator image and push to the registry..."
-make docker-build docker-push IMG=$IMG
+deploy_operator() {
+  step "Deploying operator..."
+  make deploy IMG="$IMG"
+}
 
-# echo ""
-# echo "Loading the Operator image into the kind cluster..."
-# kind load docker-image $IMG --name $CLUSTER_NAME
-
-echo ""
-echo "Configuring Kustomize: namespace=$NAMESPACE  namePrefix=$NAME_PREFIX"
-(cd "$REPO_ROOT/config/default" && "$KUSTOMIZE" edit set namespace "$NAMESPACE")
-(cd "$REPO_ROOT/config/default" && "$KUSTOMIZE" edit set nameprefix "$NAME_PREFIX")
-
-echo ""
-echo "Deploying operator..."
-make deploy IMG=$IMG
-
-echo ""
-echo "Deployment completed successfully."
-
-# --------------------------------------------------------------------------
-# Mock Decision Agent (deployed before operator restart so it is reachable
-# the moment the operator pod comes back up)
-# --------------------------------------------------------------------------
-if [ "$USE_MOCK_AGENT" = "true" ]; then
-  echo ""
-  echo "Deploying mock decision agent into namespace '$NAMESPACE'..."
+deploy_mock_agent() {
+  step "Deploying mock decision agent into namespace '$NAMESPACE'..."
   sed "s/namespace: hiro-adaptive-orchestrator-system/namespace: $NAMESPACE/g" \
     hack/mock-decision-agent.yaml | kubectl apply -f -
 
-  echo ""
-  echo "Waiting for mock decision agent to be ready..."
+  step "Waiting for mock decision agent pod to be ready..."
   kubectl wait --for=condition=Ready pod \
     -l app=decision-agent \
     -n "$NAMESPACE" \
     --timeout=120s
   echo "Mock decision agent is ready."
-fi
+}
 
-echo ""
-echo "Creating image pull secret..."
-kubectl create secret docker-registry ghcr-secret \
-  --docker-server=ghcr.io \
-  --docker-username=$GITHUB_USERNAME \
-  --docker-password=$GITHUB_PAT_TOKEN \
-  --namespace=$NAMESPACE \
-  --dry-run=client -o yaml | kubectl apply -f -
+create_image_pull_secret() {
+  step "Creating GHCR image pull secret..."
+  kubectl create secret docker-registry ghcr-secret \
+    --docker-server=ghcr.io \
+    --docker-username="$GITHUB_USERNAME" \
+    --docker-password="$GITHUB_PAT_TOKEN" \
+    --namespace="$NAMESPACE" \
+    --dry-run=client -o yaml | kubectl apply -f -
+}
 
-echo ""
-echo "Patching service account..."
-kubectl patch serviceaccount "$SA_NAME" \
-  -p '{"imagePullSecrets": [{"name": "ghcr-secret"}]}' \
-  --namespace="$NAMESPACE"
+patch_service_account() {
+  step "Patching service account '$SA_NAME' with image pull secret..."
+  kubectl patch serviceaccount "$SA_NAME" \
+    -p '{"imagePullSecrets": [{"name": "ghcr-secret"}]}' \
+    --namespace="$NAMESPACE"
+}
 
+inject_env_vars() {
+  step "Injecting environment variables into operator deployment..."
+  kubectl set env deployment/"$DEPLOYMENT_NAME" \
+    -n "$NAMESPACE" \
+    DECISION_AGENT_URL="$DECISION_AGENT_URL" \
+    DECISION_AGENT_PATH="$DECISION_AGENT_PATH" \
+    PLACEMENT_SERVER_PORT="$PLACEMENT_SERVER_PORT" \
+    PLACEMENT_SERVER_PATH="$PLACEMENT_SERVER_PATH" \
+    PLACEMENT_SERVER_HEALTH_PATH="$PLACEMENT_SERVER_HEALTH_PATH" \
+    EXTENDER_FILTER_PATH="$EXTENDER_FILTER_PATH" \
+    EXTENDER_PRIORITIZE_PATH="$EXTENDER_PRIORITIZE_PATH" \
+    EAO_GROUP="$EAO_GROUP" \
+    EAO_VERSION="$EAO_VERSION" \
+    EAO_KIND="$EAO_KIND"
+}
 
-echo ""
-echo "Injecting environment variables into operator deployment..."
-kubectl set env deployment/"$DEPLOYMENT_NAME" \
-  -n "$NAMESPACE" \
-  DECISION_AGENT_URL="$DECISION_AGENT_URL" \
-  DECISION_AGENT_PATH="$DECISION_AGENT_PATH" \
-  PLACEMENT_SERVER_PORT="$PLACEMENT_SERVER_PORT" \
-  PLACEMENT_SERVER_PATH="$PLACEMENT_SERVER_PATH" \
-  PLACEMENT_SERVER_HEALTH_PATH="$PLACEMENT_SERVER_HEALTH_PATH" \
-  EAO_GROUP="$EAO_GROUP" \
-  EAO_VERSION="$EAO_VERSION" \
-  EAO_KIND="$EAO_KIND"
+restart_and_wait_operator() {
+  step "Restarting operator pod to pick up new image and env vars..."
+  kubectl delete pod -l control-plane=controller-manager -n "$NAMESPACE" --ignore-not-found
 
-echo ""
-echo "Restarting operator pod to pick up new image and env vars..."
-kubectl delete pod -l control-plane=controller-manager -n $NAMESPACE --ignore-not-found
+  step "Waiting for operator pod to be ready..."
+  kubectl wait --for=condition=Ready pod \
+    -l app.kubernetes.io/name=hiro-adaptive-orchestrator \
+    -n "$NAMESPACE" \
+    --timeout=180s
 
-echo ""
-echo "Verifying operator deployment..."
-kubectl get pods -n $NAMESPACE
+  kubectl get pods -n "$NAMESPACE"
+}
 
-echo ""
-echo "Waiting for operator pod to be running (label: app.kubernetes.io/name=hiro-adaptive-orchestrator)..."
-kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=hiro-adaptive-orchestrator -n $NAMESPACE --timeout=180s
+apply_extender_scheduler_config() {
+  if [ "$APPLY_SCHEDULER_CONFIG" != "true" ]; then
+    step "Skipping scheduler extender ConfigMap (APPLY_SCHEDULER_CONFIG=false)."
+    echo "To apply later, re-run with: APPLY_SCHEDULER_CONFIG=true $0"
+    return
+  fi
 
-echo ""
-echo "Applying sample OrchestrationProfile"
-# kubectl apply -f config/samples/orchestration_v1alpha1_orchestrationprofile.yaml
-kubectl apply -k config/samples/
+  step "Applying scheduler extender ConfigMap to kube-system..."
+  local placement_service="${NAME_PREFIX}controller-manager-placement-service"
+  local tmp_config
+  tmp_config=$(mktemp /tmp/hiro-scheduler-config-XXXXXX.yaml)
 
-echo ""
-echo "Verify CRD resource is created..."
-kubectl get orchestrationprofiles
+  sed \
+    -e "s|hiro-adaptive-orchestrator-controller-manager-placement-service|${placement_service}|g" \
+    -e "s|hiro-adaptive-orchestrator-system|${NAMESPACE}|g" \
+    "$REPO_ROOT/config/extender/scheduler-config.yaml" > "$tmp_config"
 
-echo ""
-echo "Describe the created OrchestrationProfile resource..."
-kubectl get orchestrationprofiles -o yaml
+  kubectl create configmap hiro-scheduler-config \
+    --from-file=scheduler-config.yaml="$tmp_config" \
+    -n kube-system \
+    --dry-run=client -o yaml | kubectl apply -f -
 
-echo ""
-# Print the line in orange color (ANSI escape code for orange is 33 for yellow, as true orange is not standard)
-echo -e "\033[33m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\033[0m"
-echo -e "\033[33m++++ Deployment and sample applied.                                ++++\033[0m"
-echo -e "\033[33m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\033[0m"
+  rm -f "$tmp_config"
+
+  echo "ConfigMap 'hiro-scheduler-config' created/updated in kube-system."
+  echo "NEXT STEP: mount this ConfigMap into the kube-scheduler pod and"
+  echo "pass --config=/etc/kubernetes/scheduler-config.yaml."
+  echo "See config/extender/scheduler-config.yaml for full mount instructions."
+}
+
+apply_sample_resources() {
+  step "Applying sample OrchestrationProfile..."
+  kubectl apply -k config/samples/
+
+  step "Verifying OrchestrationProfile resources..."
+  kubectl get orchestrationprofiles
+  kubectl get orchestrationprofiles -o yaml
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+main() {
+  print_config
+
+  generate_code
+  build_and_push_image
+  configure_kustomize
+  deploy_operator
+
+  if [ "$USE_MOCK_AGENT" = "true" ]; then
+    deploy_mock_agent
+  fi
+
+  create_image_pull_secret
+  patch_service_account
+  inject_env_vars
+  restart_and_wait_operator
+
+  apply_extender_scheduler_config
+  apply_sample_resources
+
+  echo ""
+  echo -e "\033[33m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\033[0m"
+  echo -e "\033[33m++++ Deployment and sample applied.                                ++++\033[0m"
+  echo -e "\033[33m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\033[0m"
+}
+
+main "$@"

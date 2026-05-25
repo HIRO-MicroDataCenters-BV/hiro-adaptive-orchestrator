@@ -256,6 +256,16 @@ func main() {
 		placementServerHealthPath = "/healthz"
 	}
 
+	extenderFilterPath := os.Getenv("EXTENDER_FILTER_PATH")
+	if extenderFilterPath == "" {
+		extenderFilterPath = "/extender/filter"
+	}
+
+	extenderPrioritizePath := os.Getenv("EXTENDER_PRIORITIZE_PATH")
+	if extenderPrioritizePath == "" {
+		extenderPrioritizePath = "/extender/prioritize"
+	}
+
 	eaoGroup := os.Getenv("EAO_GROUP")
 	if eaoGroup == "" {
 		eaoGroup = "eas.hiro.io"
@@ -278,6 +288,8 @@ func main() {
 		"agentPath", decisionAgentPath,
 		"placementDecisionPath", placementServerPath,
 		"placementHealthPath", placementServerHealthPath,
+		"extenderFilterPath", extenderFilterPath,
+		"extenderPrioritizePath", extenderPrioritizePath,
 		"eaoGroup", eaoGVK.Group,
 		"eaoVersion", eaoGVK.Version,
 		"eaoKind", eaoGVK.Kind,
@@ -305,6 +317,8 @@ func main() {
 		placementServerPort,
 		placementServerPath,
 		placementServerHealthPath,
+		extenderFilterPath,
+		extenderPrioritizePath,
 		10*time.Second, // requestTimeout: must be > DecisionClient timeout
 	)
 
