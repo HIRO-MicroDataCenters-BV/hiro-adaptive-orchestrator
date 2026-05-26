@@ -462,7 +462,7 @@ func equalPriorities(nodes []corev1.Node) HostPriorityList {
 }
 
 // writeExtenderJSON writes v as JSON with the X-Request-ID header set.
-func writeExtenderJSON(w http.ResponseWriter, requestID string, v interface{}) {
+func writeExtenderJSON(w http.ResponseWriter, requestID string, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Request-ID", requestID)
 	_ = json.NewEncoder(w).Encode(v)

@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hiro-scheduler
+  namespace: system
+  labels:
+    app: hiro-scheduler
+    app.kubernetes.io/name: hiro-scheduler
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hiro-scheduler
+  template:
+    metadata:
+      labels:
+        app: hiro-scheduler
+        app.kubernetes.io/name: hiro-scheduler
+    spec:
+      serviceAccountName: hiro-scheduler
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: hiro-scheduler
+          image: hiro-scheduler:latest
+          command:
+            - /usr/local/bin/hiro-scheduler
+          args:
+            - --config=/etc/kubernetes/hiro-scheduler/scheduler-config.yaml
+            - --v=2
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: scheduler-config
+              mountPath: /etc/kubernetes/hiro-scheduler
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 10259
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 10259
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: scheduler-config
+          configMap:
+            name: hiro-scheduler-config
+      terminationGracePeriodSeconds: 10

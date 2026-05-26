@@ -40,6 +40,10 @@ manager:
       value: v1
     - name: EAO_KIND
       value: EnergyAwareOrchestration
+    - name: EXTENDER_FILTER_PATH
+      value: /extender/filter
+    - name: EXTENDER_PRIORITIZE_PATH
+      value: /extender/prioritize
 
   ## Image pull secrets
   ##

@@ -19,6 +19,8 @@ package decision
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
 
 // =============================================================================
@@ -238,51 +240,15 @@ type NodeEnergyData struct {
 }
 
 // =============================================================================
-// DecisionResponse — returned by the External AI Agent (step 6/E)
-// =============================================================================
-
-// DecisionResponse is what the External Decision/AI Agent returns
-// after scoring the candidate nodes for the unscheduled pod.
-// The Decision Context Builder translates this into a ValidPlacementDecision
-// that is returned to the Kube-Scheduler (step 7).
-type DecisionResponse struct {
-	// RequestID echoes the request ID for correlation.
-	RequestID string `json:"requestId"`
-
-	// NodeScores is the list of candidate nodes ranked by the AI agent.
-	// Higher score = more preferred for this pod.
-	NodeScores []NodeScore `json:"nodeScores"`
-
-	// Reason is a human-readable explanation of the decision.
-	// Surfaced in profile status and operator logs.
-	Reason string `json:"reason,omitempty"`
-}
-
-// NodeScore is the AI agent's score for a single candidate node.
-type NodeScore struct {
-	// NodeName is the Kubernetes node name.
-	NodeName string `json:"nodeName"`
-
-	// Score is the AI agent's score for this node (higher = more preferred).
-	// Typically in range 0–100 to align with Kubernetes scoring conventions.
-	Score float64 `json:"score"`
-}
-
-// =============================================================================
-// PlacementContext — what the kube-scheduler sends to A.O (step 4)
+// DecisionResponse, NodeScore, PlacementContext
 //
-// This is the inbound payload received from the scheduler's custom scoring
-// plugin. The DecisionContextBuilder takes this as its primary input and
-// enriches it with AOProfile and EAOProfile data to produce a DecisionRequest.
+// Wire-format types shared between the operator's PlacementServer and the
+// scheduler's PlacementClient. Canonical definitions live in pkg/placement so
+// the scheduler-plugin module (a separate go.mod) can import them without
+// violating Go's internal/ visibility rules.
+// Type aliases here keep all existing operator code unchanged.
 // =============================================================================
 
-// PlacementContext is the inbound payload from the kube-scheduler.
-// Received at step 4 in the architecture.
-type PlacementContext struct {
-	// Pod is the unscheduled pod that needs a placement decision.
-	Pod *corev1.Pod `json:"pod"`
-
-	// CandidateNodes is the list of nodes the scheduler has pre-filtered
-	// as feasible for this pod. The AI agent scores only these nodes.
-	CandidateNodes []*corev1.Node `json:"candidateNodes"`
-}
+type DecisionResponse = placement.DecisionResponse
+type NodeScore = placement.NodeScore
+type PlacementContext = placement.PlacementContext

@@ -300,3 +300,50 @@ helm-history: ## Show Helm release history.
 .PHONY: helm-rollback
 helm-rollback: ## Rollback to previous Helm release.
 	$(HELM) rollback $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+##@ Scheduler Build
+#
+# The scheduler lives in scheduler-plugin/ — a separate Go module with its own
+# go.mod and go.sum that pins k8s.io/kubernetes to a specific minor version.
+# The operator's go.mod is never modified.
+#
+# To target a different K8s minor version:
+#   hack/set-k8s-version.sh v1.36.0
+#   cd scheduler-plugin && go mod tidy
+#
+# Supported policy: current K8s minor + 2 previous minors.
+# Image tag format: $(SCHED_IMG):$(SCHED_VERSION)-k8s$(SCHED_K8S_VERSION)
+
+## Scheduler image registry (without tag)
+SCHED_IMG ?= ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/hiro-scheduler
+## Project version embedded in the scheduler image tag
+SCHED_VERSION ?= v0.1.0
+## Target K8s minor version for this scheduler build
+SCHED_K8S_VERSION ?= v1.35.0
+
+# Full image tag — encodes both project version and target K8s version
+SCHED_IMG_TAG = $(SCHED_IMG):$(SCHED_VERSION)-k8s$(SCHED_K8S_VERSION)
+
+.PHONY: pin-k8s-version
+pin-k8s-version: ## Update scheduler-plugin/go.mod for SCHED_K8S_VERSION and tidy.
+	scheduler-plugin/pin_k8s_version.sh $(SCHED_K8S_VERSION)
+	cd scheduler-plugin && go mod tidy
+
+.PHONY: build-scheduler
+build-scheduler: ## Build the HIRO scheduler binary into bin/hiro-scheduler.
+	cd scheduler-plugin && go build \
+		-ldflags="-X main.k8sVersion=$(SCHED_K8S_VERSION)" \
+		-o ../bin/hiro-scheduler \
+		./cmd/
+
+.PHONY: docker-build-scheduler
+docker-build-scheduler: ## Build scheduler Docker image for SCHED_K8S_VERSION (tag: $(SCHED_IMG_TAG)).
+	$(CONTAINER_TOOL) build \
+		--build-arg K8S_VERSION=$(SCHED_K8S_VERSION) \
+		-t $(SCHED_IMG_TAG) \
+		-f scheduler-plugin/Dockerfile \
+		.
+
+.PHONY: docker-push-scheduler
+docker-push-scheduler: ## Push scheduler image $(SCHED_IMG_TAG) to the registry.
+	$(CONTAINER_TOOL) push $(SCHED_IMG_TAG)

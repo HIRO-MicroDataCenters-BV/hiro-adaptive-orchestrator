@@ -37,7 +37,7 @@ A Kubernetes operator that provides intelligent, AI-driven pod placement and ada
 
 ## Architecture
 
-![Architecture](./K8S_%20adaptive_orchestrator_new-Integrate-EnergyAwareOrchestrator-1.gif)
+![Architecture](./K8S_adaptive_orchestrator_new-Integrate-EnergyAwareOrchestrator-1.gif)
 
 The operator runs as two concurrent services inside a single binary:
 

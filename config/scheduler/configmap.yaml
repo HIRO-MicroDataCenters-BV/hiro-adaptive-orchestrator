@@ -1,0 +1,40 @@
+# KubeSchedulerConfiguration for the HIRO scheduler plugin.
+#
+# schedulerName: hiro-scheduler — pods must set spec.schedulerName: hiro-scheduler
+# to be scheduled by this scheduler instead of the default kube-scheduler.
+#
+# HIROScore is registered at the filter, preScore, and score extension points.
+# Default scoring plugins are kept (additive) so node resource fit, topology
+# spread, etc. still apply alongside HIRO's energy-aware scores.
+#
+# leaderElection: uses kube-system as the lease namespace, matching the
+# kube-scheduler convention. The lease name (hiro-scheduler) is distinct
+# from kube-scheduler's lease so both schedulers coexist safely.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hiro-scheduler-config
+  namespace: system
+  labels:
+    app.kubernetes.io/name: hiro-scheduler
+    app.kubernetes.io/managed-by: kustomize
+data:
+  scheduler-config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: true
+      resourceName: hiro-scheduler
+      resourceNamespace: kube-system
+    profiles:
+      - schedulerName: hiro-scheduler
+        plugins:
+          filter:
+            enabled:
+              - name: HIROScore
+          preScore:
+            enabled:
+              - name: HIROScore
+          score:
+            enabled:
+              - name: HIROScore
