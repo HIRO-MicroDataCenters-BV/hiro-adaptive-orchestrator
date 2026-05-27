@@ -11,6 +11,7 @@ A Kubernetes operator that provides intelligent, AI-driven pod placement and ada
   - [Flow 1 — Reconciliation Controller](#flow-1--reconciliation-controller)
   - [Flow 2 — Placement Server](#flow-2--placement-server-ai-driven-scheduling)
   - [Flow 3 — HIRO Scheduler Plugin](#flow-3--hiro-scheduler-plugin)
+  - [Flow 4 — Scheduler Extender](#flow-4--scheduler-extender-legacy--managed-clusters)
   - [Parameter Flow](#parameter-flow)
 - [Features](#features)
 - [Prerequisites](#prerequisites)
@@ -140,6 +141,42 @@ hiro-scheduler framework
 ```
 
 Plugin configuration (URL, path, timeout) is read from `KubeSchedulerConfiguration` `pluginConfig` — see [Scheduler Plugin Config](#scheduler-plugin-config).
+
+### Flow 4 — Scheduler Extender (legacy / managed clusters)
+
+The default `kube-scheduler` calls the PlacementServer directly as an HTTP extender. No custom scheduler pod is needed.
+
+```
+Pod created (any pod — default scheduler handles all)
+        ▼
+default kube-scheduler
+        │  reads KubeSchedulerConfiguration (ConfigMap in kube-system)
+        │  extender URL: http://<placement-svc>.<namespace>.svc.cluster.local:8090
+        │
+        ├── Filter phase
+        │     POST /extender/filter  { pod, nodes }
+        │             ▼
+        │       PlacementServer
+        │             ├── find OrchestrationProfile for pod
+        │             ├── if energy awareness disabled → pass all nodes through
+        │             ├── fetch EnergyAwareOrchestration CRD
+        │             └── if EAO.energyMetrics.sufficient == false
+        │                   → FailedNodes: all  (defer the pod)
+        │                   → else: Nodes: all  (allow)
+        │
+        └── Score phase (prioritize)
+              POST /extender/prioritize  { pod, nodes }
+                      ▼
+                PlacementServer
+                      ├── build DecisionRequest (AOProfile + EAOProfile + nodes)
+                      ├── POST → External Decision Agent
+                      │   ← NodeScores [0-100]
+                      └── map 0-100 → 0-10  (extender protocol)
+                          missing nodes → score 5 (neutral)
+                          any error    → all nodes score 5
+```
+
+`ignorable: true` in the ConfigMap ensures scheduling proceeds normally if the PlacementServer is unreachable.
 
 ### Parameter Flow
 
@@ -536,19 +573,96 @@ make docker-build-scheduler SCHED_K8S_VERSION=v1.36.0
 
 ### Extender Approach (legacy)
 
-Routes the **default** `kube-scheduler`'s filter and prioritize calls to the operator's PlacementServer. Use this on managed clusters (GKE Autopilot, EKS Fargate) where deploying a custom scheduler pod is not possible.
+Hooks the **default** `kube-scheduler` to call the operator's PlacementServer as an HTTP extender during its filter and prioritize phases. No custom scheduler pod is needed — use this on managed clusters (GKE Autopilot, EKS Fargate, AKS) where the control plane is locked down.
 
-**Cons:** Affects all pods (not opt-in), requires patching the static `kube-scheduler` pod, higher coupling to cluster internals.
+**Trade-offs vs plugin approach:**
+
+| | Plugin | Extender |
+|---|---|---|
+| Scope | Only pods with `schedulerName: hiro-scheduler` | All pods via default scheduler |
+| Opt-in | Per-pod | Cluster-wide |
+| Control plane change | No | Yes — must patch `kube-scheduler` static pod |
+| Score range | 0–100 (framework `MinNodeScore`/`MaxNodeScore`) | 0–10 (extender protocol) |
+| Failure mode | Soft-fail open | `ignorable: true` (soft-fail open) |
+
+#### Components
+
+```
+default kube-scheduler
+  │  KubeSchedulerConfiguration (ConfigMap in kube-system)
+  │  extenders:
+  │    urlPrefix: http://<PLACEMENT_SERVICE_NAME>.<NAMESPACE>.svc.cluster.local:8090
+  │    filterVerb:     extender/filter
+  │    prioritizeVerb: extender/prioritize
+  │    ignorable: true
+  │
+  ├──► POST /extender/filter        (energy gate)
+  │         ▼
+  │    PlacementServer (operator pod)
+  │         └── CheckEnergyGate(pod)
+  │               ├── find governing OrchestrationProfile (O(1) index)
+  │               ├── if profile.awareness.energy == false → allow all nodes
+  │               ├── fetch EnergyAwareOrchestration CRD
+  │               │     if EAO not found / error → allow all nodes (best-effort)
+  │               └── if EAO.status.energyMetrics.sufficient == false
+  │                     → FailedNodes: all candidates (reason from EAO)
+  │                     → Nodes: empty list (scheduler defers the pod)
+  │
+  └──► POST /extender/prioritize    (AI scoring)
+            ▼
+       PlacementServer (operator pod)
+            ├── build DecisionRequest (same as plugin path)
+            │     AOProfileContext  (strategy + awareness + rebalancing)
+            │     EAOProfileContext (energy data, if energy awareness enabled)
+            │     CandidateNodes
+            ├──► POST DecisionRequest → External Decision Agent
+            │     ← NodeScores [ {nodeName, score 0-100} ]
+            └── map scores 0-100 → 0-10 (int64, extender protocol)
+                  nodes absent from AI response → score 5 (neutral)
+                  on any error → all nodes score 5
+```
+
+#### Endpoints served by the PlacementServer
+
+| Endpoint | Verb | Input | Output | Fail behaviour |
+|----------|------|-------|--------|----------------|
+| `POST /extender/filter` | Filter phase | `ExtenderArgs{Pod, Nodes}` | `ExtenderFilterResult{Nodes, FailedNodes}` | Error → allow all (best-effort) |
+| `POST /extender/prioritize` | Score phase | `ExtenderArgs{Pod, Nodes}` | `HostPriorityList[{host, score 0-10}]` | Error → score 5 for all nodes |
+
+Score mapping: AI agent returns scores in `[0, 100]`. The extender normalises to `[0, 10]` via `score / 10`. Nodes not in the AI response get score `5` (neutral) so the scheduler's own priorities still apply.
+
+#### Deploy
 
 ```bash
-# Deploy extender ConfigMap
+# Standalone (operator must already be running)
 hack/deploy_extender.sh
 
-# Or as part of full-stack deploy:
+# As part of full-stack
 APPLY_EXTENDER_CONFIG=true hack/deploy_all.sh
 ```
 
-After applying, mount the ConfigMap into the `kube-scheduler` pod and pass `--config=/etc/kubernetes/scheduler-config.yaml`. See `config/extender/scheduler-config.yaml` for full instructions.
+This applies a `KubeSchedulerConfiguration` ConfigMap to `kube-system`. The service URL is constructed from `PLACEMENT_SERVICE_NAME` and `NAMESPACE` at deploy time.
+
+After applying, you must patch the `kube-scheduler` static pod (kubeadm clusters) to mount the ConfigMap and pass `--config`:
+
+```yaml
+# /etc/kubernetes/manifests/kube-scheduler.yaml  (kubeadm)
+spec:
+  containers:
+  - command:
+    - kube-scheduler
+    - --config=/etc/kubernetes/scheduler-config.yaml   # add this
+    volumeMounts:
+    - name: hiro-config
+      mountPath: /etc/kubernetes/scheduler-config.yaml
+      subPath: scheduler-config.yaml
+  volumes:
+  - name: hiro-config
+    configMap:
+      name: hiro-scheduler-config
+```
+
+See [config/extender/scheduler-config.yaml](config/extender/scheduler-config.yaml) for the full ConfigMap template and instructions.
 
 ---
 
