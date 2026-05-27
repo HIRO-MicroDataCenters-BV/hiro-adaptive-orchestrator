@@ -18,6 +18,7 @@ package schedulerplugin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -27,6 +28,24 @@ import (
 
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
+
+// HIROScoreArgs holds the plugin configuration supplied via KubeSchedulerConfiguration
+// pluginConfig. All fields are optional — unset fields fall back to the
+// DefaultPlacementServer* constants defined in client.go.
+//
+// Example KubeSchedulerConfiguration snippet:
+//
+//	pluginConfig:
+//	  - name: HIROScore
+//	    args:
+//	      placementServerURL: "http://my-svc.my-ns.svc.cluster.local:8090"
+//	      placementServerPath: "/api/v1/placement/decision"
+//	      timeoutSeconds: 8
+type HIROScoreArgs struct {
+	PlacementServerURL  string `json:"placementServerURL,omitempty"`
+	PlacementServerPath string `json:"placementServerPath,omitempty"`
+	TimeoutSeconds      int    `json:"timeoutSeconds,omitempty"`
+}
 
 // PluginName is the name registered with the scheduler framework.
 // Referenced by KubeSchedulerConfiguration to enable the plugin.
@@ -68,8 +87,37 @@ var (
 // Signature must match framework/runtime.PluginFactory:
 //
 //	func(ctx, runtime.Object, fwk.Handle) (fwk.Plugin, error)
-func New(_ context.Context, _ apiruntime.Object, _ fwk.Handle) (fwk.Plugin, error) {
-	client := NewPlacementClientFromEnv(8 * time.Second)
+//
+// Args are read from the pluginConfig section of KubeSchedulerConfiguration.
+// Any field left unset falls back to DefaultPlacementServer* constants.
+func New(_ context.Context, obj apiruntime.Object, _ fwk.Handle) (fwk.Plugin, error) {
+	args := &HIROScoreArgs{
+		PlacementServerURL:  DefaultPlacementServerURL,
+		PlacementServerPath: DefaultPlacementServerPath,
+		TimeoutSeconds:      8,
+	}
+
+	if unknown, ok := obj.(*apiruntime.Unknown); ok && unknown != nil && len(unknown.Raw) > 0 {
+		if err := json.Unmarshal(unknown.Raw, args); err != nil {
+			return nil, fmt.Errorf("HIROScore: parsing pluginConfig args: %w", err)
+		}
+		// Re-apply defaults for any fields left as zero value after unmarshalling.
+		if args.PlacementServerURL == "" {
+			args.PlacementServerURL = DefaultPlacementServerURL
+		}
+		if args.PlacementServerPath == "" {
+			args.PlacementServerPath = DefaultPlacementServerPath
+		}
+		if args.TimeoutSeconds <= 0 {
+			args.TimeoutSeconds = 8
+		}
+	}
+
+	client := NewPlacementClient(
+		args.PlacementServerURL,
+		args.PlacementServerPath,
+		time.Duration(args.TimeoutSeconds)*time.Second,
+	)
 	return &HIROScore{client: client}, nil
 }
 

@@ -38,3 +38,12 @@ data:
           score:
             enabled:
               - name: HIROScore
+        pluginConfig:
+          - name: HIROScore
+            args:
+              # placementServerURL is the in-cluster DNS of the operator's PlacementServer.
+              # Update this if you deploy the operator with a custom NAMESPACE or NAME_PREFIX.
+              # Pattern: http://<NAME_PREFIX>controller-manager-placement-service.<NAMESPACE>.svc.cluster.local:8090
+              placementServerURL: "http://hiro-adaptive-orchestrator-controller-manager-placement-service.hiro-adaptive-orchestrator-system.svc.cluster.local:8090"
+              placementServerPath: "/api/v1/placement/decision"
+              timeoutSeconds: 8

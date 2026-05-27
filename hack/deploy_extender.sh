@@ -45,6 +45,8 @@ export KUBECONFIG=${1:-~/.kube/config}
 
 export NAME_PREFIX=${NAME_PREFIX:-hiro-adaptive-orchestrator-}
 export NAMESPACE=${NAMESPACE:-hiro-adaptive-orchestrator-system}
+# Derived after NAME_PREFIX is set — override only if the operator service was renamed.
+export PLACEMENT_SERVICE_NAME=${PLACEMENT_SERVICE_NAME:-${NAME_PREFIX}controller-manager-placement-service}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -60,21 +62,21 @@ print_config() {
   echo "========================================================"
   echo " HIRO Scheduler Extender — Deploy"
   echo "========================================================"
-  echo "Namespace  : $NAMESPACE"
-  echo "NamePrefix : $NAME_PREFIX"
-  echo "Kubeconfig : $KUBECONFIG"
+  echo "Namespace            : $NAMESPACE"
+  echo "NamePrefix           : $NAME_PREFIX"
+  echo "Placement Svc Name   : $PLACEMENT_SERVICE_NAME"
+  echo "Kubeconfig           : $KUBECONFIG"
 }
 
 main() {
   print_config
 
-  local placement_service="${NAME_PREFIX}controller-manager-placement-service"
   local tmp_config
   tmp_config=$(mktemp /tmp/hiro-extender-config-XXXXXX.yaml)
 
-  step "Rendering extender ConfigMap (service=${placement_service}.${NAMESPACE})..."
+  step "Rendering extender ConfigMap (service=${PLACEMENT_SERVICE_NAME}.${NAMESPACE})..."
   sed \
-    -e "s|hiro-adaptive-orchestrator-controller-manager-placement-service|${placement_service}|g" \
+    -e "s|hiro-adaptive-orchestrator-controller-manager-placement-service|${PLACEMENT_SERVICE_NAME}|g" \
     -e "s|hiro-adaptive-orchestrator-system|${NAMESPACE}|g" \
     "$REPO_ROOT/config/extender/scheduler-config.yaml" > "$tmp_config"
 
