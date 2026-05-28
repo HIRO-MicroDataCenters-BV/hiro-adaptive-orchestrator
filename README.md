@@ -324,13 +324,18 @@ Steps performed:
 
 ### Legacy Extender Only
 
-For managed Kubernetes clusters (GKE Autopilot, EKS Fargate, etc.) where a custom scheduler pod cannot run. This configures the **default** `kube-scheduler` to use the operator's PlacementServer as an extender.
+For managed Kubernetes clusters (GKE Autopilot, EKS Fargate, etc.) where a custom scheduler pod cannot run. Configures the **default** `kube-scheduler` to call the HIRO PlacementServer during filter and prioritize phases.
 
 ```bash
 hack/deploy_extender.sh [kubeconfig-path]
 ```
 
-This applies a `KubeSchedulerConfiguration` ConfigMap to `kube-system`. After applying, you must manually mount it into the `kube-scheduler` static pod. See `config/extender/scheduler-config.yaml` for full instructions.
+Fully automated — applies the ConfigMap, runs a privileged Job to patch the static pod manifest, and waits for kube-scheduler to restart. See [Extender Approach](#extender-approach-legacy) for the complete step-by-step breakdown.
+
+```bash
+# Roll back
+hack/undeploy_extender.sh
+```
 
 ### Manual Kustomize
 
@@ -633,36 +638,46 @@ Score mapping: AI agent returns scores in `[0, 100]`. The extender normalises to
 
 #### Deploy
 
+`hack/deploy_extender.sh` is a **fully automated** end-to-end deploy. No manual manifest editing required.
+
 ```bash
 # Standalone (operator must already be running)
-hack/deploy_extender.sh
+hack/deploy_extender.sh [kubeconfig-path]
+
+# Custom namespace / service name
+NAMESPACE=my-ns PLACEMENT_SERVICE_NAME=my-svc hack/deploy_extender.sh
+
+# Air-gapped clusters (supply a local image with python3+pyyaml)
+PATCHER_IMAGE=my-registry/python3-pyyaml:latest hack/deploy_extender.sh
 
 # As part of full-stack
 APPLY_EXTENDER_CONFIG=true hack/deploy_all.sh
 ```
 
-This applies a `KubeSchedulerConfiguration` ConfigMap to `kube-system`. The service URL is constructed from `PLACEMENT_SERVICE_NAME` and `NAMESPACE` at deploy time.
+The script runs these steps automatically:
 
-After applying, you must patch the `kube-scheduler` static pod (kubeadm clusters) to mount the ConfigMap and pass `--config`:
+| Step | What happens |
+|------|-------------|
+| 1 | Renders `hiro-scheduler-config` ConfigMap (substitutes `PLACEMENT_SERVICE_NAME`/`NAMESPACE` into `urlPrefix`) and applies to `kube-system` |
+| 2 | Creates `hiro-patch-script` ConfigMap from `hack/patch_scheduler_static_pod.py` |
+| 3 | Runs a privileged Job on the control-plane node that mounts `/etc/kubernetes/manifests` (hostPath) and patches `kube-scheduler.yaml` in-place (adds `--config` flag + ConfigMap volume mount) |
+| 4 | Kubelet detects the file change via inotify and restarts kube-scheduler (~10-15s) |
+| 5 | Waits for the new kube-scheduler pod to be Ready |
+| 6 | Verifies `--config` flag is live in the running pod spec |
 
-```yaml
-# /etc/kubernetes/manifests/kube-scheduler.yaml  (kubeadm)
-spec:
-  containers:
-  - command:
-    - kube-scheduler
-    - --config=/etc/kubernetes/scheduler-config.yaml   # add this
-    volumeMounts:
-    - name: hiro-config
-      mountPath: /etc/kubernetes/scheduler-config.yaml
-      subPath: scheduler-config.yaml
-  volumes:
-  - name: hiro-config
-    configMap:
-      name: hiro-scheduler-config
+The patch is **idempotent** — re-running does nothing if already patched. The original manifest is backed up to `kube-scheduler.yaml.hiro-backup` on the node before any changes.
+
+```bash
+# Verify extender calls are reaching the PlacementServer
+kubectl logs -l component=kube-scheduler -n kube-system | grep -i extender
+
+# Roll back — restores original manifest from backup, removes ConfigMaps
+hack/undeploy_extender.sh
 ```
 
-See [config/extender/scheduler-config.yaml](config/extender/scheduler-config.yaml) for the full ConfigMap template and instructions.
+> **Air-gapped / no-internet nodes:** `PATCHER_IMAGE=python:3-slim` pulls from Docker Hub. Override with a local registry image that includes `python3` and `pyyaml`. The patch script itself is delivered via ConfigMap — no custom image build needed.
+
+See [config/extender/scheduler-config.yaml](config/extender/scheduler-config.yaml) for the raw ConfigMap template.
 
 ---
 
@@ -798,7 +813,9 @@ hack/
   deploy_all.sh                        # Full-stack entry point — all parameters defined here
   deploy_operator.sh                   # Operator-only deploy
   deploy_scheduler.sh                  # Scheduler-only deploy
-  deploy_extender.sh                   # Legacy extender ConfigMap deploy
+  deploy_extender.sh                   # Extender full deploy: ConfigMap + privileged Job to patch kube-scheduler
+  undeploy_extender.sh                 # Roll back: restore original kube-scheduler manifest
+  patch_scheduler_static_pod.py        # Python script run by the patch Job (idempotent YAML editor)
   mock-decision-agent.yaml             # In-cluster mock AI agent
 dist/
   chart/                               # Generated Helm chart — DO NOT EDIT
