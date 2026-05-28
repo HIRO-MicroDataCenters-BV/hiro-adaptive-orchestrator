@@ -6,6 +6,10 @@ cliVersion: 4.12.0
 domain: orchestration.hiro.io
 layout:
 - go.kubebuilder.io/v4
+plugins:
+  helm.kubebuilder.io/v2-alpha:
+    manifests: dist/install.yaml
+    output: dist
 projectName: hiro-adaptive-orchestrator
 repo: github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator
 resources:

@@ -65,7 +65,34 @@ spec:
           - --health-probe-bind-address=:8081
         image: controller:latest
         name: manager
-        ports: []
+        env:
+        - name: DECISION_AGENT_URL
+          value: "http://decision-agent:8080"
+        - name: DECISION_AGENT_PATH
+          value: "/api/v1/agent/placement/decision"
+        - name: PLACEMENT_SERVER_PORT
+          value: ":8090"
+        - name: PLACEMENT_SERVER_PATH
+          value: "/api/v1/placement/decision"
+        - name: PLACEMENT_SERVER_HEALTH_PATH
+          value: "/healthz"
+        - name: EAO_GROUP
+          value: "eas.hiro.io"
+        - name: EAO_VERSION
+          value: "v1"
+        - name: EAO_KIND
+          value: "EnergyAwareOrchestration"
+        - name: EXTENDER_FILTER_PATH
+          value: "/extender/filter"
+        - name: EXTENDER_PRIORITIZE_PATH
+          value: "/extender/prioritize"
+        ports: 
+        - containerPort: 8090 # Update with actual Placement Server port
+          name: placement-srv
+          protocol: TCP
+        - containerPort: 8081
+          name: health-probe
+          protocol: TCP
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false

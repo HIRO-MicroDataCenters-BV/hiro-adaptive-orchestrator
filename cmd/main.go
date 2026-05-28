@@ -20,6 +20,9 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -37,6 +40,7 @@ import (
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/controller"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/decision"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -178,14 +182,156 @@ func main() {
 		os.Exit(1)
 	}
 
+	// -------------------------------------------------------------------------
+	// Register ProfileByAppRefIndex BEFORE SetupWithManager and mgr.Start().
+	//
+	// This field index enables O(1) profile lookups in:
+	//   - internal/controller/op_watchers.go  (pod/workload → profile mapping)
+	//   - internal/decision/builder.go        (pod → governing profile lookup)
+	//
+	// IMPORTANT: must be registered before the cache starts (before mgr.Start).
+	// Registering after cache start will panic.
+	// -------------------------------------------------------------------------
+	if err := controller.RegisterProfileIndexes(mgr); err != nil {
+		setupLog.Error(err, "unable to register profile indexes")
+		os.Exit(1)
+	}
+
 	if err := (&controller.OrchestrationProfileReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("orchestrationprofile-controller"), //nolint:staticcheck
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "OrchestrationProfile")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
+
+	// -------------------------------------------------------------------------
+	// Decision Layer — PlacementServer
+	//
+	// HTTP server that receives PlacementContext from the kube-scheduler
+	// custom scoring plugin and returns NodeScores.
+	//
+	// Environment variables:
+	//   DECISION_AGENT_URL      — base URL of the External AI Agent (required)
+	//                             e.g. "http://ai-agent.hiro-system.svc:8080"
+	//   DECISION_AGENT_PATH     — HTTP path on the AI agent (optional)
+	//                             default: "/api/v1/agent/placement/decision"
+	//   PLACEMENT_SERVER_PORT   — listening address (optional, default ":8090")
+	//   PLACEMENT_SERVER_PATH        — HTTP path for placement decisions (optional)
+	//                                  default: "/api/v1/placement/decision"
+	//   PLACEMENT_SERVER_HEALTH_PATH — HTTP path for health probes (optional)
+	//                                  default: "/healthz"
+	//   EAO_GROUP               — API group of EnergyAwareOrchestration CRD
+	//                             (optional, default "eas.hiro.io")
+	//   EAO_VERSION             — API version of EnergyAwareOrchestration CRD
+	//                             (optional, default "v1")
+	//   EAO_KIND                — Kind of EnergyAwareOrchestration CRD
+	//                             (optional, default "EnergyAwareOrchestration")
+	// -------------------------------------------------------------------------
+	decisionAgentURL := os.Getenv("DECISION_AGENT_URL")
+	if decisionAgentURL == "" {
+		setupLog.Error(nil, "DECISION_AGENT_URL environment variable is required")
+		os.Exit(1)
+	}
+
+	decisionAgentPath := os.Getenv("DECISION_AGENT_PATH")
+	if decisionAgentPath == "" {
+		decisionAgentPath = "/api/v1/agent/placement/decision"
+	}
+
+	placementServerPort := os.Getenv("PLACEMENT_SERVER_PORT")
+	if placementServerPort == "" {
+		placementServerPort = ":8090"
+	}
+
+	placementServerPath := os.Getenv("PLACEMENT_SERVER_PATH")
+	if placementServerPath == "" {
+		placementServerPath = "/api/v1/placement/decision"
+	}
+
+	placementServerHealthPath := os.Getenv("PLACEMENT_SERVER_HEALTH_PATH")
+	if placementServerHealthPath == "" {
+		placementServerHealthPath = "/healthz"
+	}
+
+	extenderFilterPath := os.Getenv("EXTENDER_FILTER_PATH")
+	if extenderFilterPath == "" {
+		extenderFilterPath = "/extender/filter"
+	}
+
+	extenderPrioritizePath := os.Getenv("EXTENDER_PRIORITIZE_PATH")
+	if extenderPrioritizePath == "" {
+		extenderPrioritizePath = "/extender/prioritize"
+	}
+
+	eaoGroup := os.Getenv("EAO_GROUP")
+	if eaoGroup == "" {
+		eaoGroup = "eas.hiro.io"
+	}
+	eaoVersion := os.Getenv("EAO_VERSION")
+	if eaoVersion == "" {
+		eaoVersion = "v1"
+	}
+	eaoKind := os.Getenv("EAO_KIND")
+	if eaoKind == "" {
+		eaoKind = "EnergyAwareOrchestration"
+	}
+	eaoGVK := schema.GroupVersionKind{
+		Group:   eaoGroup,
+		Version: eaoVersion,
+		Kind:    eaoKind + "List",
+	}
+	setupLog.Info("decision layer configured",
+		"agentURL", decisionAgentURL,
+		"agentPath", decisionAgentPath,
+		"placementDecisionPath", placementServerPath,
+		"placementHealthPath", placementServerHealthPath,
+		"extenderFilterPath", extenderFilterPath,
+		"extenderPrioritizePath", extenderPrioritizePath,
+		"eaoGroup", eaoGVK.Group,
+		"eaoVersion", eaoGVK.Version,
+		"eaoKind", eaoGVK.Kind,
+	)
+
+	contextBuilder := decision.NewDecisionContextBuilder(
+		mgr.GetClient(),
+		controller.ProfileByAppRefIndex,
+		eaoGVK,
+	)
+
+	// Create the DecisionClient with the External AI Agent URL and path.
+	// The client will be used by the PlacementServer to send placement decision requests to the AI agent.
+	decisionClient := decision.NewDecisionClient(
+		decisionAgentURL,
+		decisionAgentPath,
+		8*time.Second, // must be < PlacementServer requestTimeout (10s)
+	)
+
+	// Create the PlacementServer with the context builder and decision client.
+	// The server will use these to handle incoming placement decision requests from the kube-scheduler plugin.
+	placementServer := decision.NewPlacementServer(
+		contextBuilder,
+		decisionClient,
+		placementServerPort,
+		placementServerPath,
+		placementServerHealthPath,
+		extenderFilterPath,
+		extenderPrioritizePath,
+		10*time.Second, // requestTimeout: must be > DecisionClient timeout
+	)
+
+	// Start PlacementServer alongside the manager.
+	// Shuts down gracefully when the manager context is cancelled.
+	ctx := ctrl.SetupSignalHandler()
+	go func() {
+		setupLog.Info("starting placement decision server", "addr", placementServer.Addr)
+		if err := placementServer.Start(ctx); err != nil {
+			setupLog.Error(err, "placement decision server stopped unexpectedly")
+			os.Exit(1)
+		}
+	}()
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")
@@ -196,8 +342,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// -------------------------------------------------------------------------
+	// Start the manager — blocks until context cancelled.
+	// Starts: informer cache, reconciler, leader election, health probes.
+	// -------------------------------------------------------------------------
 	setupLog.Info("Starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}

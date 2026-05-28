@@ -40,6 +40,46 @@ const (
 	StatusError = "Error"
 )
 
+// ProfileByAppRefIndex is the field index key for OrchestrationProfile applicationRef lookups
+// Index value: "<appNamespace>/<appName>" derived from spec.applicationRef
+const ProfileByAppRefIndex = ".spec.applicationRef.namespacedName"
+
+// -----------------------------------------------------------------------------
+// Event Reasons
+// -----------------------------------------------------------------------------
+
+const (
+	// EventReasonValidationFailed is emitted when the OrchestrationProfile spec fails validation.
+	EventReasonValidationFailed = "ValidationFailed"
+
+	// EventReasonApplicationNotFound is emitted when the referenced application does not exist yet.
+	EventReasonApplicationNotFound = "ApplicationNotFound"
+
+	// EventReasonApplicationLookupError is emitted when the existence check for the referenced app fails.
+	EventReasonApplicationLookupError = "ApplicationLookupError"
+
+	// EventReasonPodDiscoveryFailed is emitted when pod discovery for the application fails.
+	EventReasonPodDiscoveryFailed = "PodDiscoveryFailed"
+
+	// EventReasonPlacementActive is emitted when all pods are running and ready.
+	EventReasonPlacementActive = "PlacementActive"
+
+	// EventReasonPlacementPending is emitted when all pods are still being scheduled.
+	EventReasonPlacementPending = "PlacementPending"
+
+	// EventReasonApplicationNoPods is emitted when the application exists but has no pods yet.
+	EventReasonApplicationNoPods = "ApplicationNoPods"
+
+	// EventReasonPlacementPartial is emitted when some pods are ready and others are not.
+	EventReasonPlacementPartial = "PlacementPartial"
+
+	// EventReasonPlacementDegraded is emitted when one or more pods have failed.
+	EventReasonPlacementDegraded = "PlacementDegraded"
+
+	// EventReasonPlacementError is emitted when an unrecoverable error occurs.
+	EventReasonPlacementError = "PlacementError"
+)
+
 // -----------------------------------------------------------------------------
 // Validation Maps
 // -----------------------------------------------------------------------------

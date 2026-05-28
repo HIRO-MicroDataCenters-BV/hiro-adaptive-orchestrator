@@ -1,0 +1,58 @@
+# KubeSchedulerConfiguration -- HIRO Adaptive Orchestrator Scheduler Extender
+#
+# HOW TO DEPLOY
+# -------------
+# 1. Create a ConfigMap from this file in the kube-system namespace:
+#
+#      kubectl create configmap hiro-scheduler-config \
+#        --from-file=scheduler-config.yaml=config/extender/scheduler-config.yaml \
+#        -n kube-system
+#
+# 2. Mount the ConfigMap into the kube-scheduler pod and pass the path via
+#    --config flag. For kubeadm clusters, patch the static pod manifest at
+#    /etc/kubernetes/manifests/kube-scheduler.yaml:
+#
+#      spec:
+#        containers:
+#        - command:
+#          - kube-scheduler
+#          - --config=/etc/kubernetes/scheduler-config.yaml   # <-- add this
+#          volumeMounts:
+#          - name: hiro-config
+#            mountPath: /etc/kubernetes/scheduler-config.yaml
+#            subPath: scheduler-config.yaml
+#        volumes:
+#        - name: hiro-config
+#          configMap:
+#            name: hiro-scheduler-config
+#
+# NAMESPACE / NAME_PREFIX CHANGES
+# --------------------------------
+# If you deploy the operator into a non-default namespace or with a custom
+# NAME_PREFIX, update urlPrefix below to match the placement service DNS name:
+#
+#   http://<NAME_PREFIX>controller-manager-placement-service.<NAMESPACE>.svc.cluster.local:8090
+#
+# Default values:
+#   NAME_PREFIX = hiro-adaptive-orchestrator-
+#   NAMESPACE   = hiro-adaptive-orchestrator-system
+#
+# IGNORABLE
+# ---------
+# ignorable: true means scheduling proceeds normally when this extender is
+# unreachable. This is intentional -- the operator must never block cluster
+# scheduling in case of its own failure.
+
+apiVersion: kubescheduler.config.k8s.io/v1
+kind: KubeSchedulerConfiguration
+profiles:
+  - schedulerName: default-scheduler
+extenders:
+  - urlPrefix: "http://hiro-adaptive-orchestrator-controller-manager-placement-service.hiro-adaptive-orchestrator-system.svc.cluster.local:8090"
+    filterVerb: "extender/filter"
+    prioritizeVerb: "extender/prioritize"
+    weight: 5
+    enableHTTPS: false
+    ignorable: true
+    nodeCacheCapable: false
+    httpTimeout: 8s

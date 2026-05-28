@@ -200,7 +200,7 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   [ -n "$$v" ] || { echo "Set ENVTEST_K8S_VERSION manually (k8s.io/api replace has no tag)" >&2; exit 1; }; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
-GOLANGCI_LINT_VERSION ?= v2.8.0
+GOLANGCI_LINT_VERSION ?= v2.9.0
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
@@ -253,3 +253,97 @@ endef
 define gomodver
 $(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
 endef
+
+##@ Helm Deployment
+
+## Helm binary to use for deploying the chart
+HELM ?= helm
+## Namespace to deploy the Helm release
+HELM_NAMESPACE ?= hiro-adaptive-orchestrator-system
+## Name of the Helm release
+HELM_RELEASE ?= hiro-adaptive-orchestrator
+## Path to the Helm chart directory
+HELM_CHART_DIR ?= dist/chart
+## Additional arguments to pass to helm commands
+HELM_EXTRA_ARGS ?=
+
+.PHONY: install-helm
+install-helm: ## Install the latest version of Helm.
+	@command -v $(HELM) >/dev/null 2>&1 || { \
+		echo "Installing Helm..." && \
+		curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash; \
+	}
+
+.PHONY: helm-deploy
+helm-deploy: install-helm ## Deploy manager to the K8s cluster via Helm. Specify an image with IMG.
+	$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART_DIR) \
+		--namespace $(HELM_NAMESPACE) \
+		--create-namespace \
+		--set manager.image.repository=$${IMG%:*} \
+		--set manager.image.tag=$${IMG##*:} \
+		--wait \
+		--timeout 5m \
+		$(HELM_EXTRA_ARGS)
+
+.PHONY: helm-uninstall
+helm-uninstall: ## Uninstall the Helm release from the K8s cluster.
+	$(HELM) uninstall $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-status
+helm-status: ## Show Helm release status.
+	$(HELM) status $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-history
+helm-history: ## Show Helm release history.
+	$(HELM) history $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-rollback
+helm-rollback: ## Rollback to previous Helm release.
+	$(HELM) rollback $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+##@ Scheduler Build
+#
+# The scheduler lives in scheduler-plugin/ — a separate Go module with its own
+# go.mod and go.sum that pins k8s.io/kubernetes to a specific minor version.
+# The operator's go.mod is never modified.
+#
+# To target a different K8s minor version:
+#   hack/set-k8s-version.sh v1.36.0
+#   cd scheduler-plugin && go mod tidy
+#
+# Supported policy: current K8s minor + 2 previous minors.
+# Image tag format: $(SCHED_IMG):$(SCHED_VERSION)-k8s$(SCHED_K8S_VERSION)
+
+## Scheduler image registry (without tag)
+SCHED_IMG ?= ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/hiro-scheduler
+## Project version embedded in the scheduler image tag
+SCHED_VERSION ?= v0.1.0
+## Target K8s minor version for this scheduler build
+SCHED_K8S_VERSION ?= v1.35.0
+
+# Full image tag — encodes both project version and target K8s version
+SCHED_IMG_TAG = $(SCHED_IMG):$(SCHED_VERSION)-k8s$(SCHED_K8S_VERSION)
+
+.PHONY: pin-k8s-version
+pin-k8s-version: ## Update scheduler-plugin/go.mod for SCHED_K8S_VERSION and tidy.
+	scheduler-plugin/pin_k8s_version.sh $(SCHED_K8S_VERSION)
+	cd scheduler-plugin && go mod tidy
+
+.PHONY: build-scheduler
+build-scheduler: ## Build the HIRO scheduler binary into bin/hiro-scheduler.
+	cd scheduler-plugin && go build \
+		-ldflags="-X main.k8sVersion=$(SCHED_K8S_VERSION)" \
+		-o ../bin/hiro-scheduler \
+		./cmd/
+
+.PHONY: docker-build-scheduler
+docker-build-scheduler: ## Build scheduler Docker image for SCHED_K8S_VERSION (tag: $(SCHED_IMG_TAG)).
+	$(CONTAINER_TOOL) build \
+		--build-arg K8S_VERSION=$(SCHED_K8S_VERSION) \
+		-t $(SCHED_IMG_TAG) \
+		-f scheduler-plugin/Dockerfile \
+		.
+
+.PHONY: docker-push-scheduler
+docker-push-scheduler: ## Push scheduler image $(SCHED_IMG_TAG) to the registry.
+	$(CONTAINER_TOOL) push $(SCHED_IMG_TAG)

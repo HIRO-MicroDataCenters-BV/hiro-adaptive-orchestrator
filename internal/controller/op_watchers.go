@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
 )
 
 // -----------------------------------------------------------------------------
@@ -62,7 +63,8 @@ func (r *OrchestrationProfileReconciler) podToProfileMapFunc(
 	if !ok {
 		return nil
 	}
-	return r.profilesReferencingNamespace(ctx, pod.Namespace, pod.Name, "Pod")
+	// return r.profilesReferencingNamespace(ctx, pod.Namespace, pod.Name, "Pod")
+	return r.podToProfileMapViaAppToProfile(ctx, pod)
 }
 
 // appToProfileMapFunc maps a workload event (Deployment, StatefulSet, ReplicaSet, Job)
@@ -79,87 +81,116 @@ func (r *OrchestrationProfileReconciler) appToProfileMapFunc(
 // Shared Mapper Utilities
 // -----------------------------------------------------------------------------
 
-// profilesReferencingNamespace lists all OrchestrationProfiles and returns a
-// reconcile.Request for each profile whose ApplicationRef.Namespace matches the given namespace.
-// Used by podToProfileMapFunc to fan out Pod events to relevant profiles.
-func (r *OrchestrationProfileReconciler) profilesReferencingNamespace(
-	ctx context.Context,
-	namespace string,
-	triggerName string,
-	triggerKind string,
-) []reconcile.Request {
-	logger := logf.FromContext(ctx)
-
-	profileList := &orchestrationv1alpha1.OrchestrationProfileList{}
-	if err := r.List(ctx, profileList); err != nil {
-		logger.Error(err, "Failed to list OrchestrationProfiles during event mapping",
-			"triggerKind", triggerKind,
-			"triggerName", triggerName,
-		)
-		return nil
-	}
-
-	var requests []reconcile.Request
-	for _, profile := range profileList.Items {
-		if profile.Spec.ApplicationRef.Namespace == namespace {
-			requests = append(requests, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name: profile.Name,
-				},
-			})
-		}
-	}
-
-	if len(requests) > 0 {
-		logger.Info("Event triggered profile reconciliation",
-			"triggerKind", triggerKind,
-			"triggerName", triggerName,
-			"namespace", namespace,
-			"profilesEnqueued", len(requests),
-		)
-	}
-
-	return requests
-}
-
-// profilesReferencingApp lists all OrchestrationProfiles and returns a
-// reconcile.Request for each profile whose ApplicationRef matches the given namespace and name.
-// Used by appToProfileMapFunc to map workload events to profiles that reference them.
 func (r *OrchestrationProfileReconciler) profilesReferencingApp(
 	ctx context.Context,
 	kind string,
 	namespace string,
 	appName string,
 ) []reconcile.Request {
+	indexKey := namespace + "/" + appName
+	return r.profilesByAppRefIndex(ctx, indexKey, kind, appName)
+}
+
+// =============================================================================
+// Pod → Profile mapping
+//
+// Problem: given a Pod event, which OrchestrationProfile(s) govern it?
+//
+// Two-step solution:
+//   Step 1 — resolveAppFromPod: walk OwnerRef chain to find the top-level
+//             workload name that the profile's applicationRef points to.
+//             Pod → ReplicaSet → Deployment  (most common)
+//             Pod → StatefulSet
+//             Pod → Job
+//
+//   Step 2 — field index lookup: use ProfileByAppRefIndex to find profiles
+//             whose spec.applicationRef matches that workload. O(1) cache hit.
+//
+// This is the explicit pod→profile mapping the user story requires.
+// =============================================================================
+
+func (r *OrchestrationProfileReconciler) podToProfileMapViaAppToProfile(
+	ctx context.Context,
+	pod *corev1.Pod,
+) []reconcile.Request {
+	logger := logf.FromContext(ctx)
+
+	// Step 1: resolve the top-level workload this pod belongs to
+	appName, appNamespace := r.resolveAppFromPod(ctx, pod)
+	if appName == "" {
+		// Pod has no recognized workload owner — not governed by any profile
+		logger.V(1).Info("pod has no recognized workload owner, skipping",
+			"pod", pod.Name, "namespace", pod.Namespace)
+		return nil
+	}
+
+	// Step 2: O(1) index lookup — find profiles referencing this app
+	indexKey := appNamespace + "/" + appName
+	return r.profilesByAppRefIndex(ctx, indexKey, "Pod", pod.Name)
+}
+
+// resolveAppFromPod walks the pod's OwnerReferences to find the name of the
+// top-level workload (Deployment, StatefulSet, Job, or standalone ReplicaSet).
+//
+// Walk logic:
+//
+//	Pod.OwnerRef → ReplicaSet → check RS.OwnerRef → Deployment?
+//	                                               → standalone RS if not
+//	Pod.OwnerRef → StatefulSet  (direct)
+//	Pod.OwnerRef → Job          (direct)
+//
+// Returns ("", "") if no recognized workload owner is found.
+func (r *OrchestrationProfileReconciler) resolveAppFromPod(
+	ctx context.Context,
+	pod *corev1.Pod,
+) (appName, appNamespace string) {
+	appName, appNamespace, _ = utils.ResolveAppFromPod(ctx, r.Client, pod)
+	return
+}
+
+// =============================================================================
+// Shared index lookup — used by BOTH mappers
+// =============================================================================
+
+// profilesByAppRefIndex queries the ProfileByAppRefIndex field index with the
+// given key and returns reconcile requests for all matching profiles.
+//
+// This replaces profilesReferencingNamespace and profilesReferencingApp —
+// both were O(n) list-and-scan. This is O(1).
+func (r *OrchestrationProfileReconciler) profilesByAppRefIndex(
+	ctx context.Context,
+	indexKey string,
+	triggerKind string,
+	triggerName string,
+) []reconcile.Request {
 	logger := logf.FromContext(ctx)
 
 	profileList := &orchestrationv1alpha1.OrchestrationProfileList{}
-	if err := r.List(ctx, profileList); err != nil {
-		logger.Error(err, "Failed to list OrchestrationProfiles during app event mapping",
-			"appKind", kind,
-			"app", appName,
-			"namespace", namespace,
+	if err := r.List(ctx, profileList,
+		client.MatchingFields{ProfileByAppRefIndex: indexKey},
+	); err != nil {
+		logger.Error(err, "failed to look up profiles by app index",
+			"indexKey", indexKey,
+			"triggerKind", triggerKind,
+			"triggerName", triggerName,
 		)
 		return nil
 	}
 
-	var requests []reconcile.Request
+	requests := make([]reconcile.Request, 0, len(profileList.Items))
 	for _, profile := range profileList.Items {
-		appRef := profile.Spec.ApplicationRef
-		if appRef.Name == appName && appRef.Namespace == namespace {
-			requests = append(requests, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name: profile.Name,
-				},
-			})
-		}
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name: profile.Name, // cluster-scoped: no namespace
+			},
+		})
 	}
 
 	if len(requests) > 0 {
-		logger.Info("Workload event triggered profile reconciliation",
-			"workloadKind", kind,
-			"workload", appName,
-			"namespace", namespace,
+		logger.Info("index lookup triggered profile reconciliation",
+			"triggerKind", triggerKind,
+			"triggerName", triggerName,
+			"indexKey", indexKey,
 			"profilesEnqueued", len(requests),
 		)
 	}

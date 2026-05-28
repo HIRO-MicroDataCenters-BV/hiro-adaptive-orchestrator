@@ -1,0 +1,49 @@
+# KubeSchedulerConfiguration for the HIRO scheduler plugin.
+#
+# schedulerName: hiro-scheduler — pods must set spec.schedulerName: hiro-scheduler
+# to be scheduled by this scheduler instead of the default kube-scheduler.
+#
+# HIROScore is registered at the filter, preScore, and score extension points.
+# Default scoring plugins are kept (additive) so node resource fit, topology
+# spread, etc. still apply alongside HIRO's energy-aware scores.
+#
+# leaderElection: uses kube-system as the lease namespace, matching the
+# kube-scheduler convention. The lease name (hiro-scheduler) is distinct
+# from kube-scheduler's lease so both schedulers coexist safely.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hiro-scheduler-config
+  namespace: system
+  labels:
+    app.kubernetes.io/name: hiro-scheduler
+    app.kubernetes.io/managed-by: kustomize
+data:
+  scheduler-config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: true
+      resourceName: hiro-scheduler
+      resourceNamespace: kube-system
+    profiles:
+      - schedulerName: hiro-scheduler
+        plugins:
+          filter:
+            enabled:
+              - name: HIROScore
+          preScore:
+            enabled:
+              - name: HIROScore
+          score:
+            enabled:
+              - name: HIROScore
+        pluginConfig:
+          - name: HIROScore
+            args:
+              # placementServerURL is the in-cluster DNS of the operator's PlacementServer.
+              # Update this if you deploy the operator with a custom NAMESPACE or NAME_PREFIX.
+              # Pattern: http://<NAME_PREFIX>controller-manager-placement-service.<NAMESPACE>.svc.cluster.local:8090
+              placementServerURL: "http://hiro-adaptive-orchestrator-controller-manager-placement-service.hiro-adaptive-orchestrator-system.svc.cluster.local:8090"
+              placementServerPath: "/api/v1/placement/decision"
+              timeoutSeconds: 8

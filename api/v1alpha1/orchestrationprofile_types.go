@@ -69,6 +69,7 @@ type PodStatus struct {
 	Id        string `json:"id,omitempty"`
 	Name      string `json:"name,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
+	NodeName  string `json:"nodeName,omitempty"`
 	Status    string `json:"status,omitempty"`
 	Reason    string `json:"reason,omitempty"`
 }
