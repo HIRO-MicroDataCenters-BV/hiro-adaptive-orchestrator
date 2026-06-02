@@ -53,6 +53,10 @@ spec:
         hostPath:
           path: /etc/kubernetes/manifests
           type: Directory
+      - name: host-etc-kubernetes
+        hostPath:
+          path: /etc/kubernetes
+          type: Directory
       containers:
       - name: restorer
         image: ${PATCHER_IMAGE}
@@ -60,20 +64,29 @@ spec:
         args:
         - |
           MANIFEST=/host-manifests/kube-scheduler.yaml
-          BACKUP=\${MANIFEST}.hiro-backup
+          BACKUP=/host-etc-kubernetes/kube-scheduler.yaml.hiro-backup
           if [ ! -f "\$BACKUP" ]; then
             echo "No backup found at \$BACKUP — nothing to restore."
-            exit 0
+          else
+            cp "\$BACKUP" "\$MANIFEST"
+            rm -f "\$BACKUP"
+            echo "Restored \$MANIFEST from backup."
           fi
-          cp "\$BACKUP" "\$MANIFEST"
-          rm -f "\$BACKUP"
-          echo "Restored \$MANIFEST from backup."
+          CONFIG=/host-etc-kubernetes/hiro-scheduler-config.yaml
+          if [ -f "\$CONFIG" ]; then
+            rm -f "\$CONFIG"
+            echo "Removed \$CONFIG from node filesystem."
+          else
+            echo "No config file at \$CONFIG — already clean."
+          fi
         securityContext:
           privileged: true
           runAsUser: 0
         volumeMounts:
         - name: host-manifests
           mountPath: /host-manifests
+        - name: host-etc-kubernetes
+          mountPath: /host-etc-kubernetes
 EOF
 
   kubectl wait job/"$RESTORE_JOB_NAME" \
@@ -91,8 +104,14 @@ cleanup_configmaps() {
 }
 
 wait_for_scheduler() {
-  step "Waiting for kube-scheduler to restart (original config)..."
-  sleep 10
+  step "Forcing kube-scheduler pod restart to pick up restored manifest..."
+  kubectl delete pod \
+    -l component=kube-scheduler \
+    -n kube-system \
+    --grace-period=0 \
+    --ignore-not-found
+
+  step "Waiting for kube-scheduler to come back Ready..."
   kubectl wait pod \
     -l component=kube-scheduler \
     -n kube-system \

@@ -1,7 +1,9 @@
 #!/bin/bash
 # hack/deploy_all.sh
 #
-# Full-stack deploy: HIRO Adaptive Orchestrator (operator) + HIRO Scheduler Plugin.
+# Full-stack deploy: HIRO Adaptive Orchestrator (operator) + optional
+# scheduler integration (plugin or extender).
+#
 # This is the single top-level entry point — ALL parameters live here.
 # Every sub-script also keeps its own :-defaults so it works standalone,
 # but when called from here the exports below take precedence.
@@ -45,16 +47,34 @@
 #   SCHED_VERSION             scheduler release version   (default: v0.1.0)
 #
 # ─── Deploy options ──────────────────────────────────────────────────────────
-#   APPLY_EXTENDER_CONFIG     true|false — deploy legacy extender ConfigMap (default: false)
+#   DEPLOY_SCHEDULER_PLUGIN   true|false                  (default: false)
+#                             Deploys the HIRO custom scheduler pod.
+#                             Pods opt in via spec.schedulerName: hiro-scheduler.
+#                             Use on clusters that support custom scheduler pods.
 #
-# Usage:
+#   DEPLOY_EXTENDER           true|false                  (default: false)
+#                             Deploys extender ConfigMap and patches kube-scheduler.
+#                             Affects ALL pods via the default scheduler.
+#                             Use on clusters where a custom scheduler pod cannot run.
+#
+#   Note: DEPLOY_SCHEDULER_PLUGIN and DEPLOY_EXTENDER are mutually exclusive
+#         in practice — choose one scheduler integration approach per cluster.
+#
+# ─── Usage ───────────────────────────────────────────────────────────────────
 #   export GITHUB_PAT_TOKEN=<token>
+#
+#   # Operator only (default)
 #   hack/deploy_all.sh [kubeconfig-path]
 #
-#   # Real AI agent, custom namespace, extender also applied:
-#   export GITHUB_PAT_TOKEN=<token>
+#   # Operator + custom scheduler plugin
+#   DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_all.sh [kubeconfig-path]
+#
+#   # Operator + extender (patches default kube-scheduler)
+#   DEPLOY_EXTENDER=true hack/deploy_all.sh [kubeconfig-path]
+#
+#   # Real AI agent, custom namespace, scheduler plugin
 #   USE_MOCK_AGENT=false DECISION_AGENT_URL=http://ai.example.com:8080 \
-#     NAMESPACE=my-ns APPLY_EXTENDER_CONFIG=true \
+#     NAMESPACE=my-ns DEPLOY_SCHEDULER_PLUGIN=true \
 #     hack/deploy_all.sh [kubeconfig-path]
 
 set -euo pipefail
@@ -124,10 +144,11 @@ export SCHED_K8S_VERSION=${SCHED_K8S_VERSION:-v1.35.0}
 export SCHED_VERSION=${SCHED_VERSION:-v0.1.0}
 
 # ---------------------------------------------------------------------------
-# Deploy options (not forwarded as env — consumed by this script only)
+# Deploy options — consumed by this script only, not forwarded as env vars
 # ---------------------------------------------------------------------------
 
-APPLY_EXTENDER_CONFIG=${APPLY_EXTENDER_CONFIG:-false}
+DEPLOY_SCHEDULER_PLUGIN=${DEPLOY_SCHEDULER_PLUGIN:-false}
+DEPLOY_EXTENDER=${DEPLOY_EXTENDER:-false}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -166,8 +187,9 @@ print_config() {
   echo "── Scheduler ─────────────────────────────────────────────────"
   echo "  K8s Target Version     : $SCHED_K8S_VERSION"
   echo "  Scheduler Version      : $SCHED_VERSION"
-  echo "── Options ───────────────────────────────────────────────────"
-  echo "  Apply Extender Config  : $APPLY_EXTENDER_CONFIG"
+  echo "── Deploy Options ────────────────────────────────────────────"
+  echo "  Deploy Scheduler Plugin: $DEPLOY_SCHEDULER_PLUGIN"
+  echo "  Deploy Extender        : $DEPLOY_EXTENDER"
   echo "================================================================"
 }
 
@@ -189,20 +211,25 @@ wait_for_placement_server() {
   echo "  Operator is healthy."
 }
 
-deploy_scheduler() {
-  step "Phase 3 — Deploying scheduler plugin..."
-  bash "$SCRIPT_DIR/deploy_scheduler.sh" "$KUBECONFIG_PATH"
+deploy_scheduler_plugin() {
+  if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
+    step "Phase 3 — Deploying HIRO scheduler plugin..."
+    bash "$SCRIPT_DIR/deploy_scheduler.sh" "$KUBECONFIG_PATH"
+  else
+    step "Phase 3 — Skipping scheduler plugin  (DEPLOY_SCHEDULER_PLUGIN=false)."
+    echo "  To deploy: DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_all.sh"
+    echo "  Standalone: hack/deploy_scheduler.sh"
+  fi
 }
 
 deploy_extender() {
-  if [ "$APPLY_EXTENDER_CONFIG" = "true" ]; then
-    step "Phase 4 — Deploying legacy extender ConfigMap..."
+  if [ "$DEPLOY_EXTENDER" = "true" ]; then
+    step "Phase 4 — Deploying extender (patches kube-scheduler)..."
     bash "$SCRIPT_DIR/deploy_extender.sh" "$KUBECONFIG_PATH"
   else
-    step "Phase 4 — Skipping extender (APPLY_EXTENDER_CONFIG=false)."
-    echo "  To deploy the legacy extender, re-run with:"
-    echo "    APPLY_EXTENDER_CONFIG=true hack/deploy_all.sh"
-    echo "  Or run standalone: hack/deploy_extender.sh"
+    step "Phase 4 — Skipping extender              (DEPLOY_EXTENDER=false)."
+    echo "  To deploy: DEPLOY_EXTENDER=true hack/deploy_all.sh"
+    echo "  Standalone: hack/deploy_extender.sh"
   fi
 }
 
@@ -210,10 +237,16 @@ print_summary() {
   echo ""
   echo -e "\033[32m================================================================\033[0m"
   echo -e "\033[32m  Full-stack deployment complete.\033[0m"
-  echo -e "\033[32m  Operator   : namespace/$NAMESPACE\033[0m"
-  echo -e "\033[32m  Scheduler  : hiro-scheduler (pods labelled schedulerName=hiro-scheduler)\033[0m"
-  if [ "$APPLY_EXTENDER_CONFIG" = "true" ]; then
-    echo -e "\033[32m  Extender   : hiro-scheduler-config ConfigMap in kube-system\033[0m"
+  echo -e "\033[32m  Operator        : namespace/$NAMESPACE\033[0m"
+  if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
+    echo -e "\033[32m  Scheduler Plugin: deployed  (opt-in: schedulerName=hiro-scheduler)\033[0m"
+  else
+    echo -e "\033[33m  Scheduler Plugin: not deployed\033[0m"
+  fi
+  if [ "$DEPLOY_EXTENDER" = "true" ]; then
+    echo -e "\033[32m  Extender        : deployed  (all pods via default scheduler)\033[0m"
+  else
+    echo -e "\033[33m  Extender        : not deployed\033[0m"
   fi
   echo -e "\033[32m================================================================\033[0m"
 }
@@ -227,8 +260,8 @@ main() {
 
   deploy_operator
   wait_for_placement_server
-  #deploy_scheduler
-  #deploy_extender
+  deploy_scheduler_plugin
+  deploy_extender
 
   print_summary
 }

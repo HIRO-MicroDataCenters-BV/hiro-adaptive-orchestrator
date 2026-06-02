@@ -193,9 +193,19 @@ spec:
           path: /etc/kubernetes/manifests
           type: Directory
 
-      # ── HIRO extender KubeSchedulerConfiguration ───────────────────────
-      # The ConfigMap we applied in step 1. The patch script adds this as a
-      # volume in the kube-scheduler manifest so kubelet can mount it.
+      # ── Host /etc/kubernetes ─────────────────────────────────────────────
+      # Used to write the scheduler config file to the node filesystem.
+      # Static pods may NOT reference ConfigMap volumes (kubelet rejects them),
+      # so we copy the config here as a plain file and reference it via a
+      # hostPath volume in the kube-scheduler manifest instead.
+      - name: host-etc-kubernetes
+        hostPath:
+          path: /etc/kubernetes
+          type: Directory
+
+      # ── HIRO extender KubeSchedulerConfiguration (source) ───────────────
+      # The ConfigMap applied in step 1. The Job reads from it and copies the
+      # content to the node filesystem — it is NOT added to the static pod.
       - name: hiro-scheduler-config
         configMap:
           name: hiro-scheduler-config
@@ -215,29 +225,36 @@ spec:
           set -e
           echo "Installing pyyaml..."
           pip install -q pyyaml
+          echo "Copying scheduler config to node filesystem..."
+          cp /hiro-config/scheduler-config.yaml /host-etc-kubernetes/hiro-scheduler-config.yaml
+          echo "  Written: /host-etc-kubernetes/hiro-scheduler-config.yaml"
           echo "Running patch script..."
           python3 /scripts/patch.py
         env:
         - name: MANIFEST_PATH
           value: /host-manifests/kube-scheduler.yaml
+        - name: BACKUP_PATH
+          value: /host-etc-kubernetes/kube-scheduler.yaml.hiro-backup
         - name: SCHEDULER_CONFIG_PATH
           value: ${SCHEDULER_CONFIG_PATH}
-        - name: CONFIGMAP_NAME
-          value: hiro-scheduler-config
-        - name: CONFIGMAP_KEY
-          value: scheduler-config.yaml
         securityContext:
           privileged: true
           runAsUser: 0
         volumeMounts:
         - name: host-manifests
           mountPath: /host-manifests
+        - name: host-etc-kubernetes
+          mountPath: /host-etc-kubernetes
         - name: hiro-scheduler-config
           mountPath: /hiro-config
         - name: patch-script
           mountPath: /scripts
 EOF
 
+}
+
+# Step 3b — Wait for the patch Job to finish and show its logs.
+wait_for_patch_job() {
   step "Waiting for patch Job to complete (timeout 120s)..."
   kubectl wait job/"$PATCH_JOB_NAME" \
     -n "$PATCH_JOB_NAMESPACE" \
@@ -251,17 +268,21 @@ EOF
   echo "  ──────────────────────────────────────"
 }
 
-# Step 4 — Wait for kubelet to detect the file change and restart
-# kube-scheduler with the new manifest.
-#
-# Kubelet's inotify watch fires within a few seconds of the file write.
-# After receiving the event it terminates the old pod and starts a new one.
-# The full cycle (terminate + start + ready) takes ~15-30s.
+# Step 4 — Force the kube-scheduler pod to restart so it picks up the
+# patched manifest. Deleting the mirror pod causes kubelet to kill the
+# running container and start a fresh one using the current manifest spec
+# (which now includes --config). Relying on kubelet's inotify alone is
+# unreliable — the process may keep running with the old args even after
+# the mirror pod is recreated.
 wait_for_scheduler_restart() {
-  step "Waiting for kube-scheduler to restart with HIRO extender config..."
-  echo "  Pausing 10s for kubelet inotify to fire..."
-  sleep 10
+  step "Forcing kube-scheduler pod restart to pick up patched manifest..."
+  kubectl delete pod \
+    -l component=kube-scheduler \
+    -n kube-system \
+    --grace-period=0 \
+    --ignore-not-found
 
+  step "Waiting for kube-scheduler to come back Ready..."
   kubectl wait pod \
     -l component=kube-scheduler \
     -n kube-system \
@@ -312,6 +333,7 @@ main() {
   apply_extender_configmap
   create_patch_script_configmap
   run_patch_job
+  wait_for_patch_job
   wait_for_scheduler_restart
   verify_patch
 

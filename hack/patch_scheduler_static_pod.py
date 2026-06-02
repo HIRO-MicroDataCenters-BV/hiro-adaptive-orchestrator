@@ -6,17 +6,26 @@
 #
 # Changes made to the manifest:
 #   1. Appends --config=<SCHEDULER_CONFIG_PATH> to kube-scheduler command
-#   2. Adds a volumeMount for the HIRO ConfigMap at SCHEDULER_CONFIG_PATH
-#   3. Adds a ConfigMap volume reference (name: hiro-scheduler-config)
+#   2. Adds a volumeMount for the config file at SCHEDULER_CONFIG_PATH
+#   3. Adds a hostPath volume pointing to SCHEDULER_CONFIG_PATH on the node
+#
+# Static pods may NOT reference ConfigMap volumes — kubelet rejects such
+# manifests with "static pods may not reference configmaps". We therefore
+# write the scheduler config file to the node filesystem beforehand (the
+# deploy Job copies it via a separate hostPath mount) and reference it here
+# as a hostPath volume, which kubelet accepts for static pods.
 #
 # Idempotent: exits 0 with no changes if already patched.
 # Safe:       backs up the original manifest before writing.
 #
 # Environment variables (set by the Job via the shell script):
-#   SCHEDULER_CONFIG_PATH  path inside scheduler pod   (required)
-#   MANIFEST_PATH          path to kube-scheduler.yaml (default: /host-manifests/kube-scheduler.yaml)
-#   CONFIGMAP_NAME         ConfigMap name              (default: hiro-scheduler-config)
-#   CONFIGMAP_KEY          key inside ConfigMap        (default: scheduler-config.yaml)
+#   SCHEDULER_CONFIG_PATH  path inside scheduler pod        (required)
+#   MANIFEST_PATH          path to kube-scheduler.yaml      (default: /host-manifests/kube-scheduler.yaml)
+#   BACKUP_PATH            where to write the backup        (default: /host-etc-kubernetes/kube-scheduler.yaml.hiro-backup)
+#
+# IMPORTANT: the backup must NOT be placed inside the manifests directory.
+# Kubelet reads every file there as a static pod spec — a backup of the
+# original manifest would conflict with the patched one and override it.
 
 import os
 import shutil
@@ -24,11 +33,10 @@ import sys
 import yaml  # pyyaml
 
 
-MANIFEST_PATH       = os.getenv("MANIFEST_PATH",       "/host-manifests/kube-scheduler.yaml")
+MANIFEST_PATH         = os.getenv("MANIFEST_PATH",  "/host-manifests/kube-scheduler.yaml")
+BACKUP_PATH           = os.getenv("BACKUP_PATH",   "/host-etc-kubernetes/kube-scheduler.yaml.hiro-backup")
 SCHEDULER_CONFIG_PATH = os.getenv("SCHEDULER_CONFIG_PATH")
-CONFIGMAP_NAME      = os.getenv("CONFIGMAP_NAME",      "hiro-scheduler-config")
-CONFIGMAP_KEY       = os.getenv("CONFIGMAP_KEY",       "scheduler-config.yaml")
-VOLUME_NAME         = "hiro-scheduler-config"
+VOLUME_NAME           = "hiro-scheduler-config"
 
 if not SCHEDULER_CONFIG_PATH:
     print("ERROR: SCHEDULER_CONFIG_PATH environment variable is required", file=sys.stderr)
@@ -62,7 +70,7 @@ if any(c == CONFIG_FLAG for c in commands):
 # Backup original
 # ---------------------------------------------------------------------------
 
-backup_path = MANIFEST_PATH + ".hiro-backup"
+backup_path = BACKUP_PATH
 if not os.path.exists(backup_path):
     shutil.copy2(MANIFEST_PATH, backup_path)
     print(f"Backup written: {backup_path}")
@@ -89,14 +97,13 @@ if not any(vm.get("name") == VOLUME_NAME for vm in volume_mounts):
     volume_mounts.append({
         "name":      VOLUME_NAME,
         "mountPath": SCHEDULER_CONFIG_PATH,
-        "subPath":   CONFIGMAP_KEY,
         "readOnly":  True,
     })
     print(f"Added volumeMount: {VOLUME_NAME} → {SCHEDULER_CONFIG_PATH}")
 
 
 # ---------------------------------------------------------------------------
-# 3. Add ConfigMap volume
+# 3. Add hostPath volume (static pods cannot reference ConfigMap volumes)
 # ---------------------------------------------------------------------------
 
 volumes = doc["spec"].setdefault("volumes", [])
@@ -104,10 +111,10 @@ volumes = doc["spec"].setdefault("volumes", [])
 # Guard: don't add a duplicate volume
 if not any(v.get("name") == VOLUME_NAME for v in volumes):
     volumes.append({
-        "name":      VOLUME_NAME,
-        "configMap": {"name": CONFIGMAP_NAME},
+        "name":     VOLUME_NAME,
+        "hostPath": {"path": SCHEDULER_CONFIG_PATH, "type": "File"},
     })
-    print(f"Added volume: {VOLUME_NAME} (ConfigMap: {CONFIGMAP_NAME})")
+    print(f"Added hostPath volume: {VOLUME_NAME} → {SCHEDULER_CONFIG_PATH}")
 
 
 # ---------------------------------------------------------------------------
