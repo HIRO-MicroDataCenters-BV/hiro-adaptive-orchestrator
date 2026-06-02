@@ -57,10 +57,10 @@ func (r *OrchestrationProfileReconciler) updateStatus(
 
 	if err := r.Status().Update(ctx, profile); err != nil {
 		if apierrors.IsConflict(err) {
-			logger.Info("Status update conflict, requeuing", "name", profile.Name)
+			logger.Info("reconciler: status update conflict, requeuing", "name", profile.Name)
 			return ctrl.Result{Requeue: true}, nil
 		}
-		logger.Error(err, "Failed to update OrchestrationProfile status", "name", profile.Name)
+		logger.Error(err, "reconciler: failed to update status", "name", profile.Name)
 		return ctrl.Result{}, err
 	}
 

@@ -102,7 +102,7 @@ func (b *DecisionContextBuilder) Build(
 	nodes := placementCtx.CandidateNodes
 	nodeNames := utils.NodeNames(nodes)
 
-	logger.Info("building decision request",
+	logger.Info("builder: building request",
 		"requestId", requestID,
 		"pod", pod.Name,
 		"namespace", pod.Namespace,
@@ -124,7 +124,7 @@ func (b *DecisionContextBuilder) Build(
 			pod.Namespace, pod.Name)
 	}
 
-	logger.Info("found governing profile for pod",
+	logger.Info("builder: profile found for pod",
 		"pod", pod.Name,
 		"profile", profile.Name,
 		"strategy", profile.Spec.Placement.Strategy,
@@ -146,7 +146,7 @@ func (b *DecisionContextBuilder) Build(
 		eaoProfile, err = b.fetchEAOProfile(ctx, pod)
 		if err != nil {
 			// Log and continue — energy context is optional
-			logger.Info("EAO profile unavailable, proceeding without energy data",
+			logger.Info("builder: EAO unavailable, skipping energy data",
 				"pod", pod.Name,
 				"err", err,
 			)
@@ -165,7 +165,7 @@ func (b *DecisionContextBuilder) Build(
 		EAOProfile:     eaoProfile,
 	}
 
-	logger.Info("decision request assembled",
+	logger.Info("builder: request assembled",
 		"requestId", requestID,
 		"pod", pod.Name,
 		"profile", profile.Name,
@@ -205,7 +205,7 @@ func (b *DecisionContextBuilder) findProfileForPod(
 	appName, appNamespace, _ := utils.ResolveAppFromPod(ctx, b.client, pod)
 	if appName == "" {
 		// Pod has no recognized workload owner — not governed by any profile
-		logger.V(1).Info("pod has no recognised workload owner, skipping",
+		logger.V(1).Info("builder: no workload owner, skipping",
 			"pod", pod.Name,
 			"namespace", pod.Namespace,
 		)
@@ -218,7 +218,7 @@ func (b *DecisionContextBuilder) findProfileForPod(
 	if err := b.client.List(ctx, profileList,
 		client.MatchingFields{b.profileIndexField: indexKey},
 	); err != nil {
-		logger.Error(err, "index lookup for key", "key", indexKey)
+		logger.Error(err, "builder: profile index lookup failed", "key", indexKey)
 		return nil, fmt.Errorf("index lookup for key %q: %w", indexKey, err)
 	}
 
@@ -288,7 +288,7 @@ func (b *DecisionContextBuilder) fetchEAOProfile(
 ) (*EAOProfileContext, error) {
 	logger := logf.FromContext(ctx)
 
-	logger.Info("fetching EAO profile for pod",
+	logger.Info("builder: fetching EAO profile",
 		"pod", pod.Name,
 		"namespace", pod.Namespace,
 	)
@@ -318,7 +318,7 @@ func (b *DecisionContextBuilder) fetchEAOForPod(
 	// Step 1: walk OwnerReferences to find the top-level workload name, namespace, and kind.
 	appName, appNamespace, appKind := utils.ResolveAppFromPod(ctx, b.client, pod)
 	if appName == "" {
-		logger.V(1).Info("pod has no recognised workload owner, skipping EAO lookup",
+		logger.V(1).Info("builder: no workload owner, skipping EAO lookup",
 			"pod", pod.Name,
 			"namespace", pod.Namespace,
 		)
@@ -345,7 +345,7 @@ func (b *DecisionContextBuilder) fetchEAOForPod(
 		}
 
 		if refName == appName && refNamespace == appNamespace && refKind == appKind {
-			logger.V(1).Info("found matching EAO for pod",
+			logger.V(1).Info("builder: EAO found for pod",
 				"eao", eao.GetName(),
 				"eaoNamespace", eao.GetNamespace(),
 				"appName", appName,
@@ -356,7 +356,7 @@ func (b *DecisionContextBuilder) fetchEAOForPod(
 		}
 	}
 
-	logger.V(1).Info("no EAO found for pod application",
+	logger.V(1).Info("builder: no EAO found for application",
 		"pod", pod.Name,
 		"appName", appName,
 		"appNamespace", appNamespace,

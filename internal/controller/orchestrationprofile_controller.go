@@ -79,10 +79,10 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 	if err := r.Get(ctx, req.NamespacedName, profile); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Profile was deleted. Nothing to reconcile — GC handles cleanup.
-			logger.Info("OrchestrationProfile not found, likely deleted", "name", req.Name)
+			logger.Info("reconciler: profile not found, likely deleted", "name", req.Name)
 			return ctrl.Result{}, nil
 		}
-		logger.Error(err, "unable to fetch OrchestrationProfile")
+		logger.Error(err, "reconciler: failed to fetch profile")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -92,7 +92,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 	// 	return ctrl.Result{}, err
 	// }
 
-	logger.Info("Reconciling OrchestrationProfile",
+	logger.Info("reconciler: reconciling profile",
 		"name", profile.Name,
 		"strategy", profile.Spec.Placement.Strategy,
 		"awareness", profile.Spec.Placement.Awareness,
@@ -118,7 +118,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 	// -------------------------------------------------------------------------
 	if validationErrs := r.validateProfile(profile); len(validationErrs) > 0 {
 		msg := validationErrs.ToAggregate().Error()
-		logger.Error(validationErrs.ToAggregate(), "OrchestrationProfile spec validation failed", "name", profile.Name)
+		logger.Error(validationErrs.ToAggregate(), "reconciler: spec validation failed", "name", profile.Name)
 		r.Recorder.Event(profile, corev1.EventTypeWarning, EventReasonValidationFailed, msg)
 		return r.updateStatus(ctx, profile, func(s *orchestrationv1alpha1.OrchestrationProfileStatus) {
 			s.Status = StatusError
@@ -143,7 +143,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 			profile.Spec.ApplicationRef.Name,
 			err,
 		)
-		logger.Error(err, "Failed to check application existence",
+		logger.Error(err, "reconciler: failed to check application existence",
 			"app", profile.Spec.ApplicationRef.Name,
 			"kind", profile.Spec.ApplicationRef.Kind,
 		)
@@ -158,7 +158,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 
 	if !appExists {
-		logger.Info("Referenced application does not exist yet, waiting",
+		logger.Info("reconciler: application not found, waiting",
 			"app", profile.Spec.ApplicationRef.Name,
 			"kind", profile.Spec.ApplicationRef.Kind,
 			"namespace", profile.Spec.ApplicationRef.Namespace,
@@ -193,7 +193,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 			profile.Spec.ApplicationRef.Name,
 			err,
 		)
-		logger.Error(err, "Failed to find pods for application",
+		logger.Error(err, "reconciler: failed to find pods",
 			"app", profile.Spec.ApplicationRef.Name,
 			"namespace", profile.Spec.ApplicationRef.Namespace,
 		)
@@ -222,7 +222,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 		placementStatus.PendingPods,
 	)
 
-	logger.Info("updating OrchestrationProfile status",
+	logger.Info("reconciler: updating status",
 		"name", profile.Name,
 		"status", overallStatus,
 		"observed", placementStatus.ObservedPods,

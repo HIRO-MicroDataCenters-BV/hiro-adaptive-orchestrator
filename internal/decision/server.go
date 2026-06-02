@@ -125,7 +125,7 @@ func (s *PlacementServer) Start(ctx context.Context) error {
 		Handler: mux,
 	}
 
-	logger.Info("placement server starting",
+	logger.Info("placement: server starting",
 		"addr", s.Addr,
 		"endpoint", s.placementPath,
 	)
@@ -133,11 +133,11 @@ func (s *PlacementServer) Start(ctx context.Context) error {
 	// Graceful shutdown when manager context is cancelled
 	go func() {
 		<-ctx.Done()
-		logger.Info("placement server shutting down")
+		logger.Info("placement: server shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := s.server.Shutdown(shutdownCtx); err != nil {
-			logger.Error(err, "placement server shutdown error")
+			logger.Error(err, "placement: server shutdown error")
 		}
 	}()
 
@@ -172,7 +172,7 @@ func (s *PlacementServer) handlePlacementDecision(w http.ResponseWriter, r *http
 		requestID = uuid.NewString()
 	}
 
-	logger.Info("placement decision request received",
+	logger.Info("placement: request received",
 		"requestId", requestID,
 		"remoteAddr", r.RemoteAddr,
 	)
@@ -182,7 +182,7 @@ func (s *PlacementServer) handlePlacementDecision(w http.ResponseWriter, r *http
 	// ------------------------------------------------------------------
 	var placementCtx PlacementContext
 	if err := json.NewDecoder(r.Body).Decode(&placementCtx); err != nil {
-		logger.Error(err, "failed to decode PlacementContext", "requestId", requestID)
+		logger.Error(err, "placement: decode request failed", "requestId", requestID)
 		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -192,7 +192,7 @@ func (s *PlacementServer) handlePlacementDecision(w http.ResponseWriter, r *http
 		return
 	}
 
-	logger.Info("placement context decoded",
+	logger.Info("placement: context decoded",
 		"requestId", requestID,
 		"pod", placementCtx.Pod.Name,
 		"namespace", placementCtx.Pod.Namespace,
@@ -205,7 +205,7 @@ func (s *PlacementServer) handlePlacementDecision(w http.ResponseWriter, r *http
 	// ------------------------------------------------------------------
 	decisionReq, err := s.builder.Build(ctx, placementCtx, requestID)
 	if err != nil {
-		logger.Error(err, "failed to build decision request",
+		logger.Error(err, "placement: build decision request failed",
 			"requestId", requestID,
 			"pod", placementCtx.Pod.Name,
 		)
@@ -222,7 +222,7 @@ func (s *PlacementServer) handlePlacementDecision(w http.ResponseWriter, r *http
 	// ------------------------------------------------------------------
 	decisionResp, err := s.client.RequestDecision(ctx, decisionReq)
 	if err != nil {
-		logger.Error(err, "failed to get decision from AI agent",
+		logger.Error(err, "placement: agent request failed",
 			"requestId", requestID,
 			"pod", placementCtx.Pod.Name,
 		)
@@ -242,11 +242,11 @@ func (s *PlacementServer) handlePlacementDecision(w http.ResponseWriter, r *http
 	w.WriteHeader(http.StatusOK)
 
 	if err := json.NewEncoder(w).Encode(decisionResp); err != nil {
-		logger.Error(err, "failed to encode decision response", "requestId", requestID)
+		logger.Error(err, "placement: encode response failed", "requestId", requestID)
 		return
 	}
 
-	logger.Info("placement decision response sent",
+	logger.Info("placement: response sent",
 		"requestId", requestID,
 		"pod", placementCtx.Pod.Name,
 		"nodeScores", len(decisionResp.NodeScores),
@@ -300,7 +300,7 @@ func (s *PlacementServer) handleExtenderFilter(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	logger.Info("extender filter request received",
+	logger.Info("extender: filter request received",
 		"requestId", requestID,
 		"pod", args.Pod.Name,
 		"namespace", args.Pod.Namespace,
@@ -309,7 +309,7 @@ func (s *PlacementServer) handleExtenderFilter(w http.ResponseWriter, r *http.Re
 
 	gate, err := s.builder.CheckEnergyGate(ctx, args.Pod)
 	if err != nil {
-		logger.Error(err, "energy gate check failed, allowing scheduling",
+		logger.Error(err, "extender: energy gate check failed, allowing scheduling",
 			"requestId", requestID,
 			"pod", args.Pod.Name,
 		)
@@ -326,7 +326,7 @@ func (s *PlacementServer) handleExtenderFilter(w http.ResponseWriter, r *http.Re
 		}
 		result.FailedNodes = failed
 		result.Nodes = &corev1.NodeList{}
-		logger.Info("extender filter: energy gate blocked scheduling",
+		logger.Info("extender: filter blocked by energy gate",
 			"requestId", requestID,
 			"pod", args.Pod.Name,
 			"namespace", args.Pod.Namespace,
@@ -377,7 +377,7 @@ func (s *PlacementServer) handleExtenderPrioritize(w http.ResponseWriter, r *htt
 		return
 	}
 
-	logger.Info("extender prioritize request received",
+	logger.Info("extender: prioritize request received",
 		"requestId", requestID,
 		"pod", args.Pod.Name,
 		"namespace", args.Pod.Namespace,
@@ -396,7 +396,7 @@ func (s *PlacementServer) handleExtenderPrioritize(w http.ResponseWriter, r *htt
 
 	decisionReq, err := s.builder.Build(ctx, placementCtx, requestID)
 	if err != nil {
-		logger.Error(err, "extender prioritize: build failed, returning equal scores",
+		logger.Error(err, "extender: prioritize build failed, returning equal scores",
 			"requestId", requestID,
 			"pod", args.Pod.Name,
 		)
@@ -406,7 +406,7 @@ func (s *PlacementServer) handleExtenderPrioritize(w http.ResponseWriter, r *htt
 
 	decisionResp, err := s.client.RequestDecision(ctx, decisionReq)
 	if err != nil {
-		logger.Error(err, "extender prioritize: AI agent unreachable, returning equal scores",
+		logger.Error(err, "extender: prioritize agent unreachable, returning equal scores",
 			"requestId", requestID,
 			"pod", args.Pod.Name,
 		)
@@ -416,7 +416,7 @@ func (s *PlacementServer) handleExtenderPrioritize(w http.ResponseWriter, r *htt
 
 	priorities := nodeScoresToHostPriorities(decisionResp.NodeScores, args.Nodes.Items)
 
-	logger.Info("extender prioritize response sent",
+	logger.Info("extender: prioritize response sent",
 		"requestId", requestID,
 		"pod", args.Pod.Name,
 		"namespace", args.Pod.Namespace,

@@ -39,7 +39,7 @@ func RegisterProfileIndexes(mgr ctrl.Manager) error {
 	); err != nil {
 		return fmt.Errorf("registering index %q: %w", ProfileByAppRefIndex, err)
 	}
-	ctrl.Log.Info("Registered ProfileByAppRefIndex", "index", ProfileByAppRefIndex)
+	ctrl.Log.Info("index: registered ProfileByAppRefIndex", "index", ProfileByAppRefIndex)
 	return nil
 }
 

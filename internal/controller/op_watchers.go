@@ -119,7 +119,7 @@ func (r *OrchestrationProfileReconciler) podToProfileMapViaAppToProfile(
 	appName, appNamespace := r.resolveAppFromPod(ctx, pod)
 	if appName == "" {
 		// Pod has no recognized workload owner — not governed by any profile
-		logger.V(1).Info("pod has no recognized workload owner, skipping",
+		logger.V(1).Info("watcher: no workload owner, skipping",
 			"pod", pod.Name, "namespace", pod.Namespace)
 		return nil
 	}
@@ -169,7 +169,7 @@ func (r *OrchestrationProfileReconciler) profilesByAppRefIndex(
 	if err := r.List(ctx, profileList,
 		client.MatchingFields{ProfileByAppRefIndex: indexKey},
 	); err != nil {
-		logger.Error(err, "failed to look up profiles by app index",
+		logger.Error(err, "watcher: profile index lookup failed",
 			"indexKey", indexKey,
 			"triggerKind", triggerKind,
 			"triggerName", triggerName,
@@ -187,7 +187,7 @@ func (r *OrchestrationProfileReconciler) profilesByAppRefIndex(
 	}
 
 	if len(requests) > 0 {
-		logger.Info("index lookup triggered profile reconciliation",
+		logger.Info("watcher: profile reconciliation triggered",
 			"triggerKind", triggerKind,
 			"triggerName", triggerName,
 			"indexKey", indexKey,

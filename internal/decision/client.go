@@ -103,7 +103,7 @@ func (c *DecisionClient) RequestDecision(
 		req.RequestID = uuid.NewString()
 	}
 
-	logger.Info("sending decision request to external AI agent",
+	logger.Info("agent: sending decision request",
 		"requestId", req.RequestID,
 		"agentURL", c.agentURL,
 		"pod", req.Pod.Name,
@@ -163,7 +163,7 @@ func (c *DecisionClient) RequestDecision(
 			req.Pod.Namespace, req.Pod.Name, err)
 	}
 
-	logger.Info("received decision response from external AI agent",
+	logger.Info("agent: decision response received",
 		"requestId", req.RequestID,
 		"pod", req.Pod.Name,
 		"nodeScoresCount", len(resp.NodeScores),
