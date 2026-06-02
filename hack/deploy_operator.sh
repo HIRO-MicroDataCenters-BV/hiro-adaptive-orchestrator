@@ -2,7 +2,7 @@
 # hack/deploy_operator.sh
 #
 # Builds, pushes, and deploys the HIRO Adaptive Orchestrator (operator only).
-# For a full-stack deploy (operator + scheduler) use hack/deploy_all.sh.
+# For a full-stack deploy (operator + scheduler) use hack/deploy_full_stack.sh.
 #
 # ─── Required ────────────────────────────────────────────────────────────────
 #   GITHUB_PAT_TOKEN          GitHub PAT with write:packages scope
@@ -35,9 +35,12 @@
 # Usage (standalone):
 #   export GITHUB_PAT_TOKEN=<token>
 #   hack/deploy_operator.sh [kubeconfig-path]
+#   # If USE_MOCK_AGENT=true, also run after:
+#   #   kubectl apply -f hack/mock_decision_agent.yaml
 #
-# Usage (via hack/deploy_all.sh — all params inherited from parent):
-#   hack/deploy_all.sh [kubeconfig-path]
+# Usage (via hack/deploy_full_stack.sh — all params inherited from parent):
+#   hack/deploy_full_stack.sh [kubeconfig-path]
+#   # deploy_full_stack.sh handles mock agent deployment automatically.
 
 set -euo pipefail
 
@@ -172,19 +175,6 @@ deploy_operator() {
   make deploy IMG="$IMG"
 }
 
-deploy_mock_agent() {
-  step "Deploying mock decision agent into namespace '$NAMESPACE'..."
-  sed "s/namespace: hiro-adaptive-orchestrator-system/namespace: $NAMESPACE/g" \
-    hack/mock-decision-agent.yaml | kubectl apply -f -
-
-  step "Waiting for mock decision agent to be ready..."
-  kubectl wait --for=condition=Ready pod \
-    -l app=decision-agent \
-    -n "$NAMESPACE" \
-    --timeout=120s
-  echo "Mock decision agent is ready."
-}
-
 create_image_pull_secret() {
   step "Creating GHCR image pull secret in namespace '$NAMESPACE'..."
   kubectl create secret docker-registry ghcr-secret \
@@ -253,11 +243,6 @@ main() {
   build_and_push_operator_image
   configure_kustomize
   deploy_operator
-
-  if [ "$USE_MOCK_AGENT" = "true" ]; then
-    deploy_mock_agent
-  fi
-
   create_image_pull_secret
   patch_operator_service_account
   inject_operator_env_vars
@@ -267,7 +252,7 @@ main() {
   echo ""
   echo -e "\033[32m========================================================\033[0m"
   echo -e "\033[32m  Operator deployed successfully.\033[0m"
-  echo -e "\033[32m  Run hack/deploy_all.sh to also deploy the HIRO scheduler.\033[0m"
+  echo -e "\033[32m  Run hack/deploy_full_stack.sh to also deploy the HIRO scheduler.\033[0m"
   echo -e "\033[32m========================================================\033[0m"
 }
 

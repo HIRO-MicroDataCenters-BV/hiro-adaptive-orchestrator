@@ -44,8 +44,8 @@
 #   export GITHUB_PAT_TOKEN=<token>   # only needed if operator not yet deployed
 #   hack/deploy_extender.sh [kubeconfig-path]
 #
-#   # Via deploy_all.sh
-#   APPLY_EXTENDER_CONFIG=true hack/deploy_all.sh [kubeconfig-path]
+#   # Via deploy_full_stack.sh
+#   APPLY_EXTENDER_CONFIG=true hack/deploy_full_stack.sh [kubeconfig-path]
 #
 #   # Custom namespace / service name
 #   NAMESPACE=my-ns PLACEMENT_SERVICE_NAME=my-svc hack/deploy_extender.sh
@@ -101,11 +101,41 @@ print_config() {
   echo "========================================================"
 }
 
+# resolve_placement_url sets PLACEMENT_URL to the urlPrefix for KubeSchedulerConfiguration.
+#
+# Background: kube-scheduler runs as a static pod with hostNetwork: true, so it
+# uses the node's /etc/resolv.conf rather than CoreDNS.  On most clusters (Kind,
+# kubeadm, GKE, EKS, AKS) the node resolver does not know svc.cluster.local
+# and DNS-based service names are therefore unreachable from the scheduler.
+#
+# kube-proxy (or the CNI) installs iptables/eBPF rules at the kernel level on
+# every node, making ClusterIPs reachable from the host network namespace.
+# We resolve the ClusterIP at deploy time and embed it directly in the URL so
+# the scheduler can contact the extender on all cluster types.
+resolve_placement_url() {
+  local cluster_ip
+  cluster_ip=$(kubectl get svc "${PLACEMENT_SERVICE_NAME}" \
+    -n "${NAMESPACE}" \
+    -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+
+  if [[ -n "$cluster_ip" ]]; then
+    echo "  Resolved placement service ClusterIP: ${cluster_ip}"
+    echo "  (Using IP — kube-scheduler hostNetwork cannot resolve svc.cluster.local via node DNS)"
+    PLACEMENT_URL="http://${cluster_ip}:8090"
+  else
+    echo "  WARNING: could not resolve ClusterIP for ${PLACEMENT_SERVICE_NAME} in ${NAMESPACE}"
+    echo "  Falling back to DNS name — extender may be unreachable from kube-scheduler"
+    PLACEMENT_URL="http://${PLACEMENT_SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:8090"
+  fi
+}
+
 # Step 1 — Render and apply the KubeSchedulerConfiguration ConfigMap.
-# Substitutes PLACEMENT_SERVICE_NAME and NAMESPACE into the urlPrefix so
-# the default kube-scheduler calls the correct PlacementServer endpoint.
+# Resolves the placement service ClusterIP (see resolve_placement_url) then
+# substitutes all dynamic values into the template.
 apply_extender_configmap() {
   step "Rendering and applying hiro-scheduler-config to kube-system..."
+
+  resolve_placement_url
 
   local tmp_config
   tmp_config=$(mktemp /tmp/hiro-extender-config-XXXXXX.yaml)
@@ -113,6 +143,7 @@ apply_extender_configmap() {
   sed \
     -e "s|hiro-adaptive-orchestrator-controller-manager-placement-service|${PLACEMENT_SERVICE_NAME}|g" \
     -e "s|hiro-adaptive-orchestrator-system|${NAMESPACE}|g" \
+    -e "s|http://${PLACEMENT_SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:8090|${PLACEMENT_URL}|g" \
     "$REPO_ROOT/config/extender/scheduler-config.yaml" > "$tmp_config"
 
   kubectl create configmap hiro-scheduler-config \
@@ -268,23 +299,30 @@ wait_for_patch_job() {
   echo "  ──────────────────────────────────────"
 }
 
-# Step 4 — Force the kube-scheduler pod to restart so it picks up the
-# patched manifest. Deleting the mirror pod causes kubelet to kill the
-# running container and start a fresh one using the current manifest spec
-# (which now includes --config). Relying on kubelet's inotify alone is
-# unreliable — the process may keep running with the old args even after
-# the mirror pod is recreated.
+# Step 4 — Wait for kubelet to restart the kube-scheduler container.
+#
+# patch_scheduler_static_pod.py always updates the hiro.io/last-updated
+# annotation in the static pod manifest.  Kubelet watches the manifests
+# directory (inotify) and restarts the container whenever it detects a
+# manifest change — no manual pod deletion needed.
+#
+# Pod name is derived from the control-plane node name rather than a label
+# selector: static pods are always named kube-scheduler-<node-name>, and
+# the label set varies across Kubernetes distributions.
 wait_for_scheduler_restart() {
-  step "Forcing kube-scheduler pod restart to pick up patched manifest..."
-  kubectl delete pod \
-    -l component=kube-scheduler \
-    -n kube-system \
-    --grace-period=0 \
-    --ignore-not-found
+  step "Waiting for kubelet to restart kube-scheduler (annotation change triggers it)..."
 
-  step "Waiting for kube-scheduler to come back Ready..."
-  kubectl wait pod \
-    -l component=kube-scheduler \
+  local cp_node
+  cp_node=$(kubectl get node \
+    -l node-role.kubernetes.io/control-plane \
+    -o jsonpath='{.items[0].metadata.name}')
+  local pod_name="kube-scheduler-${cp_node}"
+
+  # Give kubelet a moment to detect the manifest change via inotify.
+  sleep 5
+
+  step "Waiting for kube-scheduler to be Ready..."
+  kubectl wait "pod/${pod_name}" \
     -n kube-system \
     --for=condition=Ready \
     --timeout=120s
@@ -296,16 +334,16 @@ wait_for_scheduler_restart() {
 verify_patch() {
   step "Verifying patch..."
 
-  local sched_pod
-  sched_pod=$(kubectl get pod \
-    -l component=kube-scheduler \
-    -n kube-system \
+  local cp_node
+  cp_node=$(kubectl get node \
+    -l node-role.kubernetes.io/control-plane \
     -o jsonpath='{.items[0].metadata.name}')
+  local pod_name="kube-scheduler-${cp_node}"
 
-  echo "  Running pod: $sched_pod"
+  echo "  Running pod: $pod_name"
 
   local cmd_json
-  cmd_json=$(kubectl get pod "$sched_pod" \
+  cmd_json=$(kubectl get pod "$pod_name" \
     -n kube-system \
     -o jsonpath='{.spec.containers[0].command}')
 
@@ -319,7 +357,7 @@ verify_patch() {
 
   echo ""
   echo "  Volume mounts on kube-scheduler:"
-  kubectl get pod "$sched_pod" -n kube-system \
+  kubectl get pod "$pod_name" -n kube-system \
     -o jsonpath='{range .spec.containers[0].volumeMounts[*]}  {.name}: {.mountPath}{"\n"}{end}'
 }
 

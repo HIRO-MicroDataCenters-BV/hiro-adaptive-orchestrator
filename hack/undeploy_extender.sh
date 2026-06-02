@@ -104,16 +104,24 @@ cleanup_configmaps() {
 }
 
 wait_for_scheduler() {
-  step "Forcing kube-scheduler pod restart to pick up restored manifest..."
-  kubectl delete pod \
-    -l component=kube-scheduler \
-    -n kube-system \
-    --grace-period=0 \
-    --ignore-not-found
+  # The restore Job replaces the manifest with the original (no --config),
+  # which is a genuine manifest change.  Kubelet detects it via inotify and
+  # restarts the container automatically — no manual pod deletion needed.
+  #
+  # Pod name derived from control-plane node name (label selectors vary
+  # across Kubernetes distributions and may not match).
+  step "Waiting for kubelet to restart kube-scheduler with restored manifest..."
 
-  step "Waiting for kube-scheduler to come back Ready..."
-  kubectl wait pod \
-    -l component=kube-scheduler \
+  local cp_node
+  cp_node=$(kubectl get node \
+    -l node-role.kubernetes.io/control-plane \
+    -o jsonpath='{.items[0].metadata.name}')
+  local pod_name="kube-scheduler-${cp_node}"
+
+  sleep 5
+
+  step "Waiting for kube-scheduler to be Ready..."
+  kubectl wait "pod/${pod_name}" \
     -n kube-system \
     --for=condition=Ready \
     --timeout=120s

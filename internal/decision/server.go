@@ -300,6 +300,13 @@ func (s *PlacementServer) handleExtenderFilter(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	logger.Info("extender filter request received",
+		"requestId", requestID,
+		"pod", args.Pod.Name,
+		"namespace", args.Pod.Namespace,
+		"nodeCount", len(args.Nodes.Items),
+	)
+
 	gate, err := s.builder.CheckEnergyGate(ctx, args.Pod)
 	if err != nil {
 		logger.Error(err, "energy gate check failed, allowing scheduling",
@@ -369,6 +376,13 @@ func (s *PlacementServer) handleExtenderPrioritize(w http.ResponseWriter, r *htt
 		http.Error(w, "pod and nodes are required", http.StatusBadRequest)
 		return
 	}
+
+	logger.Info("extender prioritize request received",
+		"requestId", requestID,
+		"pod", args.Pod.Name,
+		"namespace", args.Pod.Namespace,
+		"nodeCount", len(args.Nodes.Items),
+	)
 
 	candidateNodes := make([]*corev1.Node, len(args.Nodes.Items))
 	for i := range args.Nodes.Items {

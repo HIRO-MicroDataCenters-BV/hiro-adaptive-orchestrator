@@ -1,5 +1,5 @@
 #!/bin/bash
-# hack/deploy_all.sh
+# hack/deploy_full_stack.sh
 #
 # Full-stack deploy: HIRO Adaptive Orchestrator (operator) + optional
 # scheduler integration (plugin or extender).
@@ -30,6 +30,8 @@
 #
 # ─── Operator — Decision Agent ───────────────────────────────────────────────
 #   USE_MOCK_AGENT            true|false                  (default: true)
+#                             When true, deploys hack/mock_decision_agent.yaml
+#                             and sets DECISION_AGENT_URL automatically.
 #   DECISION_AGENT_URL        required when USE_MOCK_AGENT=false
 #   DECISION_AGENT_PATH       agent API path              (default: /api/v1/agent/placement/decision)
 #
@@ -63,19 +65,19 @@
 # ─── Usage ───────────────────────────────────────────────────────────────────
 #   export GITHUB_PAT_TOKEN=<token>
 #
-#   # Operator only (default)
-#   hack/deploy_all.sh [kubeconfig-path]
+#   # Operator + mock agent (default)
+#   hack/deploy_full_stack.sh [kubeconfig-path]
 #
 #   # Operator + custom scheduler plugin
-#   DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_all.sh [kubeconfig-path]
+#   DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_full_stack.sh [kubeconfig-path]
 #
 #   # Operator + extender (patches default kube-scheduler)
-#   DEPLOY_EXTENDER=true hack/deploy_all.sh [kubeconfig-path]
+#   DEPLOY_EXTENDER=true hack/deploy_full_stack.sh [kubeconfig-path]
 #
 #   # Real AI agent, custom namespace, scheduler plugin
 #   USE_MOCK_AGENT=false DECISION_AGENT_URL=http://ai.example.com:8080 \
 #     NAMESPACE=my-ns DEPLOY_SCHEDULER_PLUGIN=true \
-#     hack/deploy_all.sh [kubeconfig-path]
+#     hack/deploy_full_stack.sh [kubeconfig-path]
 
 set -euo pipefail
 
@@ -98,7 +100,7 @@ export NAME_PREFIX=${NAME_PREFIX:-hiro-adaptive-orchestrator-}
 export KUBECONFIG="$KUBECONFIG_PATH"
 
 # ---------------------------------------------------------------------------
-# PlacementServer — operator exposes it, scheduler and extender call it
+# PlacementServer — operator exposes it, scheduler and extender call it.
 # PLACEMENT_SERVICE_NAME must be derived AFTER NAME_PREFIX is resolved.
 # ---------------------------------------------------------------------------
 
@@ -109,12 +111,12 @@ export PLACEMENT_SERVER_HEALTH_PATH=${PLACEMENT_SERVER_HEALTH_PATH:-/healthz}
 export PLACEMENT_TIMEOUT_SECS=${PLACEMENT_TIMEOUT_SECS:-8}
 
 # ---------------------------------------------------------------------------
-# Operator — Decision Agent
+# Decision Agent
 # ---------------------------------------------------------------------------
 
 export USE_MOCK_AGENT=${USE_MOCK_AGENT:-true}
-# DECISION_AGENT_URL is set by deploy_operator.sh when USE_MOCK_AGENT=true.
-# Set it here (and export) only when USE_MOCK_AGENT=false.
+# DECISION_AGENT_URL is set automatically by deploy_operator.sh when USE_MOCK_AGENT=true.
+# Set it here only when USE_MOCK_AGENT=false.
 if [ "$USE_MOCK_AGENT" = "false" ]; then
   : "${DECISION_AGENT_URL:?DECISION_AGENT_URL must be set when USE_MOCK_AGENT=false}"
   export DECISION_AGENT_URL
@@ -122,14 +124,14 @@ fi
 export DECISION_AGENT_PATH=${DECISION_AGENT_PATH:-/api/v1/agent/placement/decision}
 
 # ---------------------------------------------------------------------------
-# Operator — Extender paths
+# Extender paths
 # ---------------------------------------------------------------------------
 
 export EXTENDER_FILTER_PATH=${EXTENDER_FILTER_PATH:-/extender/filter}
 export EXTENDER_PRIORITIZE_PATH=${EXTENDER_PRIORITIZE_PATH:-/extender/prioritize}
 
 # ---------------------------------------------------------------------------
-# Operator — EnergyAwareOrchestration CRD coordinates
+# EnergyAwareOrchestration CRD coordinates
 # ---------------------------------------------------------------------------
 
 export EAO_GROUP=${EAO_GROUP:-eas.hiro.io}
@@ -144,7 +146,7 @@ export SCHED_K8S_VERSION=${SCHED_K8S_VERSION:-v1.35.0}
 export SCHED_VERSION=${SCHED_VERSION:-v0.1.0}
 
 # ---------------------------------------------------------------------------
-# Deploy options — consumed by this script only, not forwarded as env vars
+# Deploy options — consumed by this script only
 # ---------------------------------------------------------------------------
 
 DEPLOY_SCHEDULER_PLUGIN=${DEPLOY_SCHEDULER_PLUGIN:-false}
@@ -156,50 +158,102 @@ DEPLOY_EXTENDER=${DEPLOY_EXTENDER:-false}
 
 step() { printf '\n\033[36m===>\033[0m %s\n' "$*"; }
 
+sep()  { echo "  ──────────────────────────────────────────────────────────"; }
+
 # ---------------------------------------------------------------------------
-# Phases
+# Config summary
 # ---------------------------------------------------------------------------
 
 print_config() {
-  echo "================================================================"
-  echo " HIRO Full-Stack Deploy"
-  echo "================================================================"
-  echo "── Identity ──────────────────────────────────────────────────"
-  echo "  Namespace              : $NAMESPACE"
-  echo "  Name Prefix            : $NAME_PREFIX"
-  echo "  Kubeconfig             : $KUBECONFIG"
-  echo "── PlacementServer ───────────────────────────────────────────"
-  echo "  Service Name           : $PLACEMENT_SERVICE_NAME"
-  echo "  Port                   : $PLACEMENT_SERVER_PORT"
-  echo "  Decision Path          : $PLACEMENT_SERVER_PATH"
-  echo "  Health Path            : $PLACEMENT_SERVER_HEALTH_PATH"
-  echo "  Scheduler Timeout (s)  : $PLACEMENT_TIMEOUT_SECS"
-  echo "── Operator ──────────────────────────────────────────────────"
+  echo ""
+  echo "  ╔══════════════════════════════════════════════════════════╗"
+  echo "  ║           HIRO Full-Stack Deploy — Configuration         ║"
+  echo "  ╚══════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "  ── Identity ──────────────────────────────────────────────"
+  echo "    Namespace              : $NAMESPACE"
+  echo "    Name Prefix            : $NAME_PREFIX"
+  echo "    Kubeconfig             : $KUBECONFIG"
+  echo ""
+  echo "  ── PlacementServer ───────────────────────────────────────"
+  echo "    Service Name           : $PLACEMENT_SERVICE_NAME"
+  echo "    Port                   : $PLACEMENT_SERVER_PORT"
+  echo "    Decision Path          : $PLACEMENT_SERVER_PATH"
+  echo "    Health Path            : $PLACEMENT_SERVER_HEALTH_PATH"
+  echo "    Scheduler Timeout (s)  : $PLACEMENT_TIMEOUT_SECS"
+  echo ""
+  echo "  ── Decision Agent ────────────────────────────────────────"
   if [ "$USE_MOCK_AGENT" = "true" ]; then
-  echo "  Decision Agent         : MOCK"
+  echo "    Mode                   : MOCK  (hack/mock_decision_agent.yaml)"
   else
-  echo "  Decision Agent         : REAL  ($DECISION_AGENT_URL)"
+  echo "    Mode                   : REAL"
+  echo "    URL                    : $DECISION_AGENT_URL"
   fi
-  echo "  Agent Path             : $DECISION_AGENT_PATH"
-  echo "  Extender Filter        : $EXTENDER_FILTER_PATH"
-  echo "  Extender Prioritize    : $EXTENDER_PRIORITIZE_PATH"
-  echo "  EAO CRD                : $EAO_GROUP/$EAO_VERSION  Kind=$EAO_KIND"
-  echo "── Scheduler ─────────────────────────────────────────────────"
-  echo "  K8s Target Version     : $SCHED_K8S_VERSION"
-  echo "  Scheduler Version      : $SCHED_VERSION"
-  echo "── Deploy Options ────────────────────────────────────────────"
-  echo "  Deploy Scheduler Plugin: $DEPLOY_SCHEDULER_PLUGIN"
-  echo "  Deploy Extender        : $DEPLOY_EXTENDER"
-  echo "================================================================"
+  echo "    Agent Path             : $DECISION_AGENT_PATH"
+  echo ""
+  echo "  ── Extender Paths ────────────────────────────────────────"
+  echo "    Filter                 : $EXTENDER_FILTER_PATH"
+  echo "    Prioritize             : $EXTENDER_PRIORITIZE_PATH"
+  echo ""
+  echo "  ── EAO CRD ───────────────────────────────────────────────"
+  echo "    Group/Version          : $EAO_GROUP/$EAO_VERSION"
+  echo "    Kind                   : $EAO_KIND"
+  echo ""
+  echo "  ── Scheduler ─────────────────────────────────────────────"
+  echo "    K8s Target Version     : $SCHED_K8S_VERSION"
+  echo "    Scheduler Version      : $SCHED_VERSION"
+  echo ""
+  echo "  ── Deploy Options ────────────────────────────────────────"
+  echo "    Mock Agent             : $USE_MOCK_AGENT"
+  echo "    Scheduler Plugin       : $DEPLOY_SCHEDULER_PLUGIN"
+  echo "    Extender               : $DEPLOY_EXTENDER"
+  echo ""
 }
+
+# ---------------------------------------------------------------------------
+# Phase 1 — Operator
+# ---------------------------------------------------------------------------
 
 deploy_operator() {
   step "Phase 1 — Deploying operator..."
   bash "$SCRIPT_DIR/deploy_operator.sh" "$KUBECONFIG_PATH"
 }
 
+# ---------------------------------------------------------------------------
+# Phase 2 — Mock Decision Agent (when USE_MOCK_AGENT=true)
+#
+# The mock agent is a lightweight Python HTTP server that scores every
+# candidate node at 50.  It is deployed in the same namespace as the operator
+# so the short DNS name "decision-agent" resolves from the operator pod.
+#
+# This phase lives in deploy_full_stack.sh (not deploy_operator.sh) so that
+# standalone operator deployments are not coupled to the mock agent lifecycle.
+# ---------------------------------------------------------------------------
+
+deploy_mock_agent() {
+  if [ "$USE_MOCK_AGENT" = "true" ]; then
+    step "Phase 2 — Deploying mock decision agent..."
+    sed "s/namespace: hiro-adaptive-orchestrator-system/namespace: $NAMESPACE/g" \
+      "$SCRIPT_DIR/mock_decision_agent.yaml" | kubectl apply -f -
+
+    echo "  Waiting for mock decision agent pod to be Ready..."
+    kubectl wait --for=condition=Ready pod \
+      -l app=decision-agent \
+      -n "$NAMESPACE" \
+      --timeout=120s
+    echo "  Mock decision agent is ready."
+  else
+    step "Phase 2 — Skipping mock agent              (USE_MOCK_AGENT=false)."
+    echo "  Decision agent URL : $DECISION_AGENT_URL"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Phase 3 — PlacementServer health gate
+# ---------------------------------------------------------------------------
+
 wait_for_placement_server() {
-  step "Phase 2 — Waiting for PlacementServer to be reachable..."
+  step "Phase 3 — Waiting for PlacementServer to be reachable..."
   echo "  Service : ${PLACEMENT_SERVICE_NAME}.${NAMESPACE}.svc.cluster.local${PLACEMENT_SERVER_PORT}"
   echo "  Waiting for operator pod to be Ready..."
 
@@ -208,47 +262,67 @@ wait_for_placement_server() {
     -n "$NAMESPACE" \
     --timeout=120s
 
-  echo "  Operator is healthy."
+  echo "  PlacementServer is healthy."
 }
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Scheduler plugin (opt-in: DEPLOY_SCHEDULER_PLUGIN=true)
+# ---------------------------------------------------------------------------
 
 deploy_scheduler_plugin() {
   if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
-    step "Phase 3 — Deploying HIRO scheduler plugin..."
+    step "Phase 4 — Deploying HIRO scheduler plugin..."
     bash "$SCRIPT_DIR/deploy_scheduler.sh" "$KUBECONFIG_PATH"
   else
-    step "Phase 3 — Skipping scheduler plugin  (DEPLOY_SCHEDULER_PLUGIN=false)."
-    echo "  To deploy: DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_all.sh"
+    step "Phase 4 — Skipping scheduler plugin        (DEPLOY_SCHEDULER_PLUGIN=false)."
+    echo "  To deploy: DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_full_stack.sh"
     echo "  Standalone: hack/deploy_scheduler.sh"
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Phase 5 — Extender (opt-in: DEPLOY_EXTENDER=true)
+# ---------------------------------------------------------------------------
+
 deploy_extender() {
   if [ "$DEPLOY_EXTENDER" = "true" ]; then
-    step "Phase 4 — Deploying extender (patches kube-scheduler)..."
+    step "Phase 5 — Deploying extender (patches kube-scheduler)..."
     bash "$SCRIPT_DIR/deploy_extender.sh" "$KUBECONFIG_PATH"
   else
-    step "Phase 4 — Skipping extender              (DEPLOY_EXTENDER=false)."
-    echo "  To deploy: DEPLOY_EXTENDER=true hack/deploy_all.sh"
+    step "Phase 5 — Skipping extender                (DEPLOY_EXTENDER=false)."
+    echo "  To deploy: DEPLOY_EXTENDER=true hack/deploy_full_stack.sh"
     echo "  Standalone: hack/deploy_extender.sh"
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+
 print_summary() {
   echo ""
-  echo -e "\033[32m================================================================\033[0m"
-  echo -e "\033[32m  Full-stack deployment complete.\033[0m"
-  echo -e "\033[32m  Operator        : namespace/$NAMESPACE\033[0m"
-  if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
-    echo -e "\033[32m  Scheduler Plugin: deployed  (opt-in: schedulerName=hiro-scheduler)\033[0m"
+  echo -e "\033[32m  ╔══════════════════════════════════════════════════════════╗\033[0m"
+  echo -e "\033[32m  ║              Full-stack deployment complete.             ║\033[0m"
+  echo -e "\033[32m  ╚══════════════════════════════════════════════════════════╝\033[0m"
+  echo ""
+  echo -e "\033[32m  ── Components ────────────────────────────────────────────\033[0m"
+  echo -e "\033[32m    Operator        : deployed  (namespace/$NAMESPACE)\033[0m"
+  if [ "$USE_MOCK_AGENT" = "true" ]; then
+    echo -e "\033[32m    Mock Agent      : deployed  (decision-agent.$NAMESPACE)\033[0m"
   else
-    echo -e "\033[33m  Scheduler Plugin: not deployed\033[0m"
+    echo -e "\033[33m    Mock Agent      : not deployed  (using real agent)\033[0m"
+  fi
+  if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
+    echo -e "\033[32m    Scheduler Plugin: deployed  (opt-in: schedulerName=hiro-scheduler)\033[0m"
+  else
+    echo -e "\033[33m    Scheduler Plugin: not deployed\033[0m"
   fi
   if [ "$DEPLOY_EXTENDER" = "true" ]; then
-    echo -e "\033[32m  Extender        : deployed  (all pods via default scheduler)\033[0m"
+    echo -e "\033[32m    Extender        : deployed  (all pods via default scheduler)\033[0m"
   else
-    echo -e "\033[33m  Extender        : not deployed\033[0m"
+    echo -e "\033[33m    Extender        : not deployed\033[0m"
   fi
-  echo -e "\033[32m================================================================\033[0m"
+  echo ""
 }
 
 # ---------------------------------------------------------------------------
@@ -259,6 +333,7 @@ main() {
   print_config
 
   deploy_operator
+  deploy_mock_agent
   wait_for_placement_server
   deploy_scheduler_plugin
   deploy_extender

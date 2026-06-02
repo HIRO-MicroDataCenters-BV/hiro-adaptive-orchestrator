@@ -27,6 +27,7 @@
 # Kubelet reads every file there as a static pod spec — a backup of the
 # original manifest would conflict with the patched one and override it.
 
+import datetime
 import os
 import shutil
 import sys
@@ -58,41 +59,33 @@ commands  = container.get("command", [])
 
 
 # ---------------------------------------------------------------------------
-# Idempotency check
+# Backup original (only on first run — do not overwrite an existing backup)
+# ---------------------------------------------------------------------------
+
+if not os.path.exists(BACKUP_PATH):
+    shutil.copy2(MANIFEST_PATH, BACKUP_PATH)
+    print(f"Backup written: {BACKUP_PATH}")
+else:
+    print(f"Backup already exists: {BACKUP_PATH} (skipping overwrite)")
+
+
+# ---------------------------------------------------------------------------
+# 1. Add --config flag (idempotent)
 # ---------------------------------------------------------------------------
 
 if any(c == CONFIG_FLAG for c in commands):
-    print(f"Already patched ({CONFIG_FLAG} present) — nothing to do.")
-    sys.exit(0)
-
-
-# ---------------------------------------------------------------------------
-# Backup original
-# ---------------------------------------------------------------------------
-
-backup_path = BACKUP_PATH
-if not os.path.exists(backup_path):
-    shutil.copy2(MANIFEST_PATH, backup_path)
-    print(f"Backup written: {backup_path}")
+    print(f"Command flag already present: {CONFIG_FLAG}")
 else:
-    print(f"Backup already exists: {backup_path} (skipping overwrite)")
+    container["command"].append(CONFIG_FLAG)
+    print(f"Added command flag: {CONFIG_FLAG}")
 
 
 # ---------------------------------------------------------------------------
-# 1. Add --config flag
-# ---------------------------------------------------------------------------
-
-container["command"].append(CONFIG_FLAG)
-print(f"Added command flag: {CONFIG_FLAG}")
-
-
-# ---------------------------------------------------------------------------
-# 2. Add volumeMount
+# 2. Add volumeMount (idempotent)
 # ---------------------------------------------------------------------------
 
 volume_mounts = container.setdefault("volumeMounts", [])
 
-# Guard: don't add a duplicate volumeMount
 if not any(vm.get("name") == VOLUME_NAME for vm in volume_mounts):
     volume_mounts.append({
         "name":      VOLUME_NAME,
@@ -100,29 +93,48 @@ if not any(vm.get("name") == VOLUME_NAME for vm in volume_mounts):
         "readOnly":  True,
     })
     print(f"Added volumeMount: {VOLUME_NAME} → {SCHEDULER_CONFIG_PATH}")
+else:
+    print(f"volumeMount already present: {VOLUME_NAME}")
 
 
 # ---------------------------------------------------------------------------
-# 3. Add hostPath volume (static pods cannot reference ConfigMap volumes)
+# 3. Add hostPath volume (idempotent; static pods cannot reference ConfigMap volumes)
 # ---------------------------------------------------------------------------
 
 volumes = doc["spec"].setdefault("volumes", [])
 
-# Guard: don't add a duplicate volume
 if not any(v.get("name") == VOLUME_NAME for v in volumes):
     volumes.append({
         "name":     VOLUME_NAME,
         "hostPath": {"path": SCHEDULER_CONFIG_PATH, "type": "File"},
     })
     print(f"Added hostPath volume: {VOLUME_NAME} → {SCHEDULER_CONFIG_PATH}")
+else:
+    print(f"hostPath volume already present: {VOLUME_NAME}")
 
 
 # ---------------------------------------------------------------------------
-# Write patched manifest
+# 4. Always update hiro.io/last-updated annotation
+#
+# Kubelet only restarts the kube-scheduler container when it detects a change
+# in the static pod manifest.  Since the --config patch above is idempotent
+# (no diff on re-runs), kubelet would see no change and keep the old process
+# running with its in-memory config.  Updating this annotation on every run
+# guarantees a detectable manifest diff, causing kubelet to restart the
+# container and pick up the updated config file from disk.
+# ---------------------------------------------------------------------------
+
+annotations = doc.setdefault("metadata", {}).setdefault("annotations", {})
+annotations["hiro.io/last-updated"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+print(f"Updated annotation: hiro.io/last-updated={annotations['hiro.io/last-updated']}")
+
+
+# ---------------------------------------------------------------------------
+# Write manifest (always, so the annotation change is persisted)
 # ---------------------------------------------------------------------------
 
 with open(MANIFEST_PATH, "w") as f:
     yaml.dump(doc, f, default_flow_style=False, allow_unicode=True)
 
-print(f"Manifest patched successfully: {MANIFEST_PATH}")
-print("Kubelet will detect the change and restart kube-scheduler automatically.")
+print(f"Manifest written: {MANIFEST_PATH}")
+print("Kubelet will detect the annotation change and restart kube-scheduler.")

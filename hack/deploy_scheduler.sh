@@ -3,7 +3,7 @@
 #
 # Builds, pushes, and deploys the HIRO scheduler plugin.
 # Expects the operator to already be running (PlacementServer must be reachable).
-# For a full-stack deploy (operator + scheduler) use hack/deploy_all.sh.
+# For a full-stack deploy (operator + scheduler) use hack/deploy_full_stack.sh.
 #
 # ─── Required ────────────────────────────────────────────────────────────────
 #   GITHUB_PAT_TOKEN          GitHub PAT with write:packages scope
@@ -31,8 +31,8 @@
 #   export GITHUB_PAT_TOKEN=<token>
 #   hack/deploy_scheduler.sh [kubeconfig-path]
 #
-# Usage (via hack/deploy_all.sh — all params inherited from parent):
-#   hack/deploy_all.sh [kubeconfig-path]
+# Usage (via hack/deploy_full_stack.sh — all params inherited from parent):
+#   hack/deploy_full_stack.sh [kubeconfig-path]
 
 set -euo pipefail
 

@@ -11,8 +11,8 @@
 #                                       candidate node at 50, returns DecisionResponse
 #   GET  /healthz                    → 200 ok
 #
-# Deploy:  kubectl apply -f hack/mock-decision-agent.yaml
-# Remove:  kubectl delete -f hack/mock-decision-agent.yaml
+# Deploy:  kubectl apply -f hack/mock_decision_agent.yaml
+# Remove:  kubectl delete -f hack/mock_decision_agent.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:

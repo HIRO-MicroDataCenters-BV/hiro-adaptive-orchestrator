@@ -17,10 +17,11 @@ A Kubernetes operator that provides intelligent, AI-driven pod placement and ada
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [Deployment](#deployment)
-  - [Full-Stack (operator + scheduler)](#full-stack-operator--scheduler)
+  - [Full-Stack (operator + mock agent + scheduler)](#full-stack-operator--mock-agent--scheduler)
   - [Operator Only](#operator-only)
+  - [Mock Decision Agent](#mock-decision-agent-1)
   - [Scheduler Only](#scheduler-only)
-  - [Legacy Extender Only](#legacy-extender-only)
+  - [Extender Only](#extender-only)
   - [Manual Kustomize](#manual-kustomize)
   - [Helm](#helm)
   - [YAML Bundle](#yaml-bundle)
@@ -31,7 +32,7 @@ A Kubernetes operator that provides intelligent, AI-driven pod placement and ada
   - [OrchestrationProfile CRD](#orchestrationprofile-crd)
 - [Scheduler Integration Approaches](#scheduler-integration-approaches)
   - [Plugin Approach (recommended)](#plugin-approach-recommended)
-  - [Extender Approach (legacy)](#extender-approach-legacy)
+  - [Extender Approach](#extender-approach)
 - [Mock Decision Agent](#mock-decision-agent)
 - [Testing](#testing)
 - [Development Workflow](#development-workflow)
@@ -48,32 +49,33 @@ A Kubernetes operator that provides intelligent, AI-driven pod placement and ada
 
 ### Components
 
-The system consists of two independently deployed binaries:
+The system consists of two independently deployed binaries plus an optional mock AI agent:
 
-| Component | Binary | Description |
-|-----------|--------|-------------|
+| Component | Binary / File | Description |
+|-----------|--------------|-------------|
 | **Operator** | `cmd/main.go` | Reconciliation controller + PlacementServer HTTP service |
 | **Scheduler Plugin** | `scheduler-plugin/cmd/main.go` | Custom `kube-scheduler` binary with `HIROScore` plugin registered |
+| **Mock Decision Agent** | `hack/mock_decision_agent.yaml` | Lightweight Python HTTP server for local/CI testing; scores all nodes at 50 |
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Kubernetes API Server                                              │
 └──────────┬──────────────────────────────────────┬───────────────────┘
            │ watch OrchestrationProfiles           │ schedule pods
-           │ watch Deployments/StatefulSets/Jobs   │ (schedulerName: hiro-scheduler)
-           ▼                                       ▼
-┌──────────────────────┐              ┌────────────────────────┐
-│  HIRO Operator       │              │  HIRO Scheduler        │
-│  ─────────────────   │              │  (hiro-scheduler pod)  │
+           │ watch Deployments/StatefulSets/Jobs   │
+           ▼                                       │
+┌──────────────────────┐              ┌────────────┴───────────┐
+│  HIRO Operator       │              │  Scheduler             │
+│  ─────────────────   │              │  (plugin or extender)  │
 │  Reconciler          │              │                        │
-│  PlacementServer     │◄─────POST────│  HIROScore plugin      │
-│  :8090               │   PlacCtx    │  PreScore / Score      │
+│  PlacementServer     │◄─────POST────│  HIROScore / Extender  │
+│  :8090               │   PlacCtx    │                        │
 └──────────┬───────────┘              └────────────────────────┘
            │ POST DecisionRequest
            ▼
 ┌──────────────────────┐
 │  Decision Agent      │
-│  (AI / Mock)         │
+│  (AI or Mock)        │
 │  :8080               │
 └──────────────────────┘
 ```
@@ -144,47 +146,69 @@ Plugin configuration (URL, path, timeout) is read from `KubeSchedulerConfigurati
 
 ### Flow 4 — Scheduler Extender (legacy / managed clusters)
 
-The default `kube-scheduler` calls the PlacementServer directly as an HTTP extender. No custom scheduler pod is needed.
+The default `kube-scheduler` calls the PlacementServer directly as an HTTP extender during its filter and prioritize phases. No custom scheduler pod is needed.
+
+> **Why ClusterIP, not DNS?**  
+> `kube-scheduler` runs as a static pod with `hostNetwork: true`. It uses the *node's* `/etc/resolv.conf`, which points to the host DNS resolver — not CoreDNS — so `*.svc.cluster.local` names are unresolvable from the scheduler.  
+> kube-proxy installs iptables/eBPF rules at the kernel level on every node, making ClusterIPs reachable from the host network namespace.  
+> `deploy_extender.sh` therefore resolves the placement service ClusterIP at deploy time and embeds it directly in `urlPrefix`. This works on all cluster types (Kind, kubeadm, GKE, EKS, AKS).
 
 ```
 Pod created (any pod — default scheduler handles all)
         ▼
 default kube-scheduler
-        │  reads KubeSchedulerConfiguration (ConfigMap in kube-system)
-        │  extender URL: http://<placement-svc>.<namespace>.svc.cluster.local:8090
+        │  reads KubeSchedulerConfiguration from /etc/kubernetes/hiro-scheduler-config.yaml
+        │  extender urlPrefix: http://<ClusterIP>:8090   ← IP resolved at deploy time
         │
         ├── Filter phase
         │     POST /extender/filter  { pod, nodes }
         │             ▼
-        │       PlacementServer
+        │       PlacementServer (operator pod)
         │             ├── find OrchestrationProfile for pod
         │             ├── if energy awareness disabled → pass all nodes through
         │             ├── fetch EnergyAwareOrchestration CRD
-        │             └── if EAO.energyMetrics.sufficient == false
-        │                   → FailedNodes: all  (defer the pod)
-        │                   → else: Nodes: all  (allow)
+        │             └── if EAO.status.energyMetrics.sufficient == false
+        │                   → FailedNodes: all candidates (reason from EAO)
+        │                   → Nodes: empty list (scheduler defers the pod)
         │
         └── Score phase (prioritize)
               POST /extender/prioritize  { pod, nodes }
                       ▼
-                PlacementServer
+                PlacementServer (operator pod)
                       ├── build DecisionRequest (AOProfile + EAOProfile + nodes)
                       ├── POST → External Decision Agent
                       │   ← NodeScores [0-100]
                       └── map 0-100 → 0-10  (extender protocol)
                           missing nodes → score 5 (neutral)
                           any error    → all nodes score 5
+
+When extender is unreachable (ignorable: true):
+kube-scheduler logs:
+  "Skipping extender as it returned error and has ignorable flag set"
+  err="Post http://<ClusterIP>:8090/extender/filter: context deadline exceeded"
+Scheduling continues normally using built-in priorities only.
 ```
 
 `ignorable: true` in the ConfigMap ensures scheduling proceeds normally if the PlacementServer is unreachable.
 
+#### Endpoint logs (operator side)
+
+When a request is received the PlacementServer logs:
+
+| Event | Log message |
+|-------|-------------|
+| Filter request received | `"extender filter request received"` with pod/namespace/nodeCount |
+| Energy gate blocked | `"extender filter: energy gate blocked scheduling"` with reason/blockedNodes |
+| Prioritize request received | `"extender prioritize request received"` with pod/namespace/nodeCount |
+| Prioritize response sent | `"extender prioritize response sent"` with topNode/nodeCount |
+
 ### Parameter Flow
 
 ```
-deploy_all.sh  (master parameter sheet — all vars defined here)
+deploy_full_stack.sh  (master parameter sheet — all vars defined here)
         │  exports every variable
         │
-        ├──► deploy_operator.sh
+        ├──► Phase 1: deploy_operator.sh
         │         │
         │         ├─ sed placement_service_patch.yaml base name
         │         │       → kustomize applies NAME_PREFIX
@@ -196,7 +220,15 @@ deploy_all.sh  (master parameter sheet — all vars defined here)
         │                 ▼
         │           PlacementServer / DecisionClient constructed with those values
         │
-        ├──► deploy_scheduler.sh
+        ├──► Phase 2: deploy_mock_agent  (when USE_MOCK_AGENT=true)
+        │         kubectl apply -f hack/mock_decision_agent.yaml
+        │         sed substitutes namespace before apply
+        │         decision-agent Service → http://decision-agent:8080
+        │
+        ├──► Phase 3: wait_for_placement_server
+        │         kubectl wait pod -l app.kubernetes.io/name=hiro-adaptive-orchestrator --for=condition=Ready
+        │
+        ├──► Phase 4: deploy_scheduler.sh  (when DEPLOY_SCHEDULER_PLUGIN=true)
         │         kustomize build config/scheduler/ | sed (patches pluginConfig)
         │                 ▼
         │         ConfigMap hiro-scheduler-config  (KubeSchedulerConfiguration)
@@ -205,14 +237,27 @@ deploy_all.sh  (master parameter sheet — all vars defined here)
         │                 ▼
         │         HIROScore.New() reads pluginConfig.args → NewPlacementClient(url, path, timeout)
         │
-        └──► deploy_extender.sh  (optional, APPLY_EXTENDER_CONFIG=true)
+        └──► Phase 5: deploy_extender.sh  (when DEPLOY_EXTENDER=true)
+                  resolve_placement_url()
+                  │   kubectl get svc → ClusterIP (bypasses hostNetwork DNS limitation)
+                  │
                   sed → ConfigMap hiro-scheduler-config in kube-system
-                  (for use with default kube-scheduler as extender)
+                  │     urlPrefix: http://<ClusterIP>:8090
+                  │
+                  Privileged Job on control-plane node:
+                  │   cp ConfigMap content → /etc/kubernetes/hiro-scheduler-config.yaml
+                  │   patch_scheduler_static_pod.py:
+                  │     adds --config flag (idempotent)
+                  │     adds hostPath volume + volumeMount (idempotent)
+                  │     updates hiro.io/last-updated annotation  ← always, triggers kubelet restart
+                  │
+                  kubelet detects manifest change via inotify → restarts kube-scheduler
+                  wait pod/kube-scheduler-<node> --for=condition=Ready
 ```
 
 `PLACEMENT_SERVICE_NAME` is applied at **deploy time** to set the Kubernetes Service name. It is not injected into the operator pod (the operator only listens on a port; routing is handled by Kubernetes). The scheduler and extender scripts use `PLACEMENT_SERVICE_NAME` to construct the URL they call.
 
-Each sub-script also works **standalone** — it carries its own `:-` defaults for every variable. When called from `deploy_all.sh`, the parent exports override the defaults.
+Each sub-script also works **standalone** — it carries its own `:-` defaults for every variable. When called from `deploy_full_stack.sh`, the parent exports override the defaults.
 
 ---
 
@@ -224,7 +269,7 @@ Each sub-script also works **standalone** — it carries its own `:-` defaults f
 - **Dynamic rebalancing** — trigger-based (energy threshold, CPU/memory threshold, node failure, scheduled)
 - **AI-delegated scoring** — pluggable external decision agent via HTTP
 - **Custom scheduler plugin** — `HIROScore` runs as a separate `hiro-scheduler` binary; pods opt in via `schedulerName: hiro-scheduler`
-- **Legacy extender support** — for managed clusters where a custom scheduler pod cannot be deployed
+- **Scheduler extender support** — for managed clusters where a custom scheduler pod cannot be deployed; uses ClusterIP for reliable reachability from `hostNetwork` kube-scheduler
 - **Status observability** — `NoPods` → `Pending` → `Active` → `Partial` → `Degraded` → `Error`
 - **Kubernetes events** — status transitions and errors recorded as events on `OrchestrationProfile`
 - **Production-ready** — leader election, HTTPS metrics (:8443), Prometheus/ServiceMonitor support, restricted pod security
@@ -245,7 +290,7 @@ Each sub-script also works **standalone** — it carries its own `:-` defaults f
 
 A running Kubernetes cluster (v1.29+) with `~/.kube/config` pointing to it is required for deployment.
 
-An **external Decision Agent** reachable at a URL you control is required for the placement server to function. For local testing, a mock agent is deployed automatically (see [Mock Decision Agent](#mock-decision-agent)).
+An **external Decision Agent** reachable at a URL you control is required for the placement server to function. For local testing, a mock agent is deployed automatically when `USE_MOCK_AGENT=true` (the default).
 
 ---
 
@@ -254,18 +299,21 @@ An **external Decision Agent** reachable at a URL you control is required for th
 ```bash
 export GITHUB_PAT_TOKEN=<your-ghcr-token>
 
-# Full-stack: operator + scheduler plugin (mock agent, default namespace)
-hack/deploy_all.sh
+# Operator + mock agent (default — no scheduler integration)
+hack/deploy_full_stack.sh
 
-# Full-stack with a real AI agent
+# Operator + mock agent + extender (patches default kube-scheduler)
+DEPLOY_EXTENDER=true hack/deploy_full_stack.sh
+
+# Operator + mock agent + custom scheduler plugin (pods opt in via schedulerName)
+DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_full_stack.sh
+
+# Real AI agent, custom namespace
 USE_MOCK_AGENT=false DECISION_AGENT_URL=http://ai.example.com:8080 \
-  hack/deploy_all.sh
+  NAMESPACE=my-ns hack/deploy_full_stack.sh
 
-# Custom namespace + name prefix
-NAMESPACE=my-ns NAME_PREFIX=my-org- hack/deploy_all.sh
-
-# Also deploy the legacy extender ConfigMap (for managed clusters)
-APPLY_EXTENDER_CONFIG=true hack/deploy_all.sh
+# Custom namespace + name prefix + extender
+NAMESPACE=my-ns NAME_PREFIX=my-org- DEPLOY_EXTENDER=true hack/deploy_full_stack.sh
 ```
 
 ---
@@ -274,18 +322,22 @@ APPLY_EXTENDER_CONFIG=true hack/deploy_all.sh
 
 All deploy scripts share the same parameter model: every variable has a default and can be overridden via environment. See [All Parameters](#all-parameters) for the full reference.
 
-### Full-Stack (operator + scheduler)
+### Full-Stack (operator + mock agent + scheduler)
 
 ```bash
 export GITHUB_PAT_TOKEN=<token>
-hack/deploy_all.sh [kubeconfig-path]
+DEPLOY_EXTENDER=true hack/deploy_full_stack.sh [kubeconfig-path]
 ```
 
-Runs four phases in order:
-1. **deploy_operator** — build, push, and deploy the operator
-2. **wait_for_placement_server** — wait for the operator pod to be Ready
-3. **deploy_scheduler** — build, push, and deploy the HIRO scheduler
-4. **deploy_extender** — (skipped unless `APPLY_EXTENDER_CONFIG=true`)
+Runs five phases in order:
+
+| Phase | What runs | Condition |
+|-------|-----------|-----------|
+| 1 | `deploy_operator.sh` — build, push, and deploy the operator | Always |
+| 2 | `deploy_mock_agent` — deploy `hack/mock_decision_agent.yaml` into the operator namespace | `USE_MOCK_AGENT=true` (default) |
+| 3 | `wait_for_placement_server` — wait for the operator pod to be Ready | Always |
+| 4 | `deploy_scheduler.sh` — build, push, and deploy the HIRO scheduler pod | `DEPLOY_SCHEDULER_PLUGIN=true` |
+| 5 | `deploy_extender.sh` — resolve ClusterIP, apply ConfigMap, patch kube-scheduler | `DEPLOY_EXTENDER=true` |
 
 ### Operator Only
 
@@ -300,11 +352,21 @@ Steps performed:
 3. Configure Kustomize (namespace + namePrefix)
 4. Patch `placement_service_patch.yaml` with the derived base name so kustomize produces `PLACEMENT_SERVICE_NAME` as the Service name
 5. Deploy operator via `make deploy`
-6. Deploy mock decision agent (if `USE_MOCK_AGENT=true`)
-7. Create GHCR image pull secret
-8. Patch ServiceAccount with pull secret
-9. Inject environment variables into the operator Deployment (including `PLACEMENT_SERVICE_NAME`)
-10. Restart operator pod and wait for Ready
+6. Create GHCR image pull secret
+7. Patch ServiceAccount with pull secret
+8. Inject environment variables into the operator Deployment
+9. Restart operator pod and wait for Ready
+10. Apply sample `OrchestrationProfile` resources
+
+> **Mock agent:** when running `deploy_operator.sh` standalone with `USE_MOCK_AGENT=true`, deploy the mock agent separately:
+> ```bash
+> kubectl apply -f hack/mock_decision_agent.yaml
+> ```
+> When using `deploy_full_stack.sh`, the mock agent is deployed automatically in Phase 2.
+
+### Mock Decision Agent
+
+See [Mock Decision Agent](#mock-decision-agent).
 
 ### Scheduler Only
 
@@ -322,20 +384,25 @@ Steps performed:
 4. Apply manifests (ServiceAccount, ClusterRole, ClusterRoleBinding, ConfigMap, Deployment)
 5. Wait for scheduler deployment rollout
 
-### Legacy Extender Only
+### Extender Only
 
 For managed Kubernetes clusters (GKE Autopilot, EKS Fargate, etc.) where a custom scheduler pod cannot run. Configures the **default** `kube-scheduler` to call the HIRO PlacementServer during filter and prioritize phases.
 
 ```bash
+# Operator must already be running
 hack/deploy_extender.sh [kubeconfig-path]
-```
 
-Fully automated — applies the ConfigMap, runs a privileged Job to patch the static pod manifest, and waits for kube-scheduler to restart. See [Extender Approach](#extender-approach-legacy) for the complete step-by-step breakdown.
+# Custom namespace / service name
+NAMESPACE=my-ns PLACEMENT_SERVICE_NAME=my-svc hack/deploy_extender.sh
 
-```bash
-# Roll back
+# Air-gapped clusters (supply a local image with python3 + pyyaml)
+PATCHER_IMAGE=my-registry/python3-pyyaml:latest hack/deploy_extender.sh
+
+# Roll back — restores original manifest from backup, removes ConfigMaps
 hack/undeploy_extender.sh
 ```
+
+See [Extender Approach](#extender-approach) for the full step-by-step breakdown.
 
 ### Manual Kustomize
 
@@ -382,7 +449,7 @@ kubectl apply -f dist/install.yaml
 
 ### All Parameters
 
-Every parameter can be set as an environment variable before calling any deploy script. `deploy_all.sh` exports all of them; each sub-script carries its own `:-` default for standalone use.
+Every parameter can be set as an environment variable before calling any deploy script. `deploy_full_stack.sh` exports all of them; each sub-script carries its own `:-` default for standalone use.
 
 #### Identity (shared by all scripts)
 
@@ -397,7 +464,7 @@ Every parameter can be set as an environment variable before calling any deploy 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PLACEMENT_SERVICE_NAME` | `<NAME_PREFIX>controller-manager-placement-service` | k8s Service name for the PlacementServer. The deploy script patches the manifest so kustomize produces this exact name. Used by the scheduler and extender to build the URL they call. |
+| `PLACEMENT_SERVICE_NAME` | `<NAME_PREFIX>controller-manager-placement-service` | k8s Service name for the PlacementServer |
 | `PLACEMENT_SERVER_PORT` | `:8090` | Port the PlacementServer listens on |
 | `PLACEMENT_SERVER_PATH` | `/api/v1/placement/decision` | HTTP path for placement decisions |
 | `PLACEMENT_SERVER_HEALTH_PATH` | `/healthz` | HTTP path for health probes |
@@ -407,7 +474,7 @@ Every parameter can be set as an environment variable before calling any deploy 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `USE_MOCK_AGENT` | `true` | Deploy and use the in-cluster mock agent |
+| `USE_MOCK_AGENT` | `true` | Deploy and use the in-cluster mock agent (Phase 2 of `deploy_full_stack.sh`) |
 | `DECISION_AGENT_URL` | `http://decision-agent:8080` (mock) | Base URL of the AI agent. **Required when `USE_MOCK_AGENT=false`.** |
 | `DECISION_AGENT_PATH` | `/api/v1/agent/placement/decision` | HTTP path on the AI agent |
 
@@ -415,8 +482,8 @@ Every parameter can be set as an environment variable before calling any deploy 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EXTENDER_FILTER_PATH` | `/extender/filter` | Path for legacy extender filter calls |
-| `EXTENDER_PRIORITIZE_PATH` | `/extender/prioritize` | Path for legacy extender prioritize calls |
+| `EXTENDER_FILTER_PATH` | `/extender/filter` | Path for extender filter calls |
+| `EXTENDER_PRIORITIZE_PATH` | `/extender/prioritize` | Path for extender prioritize calls |
 
 #### Operator — EnergyAwareOrchestration CRD
 
@@ -430,20 +497,23 @@ Every parameter can be set as an environment variable before calling any deploy 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SCHED_K8S_VERSION` | `v1.35.0` | Kubernetes minor version the scheduler binary is compiled against. Must match the target cluster. |
+| `SCHED_K8S_VERSION` | `v1.35.0` | Kubernetes minor version the scheduler binary is compiled against |
 | `SCHED_VERSION` | `v0.1.0` | Scheduler release version (used in the Docker image tag) |
 
 #### Deploy Options
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `APPLY_EXTENDER_CONFIG` | `false` | Set to `true` to also run `deploy_extender.sh` as Phase 4 |
+| `DEPLOY_SCHEDULER_PLUGIN` | `false` | Set to `true` to deploy the HIRO custom scheduler pod (Phase 4) |
+| `DEPLOY_EXTENDER` | `false` | Set to `true` to deploy the extender and patch kube-scheduler (Phase 5) |
+
+> `DEPLOY_SCHEDULER_PLUGIN` and `DEPLOY_EXTENDER` are mutually exclusive in practice — choose one scheduler integration approach per cluster.
 
 ---
 
 ### Operator Environment Variables
 
-The operator pod reads configuration exclusively from environment variables. These are injected into the Deployment by `inject_operator_env_vars()` in `deploy_operator.sh` via `kubectl set env`.
+The operator pod reads configuration exclusively from environment variables injected by `deploy_operator.sh` via `kubectl set env`.
 
 | Variable | Default | Read by |
 |----------|---------|---------|
@@ -515,12 +585,14 @@ spec:
                               # | NodeFailure | Scheduled
 ```
 
-For pods to be handled by the HIRO scheduler, add to the pod template:
+For pods to be handled by the HIRO scheduler plugin, add to the pod template:
 
 ```yaml
 spec:
   schedulerName: hiro-scheduler
 ```
+
+Pods without `schedulerName` use the default scheduler. When the extender approach is deployed, the default scheduler calls HIRO automatically for all pods.
 
 #### Placement Strategies
 
@@ -556,7 +628,9 @@ Deploys `hiro-scheduler` as a standalone scheduler pod. Pods explicitly opt in b
 **Pros:** Clean separation, no changes to existing workloads, per-pod opt-in, HA-ready (2 replicas with leader election).
 
 ```bash
-# Deploy
+# Deploy (operator must be running first)
+DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_full_stack.sh
+# or standalone:
 hack/deploy_scheduler.sh
 
 # Verify
@@ -570,15 +644,14 @@ kubectl patch deployment my-app -p '{"spec":{"template":{"spec":{"schedulerName"
 To build the scheduler for a different Kubernetes version:
 
 ```bash
-# Update go.mod and rebuild
 make pin-k8s-version SCHED_K8S_VERSION=v1.36.0
 make build-scheduler
 make docker-build-scheduler SCHED_K8S_VERSION=v1.36.0
 ```
 
-### Extender Approach (legacy)
+### Extender Approach
 
-Hooks the **default** `kube-scheduler` to call the operator's PlacementServer as an HTTP extender during its filter and prioritize phases. No custom scheduler pod is needed — use this on managed clusters (GKE Autopilot, EKS Fargate, AKS) where the control plane is locked down.
+Hooks the **default** `kube-scheduler` to call the operator's PlacementServer as an HTTP extender during its filter and prioritize phases. No custom scheduler pod is needed.
 
 **Trade-offs vs plugin approach:**
 
@@ -586,46 +659,16 @@ Hooks the **default** `kube-scheduler` to call the operator's PlacementServer as
 |---|---|---|
 | Scope | Only pods with `schedulerName: hiro-scheduler` | All pods via default scheduler |
 | Opt-in | Per-pod | Cluster-wide |
-| Control plane change | No | Yes — must patch `kube-scheduler` static pod |
+| Control plane change | No | Yes — patches `kube-scheduler` static pod manifest |
 | Score range | 0–100 (framework `MinNodeScore`/`MaxNodeScore`) | 0–10 (extender protocol) |
 | Failure mode | Soft-fail open | `ignorable: true` (soft-fail open) |
+| Scheduler URL | DNS (`svc.cluster.local`) | ClusterIP (resolved at deploy time) |
 
-#### Components
+#### Why ClusterIP for the extender URL
 
-```
-default kube-scheduler
-  │  KubeSchedulerConfiguration (ConfigMap in kube-system)
-  │  extenders:
-  │    urlPrefix: http://<PLACEMENT_SERVICE_NAME>.<NAMESPACE>.svc.cluster.local:8090
-  │    filterVerb:     extender/filter
-  │    prioritizeVerb: extender/prioritize
-  │    ignorable: true
-  │
-  ├──► POST /extender/filter        (energy gate)
-  │         ▼
-  │    PlacementServer (operator pod)
-  │         └── CheckEnergyGate(pod)
-  │               ├── find governing OrchestrationProfile (O(1) index)
-  │               ├── if profile.awareness.energy == false → allow all nodes
-  │               ├── fetch EnergyAwareOrchestration CRD
-  │               │     if EAO not found / error → allow all nodes (best-effort)
-  │               └── if EAO.status.energyMetrics.sufficient == false
-  │                     → FailedNodes: all candidates (reason from EAO)
-  │                     → Nodes: empty list (scheduler defers the pod)
-  │
-  └──► POST /extender/prioritize    (AI scoring)
-            ▼
-       PlacementServer (operator pod)
-            ├── build DecisionRequest (same as plugin path)
-            │     AOProfileContext  (strategy + awareness + rebalancing)
-            │     EAOProfileContext (energy data, if energy awareness enabled)
-            │     CandidateNodes
-            ├──► POST DecisionRequest → External Decision Agent
-            │     ← NodeScores [ {nodeName, score 0-100} ]
-            └── map scores 0-100 → 0-10 (int64, extender protocol)
-                  nodes absent from AI response → score 5 (neutral)
-                  on any error → all nodes score 5
-```
+`kube-scheduler` runs with `hostNetwork: true` — it shares the node's network namespace and resolves DNS via the node's `/etc/resolv.conf`. On most clusters this points to the VPC/host DNS resolver, which has no knowledge of `svc.cluster.local` names. CoreDNS only handles DNS for pods in the pod network.
+
+`deploy_extender.sh` calls `resolve_placement_url()` which gets the placement service ClusterIP via `kubectl get svc` and embeds it directly in the `urlPrefix`. kube-proxy iptables/eBPF rules are installed at the kernel level on every node, so ClusterIPs are reachable from the host network namespace on all cluster types.
 
 #### Endpoints served by the PlacementServer
 
@@ -638,65 +681,90 @@ Score mapping: AI agent returns scores in `[0, 100]`. The extender normalises to
 
 #### Deploy
 
-`hack/deploy_extender.sh` is a **fully automated** end-to-end deploy. No manual manifest editing required.
+`hack/deploy_extender.sh` is a fully automated end-to-end deploy:
 
 ```bash
-# Standalone (operator must already be running)
+# As part of full-stack
+DEPLOY_EXTENDER=true hack/deploy_full_stack.sh
+
+# Standalone (operator must be running)
 hack/deploy_extender.sh [kubeconfig-path]
 
-# Custom namespace / service name
-NAMESPACE=my-ns PLACEMENT_SERVICE_NAME=my-svc hack/deploy_extender.sh
-
-# Air-gapped clusters (supply a local image with python3+pyyaml)
-PATCHER_IMAGE=my-registry/python3-pyyaml:latest hack/deploy_extender.sh
-
-# As part of full-stack
-APPLY_EXTENDER_CONFIG=true hack/deploy_all.sh
-```
-
-The script runs these steps automatically:
-
-| Step | What happens |
-|------|-------------|
-| 1 | Renders `hiro-scheduler-config` ConfigMap (substitutes `PLACEMENT_SERVICE_NAME`/`NAMESPACE` into `urlPrefix`) and applies to `kube-system` |
-| 2 | Creates `hiro-patch-script` ConfigMap from `hack/patch_scheduler_static_pod.py` |
-| 3 | Runs a privileged Job on the control-plane node that mounts `/etc/kubernetes/manifests` (hostPath) and patches `kube-scheduler.yaml` in-place (adds `--config` flag + ConfigMap volume mount) |
-| 4 | Kubelet detects the file change via inotify and restarts kube-scheduler (~10-15s) |
-| 5 | Waits for the new kube-scheduler pod to be Ready |
-| 6 | Verifies `--config` flag is live in the running pod spec |
-
-The patch is **idempotent** — re-running does nothing if already patched. The original manifest is backed up to `kube-scheduler.yaml.hiro-backup` on the node before any changes.
-
-```bash
-# Verify extender calls are reaching the PlacementServer
-kubectl logs -l component=kube-scheduler -n kube-system | grep -i extender
-
-# Roll back — restores original manifest from backup, removes ConfigMaps
+# Roll back
 hack/undeploy_extender.sh
 ```
 
-> **Air-gapped / no-internet nodes:** `PATCHER_IMAGE=python:3-slim` pulls from Docker Hub. Override with a local registry image that includes `python3` and `pyyaml`. The patch script itself is delivered via ConfigMap — no custom image build needed.
+Steps performed automatically:
 
-See [config/extender/scheduler-config.yaml](config/extender/scheduler-config.yaml) for the raw ConfigMap template.
+| Step | What happens |
+|------|-------------|
+| 1 | `resolve_placement_url()` — resolves placement service ClusterIP; falls back to DNS with a warning if unavailable |
+| 2 | Renders `hiro-scheduler-config` ConfigMap (`urlPrefix: http://<ClusterIP>:8090`) and applies to `kube-system` |
+| 3 | Creates `hiro-patch-script` ConfigMap from `hack/patch_scheduler_static_pod.py` |
+| 4 | Runs privileged Job on the control-plane node: copies config to `/etc/kubernetes/hiro-scheduler-config.yaml`; runs patch script |
+| 5 | Patch script adds `--config` flag, `hostPath` volume, and `volumeMount` to the scheduler manifest (idempotent); **always** updates `hiro.io/last-updated` annotation |
+| 6 | Kubelet detects the annotation change via inotify and restarts kube-scheduler with the new config |
+| 7 | Waits for `pod/kube-scheduler-<node>` to be Ready |
+| 8 | Verifies `--config` flag is present in the live pod spec |
+
+**Why the annotation is needed:** The `--config` patch is idempotent — on re-runs, `patch.py` sees the flag is already present. Without any manifest diff, kubelet keeps the old container running with its in-memory (stale) config. Updating `hiro.io/last-updated` on every run guarantees kubelet always detects a change and restarts the container to read the updated config file from disk.
+
+**Why `hostPath` (not ConfigMap) for the config volume:** Kubelet rejects static pod manifests that reference ConfigMap volumes with `"static pods may not reference configmaps"`. The deploy Job copies the config file to `/etc/kubernetes/hiro-scheduler-config.yaml` on the node filesystem and the manifest references it via a `hostPath` volume.
+
+**Backup:** The original `kube-scheduler.yaml` is backed up to `/etc/kubernetes/kube-scheduler.yaml.hiro-backup` (outside the manifests directory — placing it inside would cause kubelet to read it as a second static pod spec and conflict with the patched manifest).
+
+#### Observability
+
+```bash
+# Operator logs — extender requests received
+kubectl logs -l control-plane=controller-manager -n hiro-adaptive-orchestrator-system \
+  | grep "extender"
+
+# kube-scheduler logs — includes "Skipping extender" when ignored
+kubectl logs kube-scheduler-<node> -n kube-system | grep -i extender
+
+# Verify extender URL in the running scheduler
+kubectl get pod kube-scheduler-<node> -n kube-system \
+  -o jsonpath='{.spec.containers[0].command}' | tr ',' '\n' | grep config
+```
+
+See [config/extender/scheduler-config.yaml](config/extender/scheduler-config.yaml) for the ConfigMap template.
 
 ---
 
 ## Mock Decision Agent
 
-For local and CI testing a mock agent is included. It responds to every placement request with all candidate nodes scored equally at `50`.
+For local and CI testing a mock agent is included at `hack/mock_decision_agent.yaml`. It responds to every placement request with all candidate nodes scored equally at `50`.
+
+```
+POST /api/v1/placement/decision  →  nodeScores: [{nodeName, score: 50.0}, ...]
+GET  /healthz                    →  200 ok
+```
+
+The mock agent runs as a Python 3 `http.server` in a `python:3.11-slim` container. It is deployed into the same namespace as the operator so the short DNS name `decision-agent` resolves from the operator pod.
 
 ```bash
-# Deployed automatically when USE_MOCK_AGENT=true (the default)
-hack/deploy_operator.sh
+# Deployed automatically in Phase 2 when USE_MOCK_AGENT=true (the default)
+DEPLOY_EXTENDER=true hack/deploy_full_stack.sh
 
 # Deploy manually
-kubectl apply -f hack/mock-decision-agent.yaml
+kubectl apply -f hack/mock_decision_agent.yaml
 
-# Check it is running
+# Verify
 kubectl get pods -n hiro-adaptive-orchestrator-system -l app=decision-agent
+kubectl logs -n hiro-adaptive-orchestrator-system -l app=decision-agent
+
+# Remove
+kubectl delete -f hack/mock_decision_agent.yaml
 ```
 
 The mock agent listens at `http://decision-agent:8080` inside the operator namespace, matching the default `DECISION_AGENT_URL`.
+
+To switch to a real AI agent:
+
+```bash
+USE_MOCK_AGENT=false DECISION_AGENT_URL=http://ai.example.com:8080 hack/deploy_full_stack.sh
+```
 
 ---
 
@@ -740,12 +808,13 @@ Edit *.go files
 
 Deploy operator only
         └── hack/deploy_operator.sh
+           (if USE_MOCK_AGENT=true, also: kubectl apply -f hack/mock_decision_agent.yaml)
 
-Deploy scheduler only (operator must be running)
-        └── hack/deploy_scheduler.sh
+Deploy everything (operator + mock agent + extender)
+        └── DEPLOY_EXTENDER=true hack/deploy_full_stack.sh
 
-Deploy everything
-        └── hack/deploy_all.sh
+Deploy everything (operator + mock agent + scheduler plugin)
+        └── DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_full_stack.sh
 ```
 
 > **Never manually edit** auto-generated files: `config/crd/bases/*.yaml`, `config/rbac/role.yaml`, `zz_generated.*.go`, `dist/chart/`, `dist/install.yaml`.
@@ -775,12 +844,15 @@ internal/
     op_constants.go                    # Status enum + event reason constants
   decision/
     server.go                          # PlacementServer HTTP service (:8090)
-                                       #   POST /api/v1/placement/decision  (plugin)
-                                       #   POST /extender/filter            (legacy)
-                                       #   POST /extender/prioritize        (legacy)
-    builder.go                         # Assembles DecisionRequest (incl. EAO profile fetch)
+                                       #   POST /api/v1/placement/decision  (plugin path)
+                                       #   POST /extender/filter            (extender filter)
+                                       #   POST /extender/prioritize        (extender scoring)
+    builder.go                         # Assembles DecisionRequest + CheckEnergyGate (incl. EAO profile fetch)
     client.go                          # HTTP client to external AI agent
     types.go                           # Type aliases → pkg/placement (zero churn)
+    extender_types.go                  # Kubernetes scheduler extender protocol types
+                                       #   ExtenderArgs, ExtenderFilterResult, HostPriorityList,
+                                       #   HostPriority, EnergyGateResult
   utils/
     helpers.go                         # ResolveAppFromPod, KeysOf, NodeNames
 scheduler-plugin/                      # Separate Go module (own go.mod)
@@ -806,17 +878,19 @@ config/
     configmap.yaml                     # KubeSchedulerConfiguration + HIROScore pluginConfig
     deployment.yaml                    # hiro-scheduler Deployment (2 replicas, HA)
   extender/
-    scheduler-config.yaml              # Legacy KubeSchedulerConfiguration for extender mode
+    scheduler-config.yaml              # Extender KubeSchedulerConfiguration template
+                                       # (urlPrefix uses DNS; deploy_extender.sh substitutes ClusterIP)
   samples/                             # Example OrchestrationProfile + nginx Deployment
   default/                             # Kustomize overlay (namespace, namePrefix)
 hack/
-  deploy_all.sh                        # Full-stack entry point — all parameters defined here
+  deploy_full_stack.sh                 # Full-stack entry point (5 phases) — all parameters defined here
   deploy_operator.sh                   # Operator-only deploy
   deploy_scheduler.sh                  # Scheduler-only deploy
-  deploy_extender.sh                   # Extender full deploy: ConfigMap + privileged Job to patch kube-scheduler
+  deploy_extender.sh                   # Extender deploy: resolve ClusterIP → ConfigMap → privileged Job → kubelet restart
   undeploy_extender.sh                 # Roll back: restore original kube-scheduler manifest
-  patch_scheduler_static_pod.py        # Python script run by the patch Job (idempotent YAML editor)
-  mock-decision-agent.yaml             # In-cluster mock AI agent
+  patch_scheduler_static_pod.py        # Patch Job script: adds --config, hostPath volume, and
+                                       # hiro.io/last-updated annotation (triggers kubelet restart)
+  mock_decision_agent.yaml             # In-cluster mock AI agent (Deployment + Service + ConfigMap)
 dist/
   chart/                               # Generated Helm chart — DO NOT EDIT
   install.yaml                         # Generated single-file install bundle
