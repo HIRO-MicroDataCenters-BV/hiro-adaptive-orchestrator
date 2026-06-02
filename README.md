@@ -8,10 +8,10 @@ A Kubernetes operator that provides intelligent, AI-driven pod placement and ada
 
 - [Architecture](#architecture)
   - [Components](#components)
+  - [PlacementServer](#placementserver)
   - [Flow 1 — Reconciliation Controller](#flow-1--reconciliation-controller)
-  - [Flow 2 — Placement Server](#flow-2--placement-server-ai-driven-scheduling)
-  - [Flow 3 — HIRO Scheduler Plugin](#flow-3--hiro-scheduler-plugin)
-  - [Flow 4 — Scheduler Extender](#flow-4--scheduler-extender-legacy--managed-clusters)
+  - [Flow 2 — Plugin Path](#flow-2--plugin-path-hiro-scheduler--placementserver)
+  - [Flow 3 — Extender Path](#flow-3--extender-path-default-kube-scheduler--placementserver)
   - [Parameter Flow](#parameter-flow)
 - [Features](#features)
 - [Prerequisites](#prerequisites)
@@ -53,7 +53,7 @@ The system consists of two independently deployed binaries plus an optional mock
 
 | Component | Binary / File | Description |
 |-----------|--------------|-------------|
-| **Operator** | `cmd/main.go` | Reconciliation controller + PlacementServer HTTP service |
+| **Operator** | `cmd/main.go` | Reconciliation controller + PlacementServer HTTP service (`:8090`) serving 4 routes — plugin path, extender filter, extender prioritize, healthz |
 | **Scheduler Plugin** | `scheduler-plugin/cmd/main.go` | Custom `kube-scheduler` binary with `HIROScore` plugin registered |
 | **Mock Decision Agent** | `hack/mock_decision_agent.yaml` | Lightweight Python HTTP server for local/CI testing; scores all nodes at 50 |
 
@@ -64,21 +64,55 @@ The system consists of two independently deployed binaries plus an optional mock
            │ watch OrchestrationProfiles           │ schedule pods
            │ watch Deployments/StatefulSets/Jobs   │
            ▼                                       │
-┌──────────────────────┐              ┌────────────┴───────────┐
-│  HIRO Operator       │              │  Scheduler             │
-│  ─────────────────   │              │  (plugin or extender)  │
-│  Reconciler          │              │                        │
-│  PlacementServer     │◄─────POST────│  HIROScore / Extender  │
-│  :8090               │   PlacCtx    │                        │
-└──────────┬───────────┘              └────────────────────────┘
-           │ POST DecisionRequest
-           ▼
-┌──────────────────────┐
-│  Decision Agent      │
-│  (AI or Mock)        │
-│  :8080               │
-└──────────────────────┘
+┌──────────────────────────────────┐    ┌──────────┴──────────────────────┐
+│  HIRO Operator Pod               │    │  Scheduler (choose one)         │
+│  ────────────────────────────── │    │  ─────────────────────────────  │
+│  Reconciler                      │    │  [A] hiro-scheduler (plugin)    │
+│                                  │    │      per-pod opt-in             │
+│  PlacementServer (:8090)         │◄───┤  [B] default kube-scheduler     │
+│  ─────────────────────────────   │    │      extender, cluster-wide     │
+│  /api/v1/placement/decision      │    │                                 │
+│  /extender/filter                │    │  [A] → /placement/decision      │
+│  /extender/prioritize            │    │  [B] → /extender/filter         │
+│  /healthz                        │    │       /extender/prioritize      │
+└──────────────────┬───────────────┘    └─────────────────────────────────┘
+                   │ POST DecisionRequest
+                   ▼
+         ┌──────────────────────┐
+         │  Decision Agent      │
+         │  (AI or Mock) :8080  │
+         └──────────────────────┘
 ```
+
+### PlacementServer
+
+The `PlacementServer` is a **single HTTP listener on `:8090`** inside the operator pod. Both scheduler integration approaches — plugin and extender — call the same server on different routes. There is no separate binary or process: it is one `net/http` mux started by `cmd/main.go` alongside the reconciler.
+
+```
+            HIRO Operator Pod — PlacementServer (:8090)
+           ┌──────────────────────────────────────────────────────────────┐
+ hiro-     │  POST /api/v1/placement/decision                            │
+ scheduler ►│    1. look up OrchestrationProfile (O(1) field index)       │──► Decision
+ (plugin)  │    2. build DecisionRequest (AOProfile + EAOProfile + nodes) │    Agent
+           │    3. call External AI Agent → return NodeScores to plugin   │    :8080
+           │                                                              │
+ default   │  POST /extender/filter                                       │
+ scheduler ►│    1. look up OrchestrationProfile for pod                  │
+ (extender)│    2. CheckEnergyGate via EAO CRD                            │
+           │       allowed  → pass all nodes through unchanged            │
+           │       blocked  → FailedNodes: all (scheduler defers the pod) │
+           │                                                              │
+          ►│  POST /extender/prioritize                                   │──► Decision
+           │    1. build DecisionRequest (same pipeline as plugin path)   │    Agent
+           │    2. call External AI Agent → map scores [0-100] → [0-10]   │    :8080
+           │    3. missing nodes → score 5 (neutral fallback)             │
+           │                                                              │
+ Kubernetes│  GET  /healthz → 200 ok                                      │
+ probes   ►│                                                              │
+           └──────────────────────────────────────────────────────────────┘
+```
+
+> `/extender/filter` + `/extender/prioritize` share the same `DecisionContextBuilder.Build()` + `DecisionClient.RequestDecision()` pipeline as the plugin path. The filter step runs `CheckEnergyGate` first; the prioritize step calls the AI agent and normalises scores.
 
 ### Flow 1 — Reconciliation Controller
 
@@ -105,95 +139,108 @@ OrchestrationProfile.status updated
         └── Status transition → Kubernetes Event emitted
 ```
 
-### Flow 2 — Placement Server (AI-driven scheduling)
+### Flow 2 — Plugin Path: hiro-scheduler + PlacementServer
 
-Called by the HIROScore scheduler plugin for every pending pod with `schedulerName: hiro-scheduler`:
-
-```
-HIROScore.PreScore (inside hiro-scheduler pod)
-        │  POST /api/v1/placement/decision  { pod, candidateNodes }
-        ▼
-PlacementServer (:8090, inside operator pod)
-        ├── Look up OrchestrationProfile for the pod (O(1) field index)
-        ├── Build DecisionRequest
-        │   ├── AOProfileContext   (strategy + awareness + current placement)
-        │   ├── EAOProfileContext  (energy data, if energy awareness enabled)
-        │   └── CandidateNodes     (full Node objects from scheduler)
-        ▼
-External Decision Agent  (DECISION_AGENT_URL)
-        │  { nodeScores: [{nodeName, score}, ...] }
-        ▼
-HIROScore.Score → returns per-node AI score → scheduler selects highest-scored node
-```
-
-### Flow 3 — HIRO Scheduler Plugin
-
-`hiro-scheduler` is a standard `kube-scheduler` binary extended with the `HIROScore` plugin. Only pods with `spec.schedulerName: hiro-scheduler` are routed here; all other pods continue to use the default scheduler.
+End-to-end flow for pods with `spec.schedulerName: hiro-scheduler`. The `HIROScore` plugin runs inside the `hiro-scheduler` pod; the `PlacementServer` runs inside the operator pod. They communicate via HTTP on `/api/v1/placement/decision`.
 
 ```
 Pod created with spec.schedulerName: hiro-scheduler
         ▼
-hiro-scheduler framework
-        ├── Filter phase  →  HIROScore.Filter  (soft-fail open — never blocks scheduling)
-        ├── PreScore phase →  HIROScore.PreScore
-        │     POST PlacementContext{pod, candidateNodes} to operator PlacementServer
-        │     Stash NodeScores in CycleState
-        └── Score phase   →  HIROScore.Score
-              Read NodeScore from CycleState → return to framework
+hiro-scheduler — Filter phase
+        HIROScore.Filter  (soft-fail open — never blocks scheduling)
+        ▼
+hiro-scheduler — PreScore phase
+        HIROScore.PreScore
+        │  POST /api/v1/placement/decision
+        │  Body: PlacementContext { pod *corev1.Pod, candidateNodes []*corev1.Node }
+        ▼
+PlacementServer.handlePlacementDecision (:8090, operator pod)
+        ├── Decode PlacementContext
+        ├── builder.Build() — assemble DecisionRequest
+        │     ├── findProfileForPod()      O(1) field index lookup
+        │     ├── buildAOProfileContext()  strategy + awareness + current placement
+        │     └── fetchEAOProfile()        energy data (only if awareness.Energy=true)
+        │
+        └── client.RequestDecision()
+              │  POST DECISION_AGENT_URL
+              │  Body: DecisionRequest { pod, candidateNodes, AOProfile, EAOProfile }
+              ▼
+        External Decision Agent (:8080)
+              │  Response: { nodeScores: [{nodeName, score 0-100}, ...], reason }
+              ▼
+        PlacementServer → 200 OK { nodeScores, reason }
+        ▼
+hiro-scheduler — PreScore stashes NodeScores in CycleState
+        ▼
+hiro-scheduler — Score phase
+        HIROScore.Score reads NodeScore from CycleState → returns score to framework
+        ▼
+hiro-scheduler selects highest-scored node → binds pod
 ```
 
-Plugin configuration (URL, path, timeout) is read from `KubeSchedulerConfiguration` `pluginConfig` — see [Scheduler Plugin Config](#scheduler-plugin-config).
+Plugin configuration (URL, path, timeout) is injected into the `KubeSchedulerConfiguration` ConfigMap at deploy time — see [Scheduler Plugin Config](#scheduler-plugin-config).
 
-### Flow 4 — Scheduler Extender (legacy / managed clusters)
+### Flow 3 — Extender Path: default kube-scheduler + PlacementServer
 
-The default `kube-scheduler` calls the PlacementServer directly as an HTTP extender during its filter and prioritize phases. No custom scheduler pod is needed.
+End-to-end flow when the extender is deployed. The default `kube-scheduler` calls the PlacementServer during its filter and prioritize phases for **all pods** cluster-wide. No custom scheduler pod is needed.
 
-> **Why ClusterIP, not DNS?**  
-> `kube-scheduler` runs as a static pod with `hostNetwork: true`. It uses the *node's* `/etc/resolv.conf`, which points to the host DNS resolver — not CoreDNS — so `*.svc.cluster.local` names are unresolvable from the scheduler.  
-> kube-proxy installs iptables/eBPF rules at the kernel level on every node, making ClusterIPs reachable from the host network namespace.  
-> `deploy_extender.sh` therefore resolves the placement service ClusterIP at deploy time and embeds it directly in `urlPrefix`. This works on all cluster types (Kind, kubeadm, GKE, EKS, AKS).
+> **Why ClusterIP, not DNS?** `kube-scheduler` runs with `hostNetwork: true` and uses the node's `/etc/resolv.conf` — not CoreDNS — so `svc.cluster.local` names are unresolvable. kube-proxy iptables/eBPF rules make ClusterIPs reachable from the node network namespace on all cluster types. `deploy_extender.sh` resolves the ClusterIP at deploy time and embeds it in `urlPrefix`.
 
 ```
 Pod created (any pod — default scheduler handles all)
         ▼
 default kube-scheduler
-        │  reads KubeSchedulerConfiguration from /etc/kubernetes/hiro-scheduler-config.yaml
-        │  extender urlPrefix: http://<ClusterIP>:8090   ← IP resolved at deploy time
+        │  KubeSchedulerConfiguration from /etc/kubernetes/hiro-scheduler-config.yaml
+        │  extender urlPrefix: http://<ClusterIP>:8090   ← resolved at deploy time
         │
         ├── Filter phase
-        │     POST /extender/filter  { pod, nodes }
+        │     POST /extender/filter
+        │     Body: ExtenderArgs { Pod *corev1.Pod, Nodes *corev1.NodeList }
         │             ▼
-        │       PlacementServer (operator pod)
-        │             ├── find OrchestrationProfile for pod
-        │             ├── if energy awareness disabled → pass all nodes through
-        │             ├── fetch EnergyAwareOrchestration CRD
-        │             └── if EAO.status.energyMetrics.sufficient == false
-        │                   → FailedNodes: all candidates (reason from EAO)
-        │                   → Nodes: empty list (scheduler defers the pod)
+        │     PlacementServer.handleExtenderFilter (operator pod)
+        │             ├── CheckEnergyGate(pod)
+        │             │     ├── findProfileForPod()   O(1) field index
+        │             │     └── fetchEAOProfile()     energy data from EAO CRD
+        │             │
+        │             ├── allowed  → ExtenderFilterResult { Nodes: all candidates }
+        │             └── blocked  → ExtenderFilterResult { FailedNodes: all + reason }
+        │                           scheduler defers pod — no node selected this cycle
         │
         └── Score phase (prioritize)
-              POST /extender/prioritize  { pod, nodes }
+              POST /extender/prioritize
+              Body: ExtenderArgs { Pod *corev1.Pod, Nodes *corev1.NodeList }
                       ▼
-                PlacementServer (operator pod)
-                      ├── build DecisionRequest (AOProfile + EAOProfile + nodes)
-                      ├── POST → External Decision Agent
-                      │   ← NodeScores [0-100]
-                      └── map 0-100 → 0-10  (extender protocol)
-                          missing nodes → score 5 (neutral)
-                          any error    → all nodes score 5
+              PlacementServer.handleExtenderPrioritize (operator pod)
+                      ├── builder.Build() — assemble DecisionRequest
+                      │     ├── findProfileForPod()
+                      │     ├── buildAOProfileContext()
+                      │     └── fetchEAOProfile()
+                      │
+                      ├── client.RequestDecision()
+                      │     POST DECISION_AGENT_URL
+                      │     Response: { nodeScores: [{nodeName, score 0-100}, ...] }
+                      │
+                      ├── nodeScoresToHostPriorities()
+                      │     score / 10  →  int64 [0-10]  (extender protocol)
+                      │     missing node → score 5       (neutral fallback)
+                      │
+                      └── HostPriorityList [ {host, score 0-10}, ... ]
+                              ▼
+              kube-scheduler merges extender scores with built-in priorities
+              selects highest-scored node → binds pod
 
-When extender is unreachable (ignorable: true):
-kube-scheduler logs:
-  "Skipping extender as it returned error and has ignorable flag set"
-  err="Post http://<ClusterIP>:8090/extender/filter: context deadline exceeded"
-Scheduling continues normally using built-in priorities only.
+On any error (profile not found, AI agent unreachable):
+        handleExtenderPrioritize → equalPriorities() → score 5 for all nodes
+        scheduling continues using built-in priorities only
+
+If extender is unreachable (ignorable: true in ConfigMap):
+        kube-scheduler logs "Skipping extender as it returned error and has ignorable flag set"
+        scheduling continues normally — extender never blocks the cluster
 ```
 
-`ignorable: true` in the ConfigMap ensures scheduling proceeds normally if the PlacementServer is unreachable.
+`ignorable: true` is set in `config/extender/scheduler-config.yaml`. The extender is never a hard dependency for scheduling.
 
-#### Endpoint logs (operator side)
-
-When a request is received the PlacementServer logs:
+#### Operator logs (extender side)
 
 | Event | Log message |
 |-------|-------------|
