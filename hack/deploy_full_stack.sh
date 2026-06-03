@@ -153,6 +153,32 @@ DEPLOY_SCHEDULER_PLUGIN=${DEPLOY_SCHEDULER_PLUGIN:-false}
 DEPLOY_EXTENDER=${DEPLOY_EXTENDER:-false}
 
 # ---------------------------------------------------------------------------
+# Input validation
+# ---------------------------------------------------------------------------
+
+validate_inputs() {
+  local errors=0
+
+  if [ -z "${GITHUB_PAT_TOKEN:-}" ]; then
+    echo "ERROR: GITHUB_PAT_TOKEN is required but not set." >&2
+    echo "       export GITHUB_PAT_TOKEN=<github-pat-with-write:packages-scope>" >&2
+    errors=1
+  fi
+
+  if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ] && [ "$DEPLOY_EXTENDER" = "true" ]; then
+    echo "ERROR: DEPLOY_SCHEDULER_PLUGIN and DEPLOY_EXTENDER cannot both be true." >&2
+    echo "       Choose one scheduler integration approach:" >&2
+    echo "         DEPLOY_SCHEDULER_PLUGIN=true  — custom scheduler pod (opt-in per pod)" >&2
+    echo "         DEPLOY_EXTENDER=true          — patches default kube-scheduler (cluster-wide)" >&2
+    errors=1
+  fi
+
+  if [ "$errors" -ne 0 ]; then
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -330,6 +356,7 @@ print_summary() {
 # ---------------------------------------------------------------------------
 
 main() {
+  validate_inputs
   print_config
 
   deploy_operator
