@@ -25,7 +25,7 @@ manager:
   ##
   env:
     - name: DECISION_AGENT_URL
-      value: http://decision-agent:8080
+      value: http://mock-decision-agent:8080
     - name: DECISION_AGENT_PATH
       value: /api/v1/agent/placement/decision
     - name: PLACEMENT_SERVER_PORT

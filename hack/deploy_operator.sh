@@ -80,7 +80,7 @@ export PLACEMENT_SERVICE_NAME=${PLACEMENT_SERVICE_NAME:-${NAME_PREFIX}controller
 # Decision agent
 USE_MOCK_AGENT=${USE_MOCK_AGENT:-true}
 if [ "$USE_MOCK_AGENT" = "true" ]; then
-  export DECISION_AGENT_URL="http://decision-agent:8080"
+  export DECISION_AGENT_URL="http://mock-decision-agent:8080"
 else
   : "${DECISION_AGENT_URL:?DECISION_AGENT_URL must be set when USE_MOCK_AGENT=false}"
 fi

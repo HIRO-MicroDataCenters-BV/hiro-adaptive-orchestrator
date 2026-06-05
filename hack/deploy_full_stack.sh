@@ -250,7 +250,7 @@ deploy_operator() {
 #
 # The mock agent is a lightweight Python HTTP server that scores every
 # candidate node at 50.  It is deployed in the same namespace as the operator
-# so the short DNS name "decision-agent" resolves from the operator pod.
+# so the short DNS name "mock-decision-agent" resolves from the operator pod.
 #
 # This phase lives in deploy_full_stack.sh (not deploy_operator.sh) so that
 # standalone operator deployments are not coupled to the mock agent lifecycle.
@@ -264,7 +264,7 @@ deploy_mock_agent() {
 
     echo "  Waiting for mock decision agent pod to be Ready..."
     kubectl wait --for=condition=Ready pod \
-      -l app=decision-agent \
+      -l app=mock-decision-agent \
       -n "$NAMESPACE" \
       --timeout=120s
     echo "  Mock decision agent is ready."
@@ -334,7 +334,7 @@ print_summary() {
   echo -e "\033[32m  ── Components ────────────────────────────────────────────\033[0m"
   echo -e "\033[32m    Operator        : deployed  (namespace/$NAMESPACE)\033[0m"
   if [ "$USE_MOCK_AGENT" = "true" ]; then
-    echo -e "\033[32m    Mock Agent      : deployed  (decision-agent.$NAMESPACE)\033[0m"
+    echo -e "\033[32m    Mock Agent      : deployed  (mock-decision-agent.$NAMESPACE)\033[0m"
   else
     echo -e "\033[33m    Mock Agent      : not deployed  (using real agent)\033[0m"
   fi

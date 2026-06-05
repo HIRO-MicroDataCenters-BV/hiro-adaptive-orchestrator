@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package decision
+package placementserver
 
 import (
 	"bytes"
@@ -103,7 +103,7 @@ func (c *DecisionClient) RequestDecision(
 		req.RequestID = uuid.NewString()
 	}
 
-	logger.Info("agent: sending decision request",
+	logger.Info("ai-client: sending decision request",
 		"requestId", req.RequestID,
 		"agentURL", c.agentURL,
 		"pod", req.Pod.Name,
@@ -163,10 +163,10 @@ func (c *DecisionClient) RequestDecision(
 			req.Pod.Namespace, req.Pod.Name, err)
 	}
 
-	logger.Info("agent: decision response received",
+	logger.Info("ai-client: decision response received",
 		"requestId", req.RequestID,
 		"pod", req.Pod.Name,
-		"nodeScoresCount", len(resp.NodeScores),
+		"nodeScores", resp.NodeScores,
 		"topNode", topNodeName(resp.NodeScores),
 		"reason", resp.Reason,
 	)

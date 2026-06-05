@@ -270,7 +270,7 @@ deploy_full_stack.sh  (master parameter sheet — all vars defined here)
         ├──► Phase 2: deploy_mock_agent  (when USE_MOCK_AGENT=true)
         │         kubectl apply -f hack/mock_decision_agent.yaml
         │         sed substitutes namespace before apply
-        │         decision-agent Service → http://decision-agent:8080
+        │         mock-decision-agent Service → http://mock-decision-agent:8080
         │
         ├──► Phase 3: wait_for_placement_server
         │         kubectl wait pod -l app.kubernetes.io/name=hiro-adaptive-orchestrator --for=condition=Ready
@@ -522,7 +522,7 @@ Every parameter can be set as an environment variable before calling any deploy 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `USE_MOCK_AGENT` | `true` | Deploy and use the in-cluster mock agent (Phase 2 of `deploy_full_stack.sh`) |
-| `DECISION_AGENT_URL` | `http://decision-agent:8080` (mock) | Base URL of the AI agent. **Required when `USE_MOCK_AGENT=false`.** |
+| `DECISION_AGENT_URL` | `http://mock-decision-agent:8080` (mock) | Base URL of the AI agent. **Required when `USE_MOCK_AGENT=false`.** |
 | `DECISION_AGENT_PATH` | `/api/v1/agent/placement/decision` | HTTP path on the AI agent |
 
 #### Operator — Extender Paths
@@ -564,7 +564,7 @@ The operator pod reads configuration exclusively from environment variables inje
 
 | Variable | Default | Read by |
 |----------|---------|---------|
-| `DECISION_AGENT_URL` | `http://decision-agent:8080` | `decision.NewDecisionClient` |
+| `DECISION_AGENT_URL` | `http://mock-decision-agent:8080` | `decision.NewDecisionClient` |
 | `DECISION_AGENT_PATH` | `/api/v1/agent/placement/decision` | `decision.NewDecisionClient` |
 | `PLACEMENT_SERVER_PORT` | `:8090` | `decision.NewPlacementServer` |
 | `PLACEMENT_SERVER_PATH` | `/api/v1/placement/decision` | `decision.NewPlacementServer` |
@@ -788,7 +788,7 @@ POST /api/v1/placement/decision  →  nodeScores: [{nodeName, score: 50.0}, ...]
 GET  /healthz                    →  200 ok
 ```
 
-The mock agent runs as a Python 3 `http.server` in a `python:3.11-slim` container. It is deployed into the same namespace as the operator so the short DNS name `decision-agent` resolves from the operator pod.
+The mock agent runs as a Python 3 `http.server` in a `python:3.11-slim` container. It is deployed into the same namespace as the operator so the short DNS name `mock-decision-agent` resolves from the operator pod.
 
 ```bash
 # Deployed automatically in Phase 2 when USE_MOCK_AGENT=true (the default)
@@ -798,14 +798,14 @@ DEPLOY_EXTENDER=true hack/deploy_full_stack.sh
 kubectl apply -f hack/mock_decision_agent.yaml
 
 # Verify
-kubectl get pods -n hiro-adaptive-orchestrator-system -l app=decision-agent
-kubectl logs -n hiro-adaptive-orchestrator-system -l app=decision-agent
+kubectl get pods -n hiro-adaptive-orchestrator-system -l app=mock-decision-agent
+kubectl logs -n hiro-adaptive-orchestrator-system -l app=mock-decision-agent
 
 # Remove
 kubectl delete -f hack/mock_decision_agent.yaml
 ```
 
-The mock agent listens at `http://decision-agent:8080` inside the operator namespace, matching the default `DECISION_AGENT_URL`.
+The mock agent listens at `http://mock-decision-agent:8080` inside the operator namespace, matching the default `DECISION_AGENT_URL`.
 
 To switch to a real AI agent:
 

@@ -40,7 +40,7 @@ import (
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/controller"
-	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/decision"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -295,7 +295,7 @@ func main() {
 		"eaoKind", eaoGVK.Kind,
 	)
 
-	contextBuilder := decision.NewDecisionContextBuilder(
+	contextBuilder := placementserver.NewDecisionContextBuilder(
 		mgr.GetClient(),
 		controller.ProfileByAppRefIndex,
 		eaoGVK,
@@ -303,7 +303,7 @@ func main() {
 
 	// Create the DecisionClient with the External AI Agent URL and path.
 	// The client will be used by the PlacementServer to send placement decision requests to the AI agent.
-	decisionClient := decision.NewDecisionClient(
+	decisionClient := placementserver.NewDecisionClient(
 		decisionAgentURL,
 		decisionAgentPath,
 		8*time.Second, // must be < PlacementServer requestTimeout (10s)
@@ -311,7 +311,7 @@ func main() {
 
 	// Create the PlacementServer with the context builder and decision client.
 	// The server will use these to handle incoming placement decision requests from the kube-scheduler plugin.
-	placementServer := decision.NewPlacementServer(
+	placementServer := placementserver.NewPlacementServer(
 		contextBuilder,
 		decisionClient,
 		placementServerPort,

@@ -25,8 +25,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
 
@@ -100,7 +98,7 @@ func (c *PlacementClient) Decide(
 	ctx context.Context,
 	placementCtx *placement.PlacementContext,
 ) (*placement.DecisionResponse, error) {
-	requestID := uuid.NewString()
+	requestID := string(placementCtx.Pod.UID)
 
 	body, err := json.Marshal(placementCtx)
 	if err != nil {

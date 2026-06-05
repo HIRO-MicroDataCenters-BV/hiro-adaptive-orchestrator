@@ -2,9 +2,9 @@
 # Mock Decision Agent — for local / CI testing only.
 #
 # Deployed in the same namespace as the operator so the short DNS name
-# "decision-agent" resolves from the operator pod.
+# "mock-decision-agent" resolves from the operator pod.
 #
-# Set: DECISION_AGENT_URL=http://decision-agent:8080
+# Set: DECISION_AGENT_URL=http://mock-decision-agent:8080
 #
 # Behaviour:
 #   POST /api/v1/placement/decision  → parses DecisionRequest, scores every
@@ -91,19 +91,19 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: decision-agent
+  name: mock-decision-agent
   namespace: hiro-adaptive-orchestrator-system
   labels:
-    app: decision-agent
+    app: mock-decision-agent
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: decision-agent
+      app: mock-decision-agent
   template:
     metadata:
       labels:
-        app: decision-agent
+        app: mock-decision-agent
     spec:
       containers:
         - name: mock-agent
@@ -129,13 +129,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: decision-agent
+  name: mock-decision-agent
   namespace: hiro-adaptive-orchestrator-system
   labels:
-    app: decision-agent
+    app: mock-decision-agent
 spec:
   selector:
-    app: decision-agent
+    app: mock-decision-agent
   ports:
     - port: 8080
       targetPort: 8080
