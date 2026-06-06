@@ -22,6 +22,7 @@ data:
   server.py: |
     #!/usr/bin/env python3
     import json
+    import random
     from http.server import HTTPServer, BaseHTTPRequestHandler
 
     PLACEMENT_PATH = "/api/v1/placement/decision"
@@ -46,19 +47,19 @@ data:
             node_scores = [
                 {
                     "nodeName": node.get("metadata", {}).get("name", f"node-{i}"),
-                    "score": 50.0,
+                    "score": round(random.uniform(0.0, 100.0), 2),
                 }
                 for i, node in enumerate(candidate_nodes)
             ]
 
             # Fallback when the request carries no nodes (shouldn't happen in production, but just in case)
             if not node_scores:
-                node_scores = [{"nodeName": "fallback-node", "score": 50.0}]
+                node_scores = [{"nodeName": "fallback-node", "score": round(random.uniform(0.0, 100.0), 2)}]
 
             resp = {
                 "requestId": request_id,
                 "nodeScores": node_scores,
-                "reason": "mock: all candidate nodes scored equally at 50",
+                "reason": "mock: candidate nodes scored randomly in [0.0, 100.0]",
             }
 
             body = json.dumps(resp).encode()

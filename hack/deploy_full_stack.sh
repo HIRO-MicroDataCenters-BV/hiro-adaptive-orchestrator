@@ -240,7 +240,7 @@ print_config() {
 # Phase 1 — Operator
 # ---------------------------------------------------------------------------
 
-deploy_operator() {
+deploy_oprator_with_samples() {
   step "Phase 1 — Deploying operator..."
   bash "$SCRIPT_DIR/deploy_operator.sh" "$KUBECONFIG_PATH"
 }
@@ -359,7 +359,7 @@ main() {
   validate_inputs
   print_config
 
-  deploy_operator
+  deploy_oprator_with_samples
   deploy_mock_agent
   wait_for_placement_server
   deploy_scheduler_plugin
