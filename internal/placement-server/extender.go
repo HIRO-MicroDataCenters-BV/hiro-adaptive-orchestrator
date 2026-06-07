@@ -69,13 +69,13 @@ func (s *PlacementServer) handleExtenderFilter(w http.ResponseWriter, r *http.Re
 		"nodeCount", len(args.Nodes.Items),
 	)
 
-	gate, err := s.builder.CheckEnergyGate(ctx, args.Pod)
+	gate, err := s.filter(ctx, args.Pod)
 	if err != nil {
 		logger.Error(err, "extender: energy gate check failed, allowing scheduling",
 			"requestId", requestID,
 			"pod", args.Pod.Name,
 		)
-		gate = EnergyGateResult{Allowed: true}
+		gate = EnergyGateResponse{Allowed: true}
 	}
 
 	var result ExtenderFilterResult
@@ -153,19 +153,9 @@ func (s *PlacementServer) handleExtenderPrioritize(w http.ResponseWriter, r *htt
 		CandidateNodes: candidateNodes,
 	}
 
-	decisionReq, err := s.builder.Build(ctx, placementCtx, requestID)
+	decisionResp, err := s.score(ctx, placementCtx, requestID)
 	if err != nil {
-		logger.Error(err, "extender: prioritize build failed, returning equal scores",
-			"requestId", requestID,
-			"pod", args.Pod.Name,
-		)
-		writeExtenderJSON(w, requestID, equalPriorities(args.Nodes.Items))
-		return
-	}
-
-	decisionResp, err := s.client.RequestDecision(ctx, decisionReq)
-	if err != nil {
-		logger.Error(err, "extender: prioritize agent unreachable, returning equal scores",
+		logger.Error(err, "extender: prioritize failed, returning equal scores",
 			"requestId", requestID,
 			"pod", args.Pod.Name,
 		)

@@ -16,7 +16,11 @@ limitations under the License.
 
 package placementserver
 
-import corev1 "k8s.io/api/core/v1"
+import (
+	corev1 "k8s.io/api/core/v1"
+
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
+)
 
 // =============================================================================
 // Kubernetes Scheduler Extender protocol types
@@ -66,10 +70,9 @@ type HostPriority struct {
 // The scheduler merges these scores (weighted by extender.weight) with its own.
 type HostPriorityList []HostPriority
 
-// EnergyGateResult carries the outcome of a CheckEnergyGate call.
-type EnergyGateResult struct {
-	// Allowed is true when the pod may be scheduled normally.
-	Allowed bool
-	// Reason is a human-readable explanation when Allowed is false.
-	Reason string
-}
+// EnergyGateRequest and EnergyGateResponse are the wire types for
+// POST /api/v1/placement/filter. Canonical definitions live in pkg/placement
+// so the scheduler-plugin module can import them; aliases here keep all
+// existing operator code unchanged.
+type EnergyGateRequest = placement.EnergyGateRequest
+type EnergyGateResponse = placement.EnergyGateResponse

@@ -7,7 +7,7 @@
 # Set: DECISION_AGENT_URL=http://mock-decision-agent:8080
 #
 # Behaviour:
-#   POST /api/v1/placement/decision  → parses DecisionRequest, scores every
+#   POST /api/v1/placement/score  → parses DecisionRequest, scores every
 #                                       candidate node at 50, returns DecisionResponse
 #   GET  /healthz                    → 200 ok
 #
@@ -25,7 +25,7 @@ data:
     import random
     from http.server import HTTPServer, BaseHTTPRequestHandler
 
-    PLACEMENT_PATH = "/api/v1/placement/decision"
+    PLACEMENT_PATH = "/api/v1/placement/score"
     HEALTH_PATH    = "/healthz"
 
     class Handler(BaseHTTPRequestHandler):

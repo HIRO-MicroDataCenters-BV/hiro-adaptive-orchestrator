@@ -20,7 +20,7 @@
 # ─── PlacementServer (operator endpoint this scheduler calls) ────────────────
 #   PLACEMENT_SERVICE_NAME    k8s Service name            (default: <NAME_PREFIX>controller-manager-placement-service)
 #   PLACEMENT_SERVER_PORT     PlacementServer port        (default: :8090)
-#   PLACEMENT_SERVER_PATH     decision endpoint path      (default: /api/v1/placement/decision)
+#   PLACEMENT_SCORE_PATH     decision endpoint path      (default: /api/v1/placement/score)
 #   PLACEMENT_TIMEOUT_SECS    plugin→server timeout (s)   (default: 8)
 #
 # These three values are injected into the HIROScore pluginConfig inside the
@@ -65,7 +65,7 @@ SCHED_IMG="${DOCKER_REGISTRY}/hiro-scheduler:${SCHED_VERSION}-k8s${SCHED_K8S_VER
 
 # PlacementServer config — injected into the HIROScore pluginConfig at deploy time.
 PLACEMENT_SERVER_PORT=${PLACEMENT_SERVER_PORT:-:8090}
-PLACEMENT_SERVER_PATH=${PLACEMENT_SERVER_PATH:-/api/v1/placement/decision}
+PLACEMENT_SCORE_PATH=${PLACEMENT_SCORE_PATH:-/api/v1/placement/score}
 PLACEMENT_TIMEOUT_SECS=${PLACEMENT_TIMEOUT_SECS:-8}
 # Derived after NAME_PREFIX is set — override only if the operator service was renamed.
 PLACEMENT_SERVICE_NAME=${PLACEMENT_SERVICE_NAME:-${NAME_PREFIX}controller-manager-placement-service}
@@ -91,7 +91,7 @@ print_config() {
   echo "K8s Target Version     : $SCHED_K8S_VERSION"
   echo "Kubeconfig             : $KUBECONFIG"
   echo "PlacementServer Svc    : ${placement_svc}.${NAMESPACE}.svc.cluster.local${PLACEMENT_SERVER_PORT}"
-  echo "PlacementServer Path   : $PLACEMENT_SERVER_PATH"
+  echo "PlacementServer Path   : $PLACEMENT_SCORE_PATH"
   echo "Placement Timeout (s)  : $PLACEMENT_TIMEOUT_SECS"
   echo "========================================================"
 }
@@ -131,13 +131,13 @@ deploy_scheduler_resources() {
 
   step "Deploying scheduler k8s resources..."
   echo "  PlacementServer URL  : $placement_url"
-  echo "  PlacementServer Path : $PLACEMENT_SERVER_PATH"
+  echo "  PlacementServer Path : $PLACEMENT_SCORE_PATH"
   echo "  Timeout              : ${PLACEMENT_TIMEOUT_SECS}s"
 
   "$KUSTOMIZE" build "$REPO_ROOT/config/scheduler/" \
     | sed \
         -e "s|placementServerURL:.*|placementServerURL: \"${placement_url}\"|" \
-        -e "s|placementServerPath:.*|placementServerPath: \"${PLACEMENT_SERVER_PATH}\"|" \
+        -e "s|placementServerPath:.*|placementServerPath: \"${PLACEMENT_SCORE_PATH}\"|" \
         -e "s|timeoutSeconds:.*|timeoutSeconds: ${PLACEMENT_TIMEOUT_SECS}|" \
     | kubectl apply -f -
 

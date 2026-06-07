@@ -23,43 +23,49 @@ import (
 	"net/http"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // =============================================================================
 // PlacementServer
 //
-// An HTTP server running inside the A.O operator process.
-// It is the entry point for per-pod placement decisions.
+// Single HTTP listener inside the operator pod serving four routes:
 //
-// Request flow:
-//   Kube-scheduler plugin  →  POST PlacementContext{*corev1.Pod, []*corev1.Node}
-//   PlacementServer        →  DecisionContextBuilder.Build()
-//                          →  DecisionClient.RequestDecision()
-//   Kube-scheduler plugin  ←  DecisionResponse{NodeScores}
+//   Plugin path (HIROScore scheduler plugin):
+//     POST /api/v1/placement/score   — AI node scoring   → handleScore
+//     POST /api/v1/placement/filter  — energy gate check → handleFilter
+//
+//   Extender path (default kube-scheduler extender protocol):
+//     POST /extender/prioritize      — AI node scoring   → handleExtenderPrioritize
+//     POST /extender/filter          — energy gate check → handleExtenderFilter
+//
+//   Health:
+//     GET  /healthz                  — liveness/readiness probe
+//
+// The AI scoring and energy gate LOGIC is shared via two private methods:
+//   score()  — builder.Build + client.RequestDecision (used by plugin + extender)
+//   filter() — builder.CheckEnergyGate               (used by plugin + extender)
+//
+// Handlers are thin protocol adapters: decode input → call shared method →
+// encode output in the format the caller expects.
 // =============================================================================
 
-// PlacementServer receives PlacementContext from the kube-scheduler scoring
-// plugin, assembles a DecisionRequest, and returns NodeScores.
-//
-// It also serves the Kubernetes Scheduler Extender protocol on two additional
-// endpoints:
-//   - extenderFilterPath   -- energy gating (POST ExtenderArgs -> ExtenderFilterResult)
-//   - extenderPrioritizePath -- AI scoring  (POST ExtenderArgs -> HostPriorityList)
+// PlacementServer is the HTTP server that handles both the scheduler plugin
+// and the kube-scheduler extender protocols.
 type PlacementServer struct {
 	// Addr is the listening address (default ":8090").
 	Addr string
 
-	// placementPath is the HTTP path for placement decisions.
-	placementPath string
+	// Plugin-path endpoints
+	scorePath  string // POST /api/v1/placement/score  — AI scoring
+	filterPath string // POST /api/v1/placement/filter — energy gate
 
-	// healthPath is the HTTP path for liveness/readiness probes.
+	// Health endpoint
 	healthPath string
 
-	// extenderFilterPath is the HTTP path for the scheduler extender filter endpoint.
-	extenderFilterPath string
-
-	// extenderPrioritizePath is the HTTP path for the scheduler extender prioritize endpoint.
+	// Extender-path endpoints (kube-scheduler extender protocol)
+	extenderFilterPath     string
 	extenderPrioritizePath string
 
 	builder *DecisionContextBuilder
@@ -67,23 +73,16 @@ type PlacementServer struct {
 	server  *http.Server
 
 	// requestTimeout is applied per request.
-	// Must be longer than DecisionClient timeout but shorter than the
-	// scheduler's own scoring phase timeout.
 	requestTimeout time.Duration
 }
 
 // NewPlacementServer creates a PlacementServer.
-//
-// port:                   listening address e.g. ":8090".
-// placementPath:          HTTP path for placement decisions.
-// healthPath:             HTTP path for health probes.
-// extenderFilterPath:     HTTP path for the scheduler extender filter endpoint.
-// extenderPrioritizePath: HTTP path for the scheduler extender prioritize endpoint.
 func NewPlacementServer(
 	builder *DecisionContextBuilder,
 	client *DecisionClient,
 	port string,
-	placementPath string,
+	scorePath string,
+	filterPath string,
 	healthPath string,
 	extenderFilterPath string,
 	extenderPrioritizePath string,
@@ -97,7 +96,8 @@ func NewPlacementServer(
 	}
 	return &PlacementServer{
 		Addr:                   addr,
-		placementPath:          placementPath,
+		scorePath:              scorePath,
+		filterPath:             filterPath,
 		healthPath:             healthPath,
 		extenderFilterPath:     extenderFilterPath,
 		extenderPrioritizePath: extenderPrioritizePath,
@@ -113,7 +113,8 @@ func (s *PlacementServer) Start(ctx context.Context) error {
 	logger := logf.FromContext(ctx)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc(s.placementPath, s.handlePlacementDecision)
+	mux.HandleFunc(s.scorePath, s.handleScore)
+	mux.HandleFunc(s.filterPath, s.handleFilter)
 	mux.HandleFunc(s.healthPath, s.handleHealth)
 	mux.HandleFunc(s.extenderFilterPath, s.handleExtenderFilter)
 	mux.HandleFunc(s.extenderPrioritizePath, s.handleExtenderPrioritize)
@@ -125,10 +126,10 @@ func (s *PlacementServer) Start(ctx context.Context) error {
 
 	logger.Info("placement: server starting",
 		"addr", s.Addr,
-		"endpoint", s.placementPath,
+		"scorePath", s.scorePath,
+		"filterPath", s.filterPath,
 	)
 
-	// Graceful shutdown when manager context is cancelled
 	go func() {
 		<-ctx.Done()
 		logger.Info("placement: server shutting down")
@@ -146,44 +147,66 @@ func (s *PlacementServer) Start(ctx context.Context) error {
 }
 
 // =============================================================================
-// POST /api/v1/placement/decision
+// Shared core — single implementation used by BOTH plugin and extender paths
+// =============================================================================
+
+// score runs the full AI decision pipeline: build DecisionRequest via the
+// builder, send it to the External AI Agent, return the DecisionResponse.
+//
+// Used by:
+//   - handleScore             (plugin path: POST /api/v1/placement/score)
+//   - handleExtenderPrioritize (extender path: POST /extender/prioritize)
+func (s *PlacementServer) score(
+	ctx context.Context,
+	placementCtx PlacementContext,
+	requestID string,
+) (*DecisionResponse, error) {
+	req, err := s.builder.Build(ctx, placementCtx, requestID)
+	if err != nil {
+		return nil, err
+	}
+	return s.client.RequestDecision(ctx, req)
+}
+
+// filter runs the energy gate check for a single pod.
+//
+// Used by:
+//   - handleFilter        (plugin path: POST /api/v1/placement/filter)
+//   - handleExtenderFilter (extender path: POST /extender/filter)
+func (s *PlacementServer) filter(ctx context.Context, pod *corev1.Pod) (EnergyGateResponse, error) {
+	return s.builder.CheckEnergyGate(ctx, pod)
+}
+
+// =============================================================================
+// POST /api/v1/placement/score  (plugin path — AI scoring)
 //
 // Request:  PlacementContext { *corev1.Pod, []*corev1.Node }
 // Response: DecisionResponse { NodeScores, Reason }
 // =============================================================================
 
-func (s *PlacementServer) handlePlacementDecision(w http.ResponseWriter, r *http.Request) {
+func (s *PlacementServer) handleScore(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Per-request timeout — prevents slow AI agent from blocking scheduler
 	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
 	defer cancel()
-
 	logger := logf.FromContext(ctx)
 
-	// ------------------------------------------------------------------
-	// 1. Decode PlacementContext from the scheduler plugin
-	// ------------------------------------------------------------------
 	var placementCtx PlacementContext
 	if err := json.NewDecoder(r.Body).Decode(&placementCtx); err != nil {
 		logger.Error(err, "placement: decode request failed", "remoteAddr", r.RemoteAddr)
 		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
-
 	if placementCtx.Pod == nil {
 		http.Error(w, "pod is required in PlacementContext", http.StatusBadRequest)
 		return
 	}
 
-	// Use pod UID as the single correlation key across placement handler,
-	// builder, AI client, and the external AI agent — same ID end-to-end.
 	requestID := string(placementCtx.Pod.UID)
-
-	logger.Info("placement: request received",
+	logger.Info("placement: score request received",
 		"requestId", requestID,
 		"remoteAddr", r.RemoteAddr,
 		"pod", placementCtx.Pod.Name,
@@ -191,60 +214,91 @@ func (s *PlacementServer) handlePlacementDecision(w http.ResponseWriter, r *http
 		"candidateNodes", len(placementCtx.CandidateNodes),
 	)
 
-	// ------------------------------------------------------------------
-	// 2. Build DecisionRequest
-	//    Enriches PlacementContext with AOProfile + EAOProfile
-	// ------------------------------------------------------------------
-	decisionReq, err := s.builder.Build(ctx, placementCtx, requestID)
+	decisionResp, err := s.score(ctx, placementCtx, requestID)
 	if err != nil {
-		logger.Error(err, "placement: build decision request failed",
+		logger.Error(err, "placement: score request failed",
 			"requestId", requestID,
 			"pod", placementCtx.Pod.Name,
 		)
-		http.Error(w,
-			fmt.Sprintf("failed to build decision context: %v", err),
-			http.StatusInternalServerError,
-		)
+		http.Error(w, fmt.Sprintf("placement score failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// ------------------------------------------------------------------
-	// 3. Send DecisionRequest to External AI Agent
-	//    Returns NodeScores
-	// ------------------------------------------------------------------
-	decisionResp, err := s.client.RequestDecision(ctx, decisionReq)
-	if err != nil {
-		logger.Error(err, "placement: agent request failed",
-			"requestId", requestID,
-			"pod", placementCtx.Pod.Name,
-		)
-		http.Error(w,
-			fmt.Sprintf("failed to get placement decision: %v", err),
-			http.StatusBadGateway,
-		)
-		return
-	}
-
-	// ------------------------------------------------------------------
-	// 4. Return DecisionResponse to scheduler plugin
-	//    Scheduler plugin translates NodeScores → ValidPlacementDecision
-	// ------------------------------------------------------------------
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Request-ID", requestID)
 	w.WriteHeader(http.StatusOK)
-
 	if err := json.NewEncoder(w).Encode(decisionResp); err != nil {
 		logger.Error(err, "placement: encode response failed", "requestId", requestID)
 		return
 	}
 
-	logger.Info("placement: response sent",
+	logger.Info("placement: score response sent",
 		"requestId", requestID,
 		"pod", placementCtx.Pod.Name,
 		"nodeScores", len(decisionResp.NodeScores),
 		"topNode", topNodeName(decisionResp.NodeScores),
 		"reason", decisionResp.Reason,
 	)
+}
+
+// =============================================================================
+// POST /api/v1/placement/filter  (plugin path — energy gate)
+//
+// Request:  EnergyGateRequest  { *corev1.Pod }
+// Response: EnergyGateResponse { Allowed bool, Reason string }
+//
+// Soft-fail open: on any error the response is Allowed=true so the pod is
+// never blocked by infrastructure failures.
+// =============================================================================
+
+func (s *PlacementServer) handleFilter(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
+	defer cancel()
+	logger := logf.FromContext(ctx)
+
+	var req EnergyGateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+	if req.Pod == nil {
+		http.Error(w, "pod is required", http.StatusBadRequest)
+		return
+	}
+
+	requestID := string(req.Pod.UID)
+	logger.Info("placement: filter request received",
+		"requestId", requestID,
+		"pod", req.Pod.Name,
+		"namespace", req.Pod.Namespace,
+	)
+
+	gate, err := s.filter(ctx, req.Pod)
+	if err != nil {
+		logger.Error(err, "placement: filter check failed, allowing scheduling",
+			"requestId", requestID,
+			"pod", req.Pod.Name,
+		)
+		gate = EnergyGateResponse{Allowed: true}
+	}
+
+	if !gate.Allowed {
+		logger.Info("placement: filter blocked pod",
+			"requestId", requestID,
+			"pod", req.Pod.Name,
+			"namespace", req.Pod.Namespace,
+			"reason", gate.Reason,
+		)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Request-ID", requestID)
+	_ = json.NewEncoder(w).Encode(gate)
 }
 
 // handleHealth responds to liveness/readiness probes from Kubernetes.

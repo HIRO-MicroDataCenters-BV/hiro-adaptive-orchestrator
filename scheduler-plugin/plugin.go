@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -31,7 +32,7 @@ import (
 
 // HIROScoreArgs holds the plugin configuration supplied via KubeSchedulerConfiguration
 // pluginConfig. All fields are optional — unset fields fall back to the
-// DefaultPlacementServer* constants defined in client.go.
+// Default* constants defined in client.go.
 //
 // Example KubeSchedulerConfiguration snippet:
 //
@@ -39,61 +40,69 @@ import (
 //	  - name: HIROScore
 //	    args:
 //	      placementServerURL: "http://my-svc.my-ns.svc.cluster.local:8090"
-//	      placementServerPath: "/api/v1/placement/decision"
+//	      placementServerPath: "/api/v1/placement/score"
+//	      filterPath: "/api/v1/placement/filter"
 //	      timeoutSeconds: 8
 type HIROScoreArgs struct {
 	PlacementServerURL  string `json:"placementServerURL,omitempty"`
 	PlacementServerPath string `json:"placementServerPath,omitempty"`
+	FilterPath          string `json:"filterPath,omitempty"`
 	TimeoutSeconds      int    `json:"timeoutSeconds,omitempty"`
 }
 
 // PluginName is the name registered with the scheduler framework.
-// Referenced by KubeSchedulerConfiguration to enable the plugin.
 const PluginName = "HIROScore"
 
-// cycleStateKey is the CycleState storage key for per-pod AI scores.
-const cycleStateKey fwk.StateKey = "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/HIROScore/nodeScores"
+// CycleState keys
+const (
+	// cycleStateKey stores per-pod AI node scores (set in PreScore, read in Score).
+	cycleStateKey fwk.StateKey = "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/HIROScore/nodeScores"
+
+	// energyGateStateKey stores the energy gate decision (set in PreFilter, read in Filter).
+	energyGateStateKey fwk.StateKey = "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/HIROScore/energyGate"
+)
 
 // nodeScoreMap maps node name → AI score (0–100).
-// Implements fwk.StateData via Clone().
 type nodeScoreMap map[string]int64
 
 func (m nodeScoreMap) Clone() fwk.StateData {
 	clone := make(nodeScoreMap, len(m))
-	for k, v := range m {
-		clone[k] = v
-	}
+	maps.Copy(clone, m)
 	return clone
 }
 
-// HIROScore implements FilterPlugin, PreScorePlugin, and ScorePlugin.
+// energyGateDecision holds the outcome of the PreFilter energy gate check.
+type energyGateDecision struct {
+	allowed bool
+	reason  string
+}
+
+func (d energyGateDecision) Clone() fwk.StateData { return d }
+
+// HIROScore implements PreFilterPlugin, FilterPlugin, PreScorePlugin, and ScorePlugin.
 //
-// Filter:   blocks pods when OrchestrationProfile.status.decision.action == "Delay"
-//           AND energy awareness is enabled. Soft-fails open on any client error.
-// PreScore: calls PlacementServer, stashes AI NodeScores in CycleState.
-// Score:    reads AI score from CycleState and returns it for this node.
+// PreFilter: calls PlacementServer /filter once per pod — checks energy gate.
+// Filter:    reads energy gate result from CycleState — returns Unschedulable if blocked.
+// PreScore:  calls PlacementServer /score — collects AI NodeScores for all candidate nodes.
+// Score:     reads AI score from CycleState for the given node.
 type HIROScore struct {
 	client *PlacementClient
 }
 
 // Enforce interface compliance at compile time.
 var (
-	_ fwk.FilterPlugin   = (*HIROScore)(nil)
-	_ fwk.PreScorePlugin = (*HIROScore)(nil)
-	_ fwk.ScorePlugin    = (*HIROScore)(nil)
+	_ fwk.PreFilterPlugin = (*HIROScore)(nil)
+	_ fwk.FilterPlugin    = (*HIROScore)(nil)
+	_ fwk.PreScorePlugin  = (*HIROScore)(nil)
+	_ fwk.ScorePlugin     = (*HIROScore)(nil)
 )
 
 // New is the factory function registered with the scheduler framework.
-// Signature must match framework/runtime.PluginFactory:
-//
-//	func(ctx, runtime.Object, fwk.Handle) (fwk.Plugin, error)
-//
-// Args are read from the pluginConfig section of KubeSchedulerConfiguration.
-// Any field left unset falls back to DefaultPlacementServer* constants.
 func New(_ context.Context, obj apiruntime.Object, _ fwk.Handle) (fwk.Plugin, error) {
 	args := &HIROScoreArgs{
 		PlacementServerURL:  DefaultPlacementServerURL,
 		PlacementServerPath: DefaultPlacementServerPath,
+		FilterPath:          DefaultFilterPath,
 		TimeoutSeconds:      8,
 	}
 
@@ -101,12 +110,14 @@ func New(_ context.Context, obj apiruntime.Object, _ fwk.Handle) (fwk.Plugin, er
 		if err := json.Unmarshal(unknown.Raw, args); err != nil {
 			return nil, fmt.Errorf("HIROScore: parsing pluginConfig args: %w", err)
 		}
-		// Re-apply defaults for any fields left as zero value after unmarshalling.
 		if args.PlacementServerURL == "" {
 			args.PlacementServerURL = DefaultPlacementServerURL
 		}
 		if args.PlacementServerPath == "" {
 			args.PlacementServerPath = DefaultPlacementServerPath
+		}
+		if args.FilterPath == "" {
+			args.FilterPath = DefaultFilterPath
 		}
 		if args.TimeoutSeconds <= 0 {
 			args.TimeoutSeconds = 8
@@ -116,6 +127,7 @@ func New(_ context.Context, obj apiruntime.Object, _ fwk.Handle) (fwk.Plugin, er
 	client := NewPlacementClient(
 		args.PlacementServerURL,
 		args.PlacementServerPath,
+		args.FilterPath,
 		time.Duration(args.TimeoutSeconds)*time.Second,
 	)
 	return &HIROScore{client: client}, nil
@@ -125,39 +137,62 @@ func New(_ context.Context, obj apiruntime.Object, _ fwk.Handle) (fwk.Plugin, er
 func (h *HIROScore) Name() string { return PluginName }
 
 // =============================================================================
-// FilterPlugin
+// PreFilterPlugin — energy gate (once per pod, before Filter)
 // =============================================================================
 
-// Filter is called once per (pod, node) pair after feasibility filters.
-//
-// It returns Unschedulable only when ALL of the following hold:
-//   - The pod belongs to an OrchestrationProfile
-//   - The profile's decision.action is "Delay"
-//   - Energy awareness is enabled on the profile
-//
-// On any error (PlacementServer unreachable, profile not found, etc.) it
-// returns nil (allow) — never block a pod because of a plugin failure.
+// PreFilter calls the PlacementServer's /filter endpoint once per pod.
+// The result is stored in CycleState for Filter to read per node.
+// Soft-fail open: any error is treated as Allowed=true.
+func (h *HIROScore) PreFilter(
+	ctx context.Context,
+	state fwk.CycleState,
+	pod *corev1.Pod,
+	_ []fwk.NodeInfo,
+) (*fwk.PreFilterResult, *fwk.Status) {
+	allowed, reason, err := h.client.CheckFilter(ctx, pod)
+	if err != nil {
+		// Infrastructure failure — never block a pod; let the scheduler proceed.
+		state.Write(energyGateStateKey, energyGateDecision{allowed: true})
+		return nil, nil
+	}
+	state.Write(energyGateStateKey, energyGateDecision{allowed: allowed, reason: reason})
+	return nil, nil
+}
+
+// PreFilterExtensions returns nil; HIROScore does not add/remove nodes in PreFilter.
+func (h *HIROScore) PreFilterExtensions() fwk.PreFilterExtensions { return nil }
+
+// =============================================================================
+// FilterPlugin — energy gate (per pod/node pair)
+// =============================================================================
+
+// Filter reads the energy gate decision stored by PreFilter.
+// Returns Unschedulable for every node when the energy gate blocked the pod.
+// Soft-fail open: if the CycleState key is missing, the pod is allowed.
 func (h *HIROScore) Filter(
 	_ context.Context,
-	_ fwk.CycleState,
+	state fwk.CycleState,
 	_ *corev1.Pod,
 	_ fwk.NodeInfo,
 ) *fwk.Status {
-	// TODO: look up OrchestrationProfile for this pod.
-	// TODO: if profile.status.decision.action == "Delay" && energy gate enabled
-	//       return fwk.NewStatus(fwk.Unschedulable, "HIROScore: energy gate active")
-	return nil // soft-fail open
+	data, err := state.Read(energyGateStateKey)
+	if err != nil {
+		return nil // gate not checked — allow
+	}
+	gate, ok := data.(energyGateDecision)
+	if !ok || gate.allowed {
+		return nil
+	}
+	return fwk.NewStatus(fwk.Unschedulable, "HIROScore: "+gate.reason)
 }
 
 // =============================================================================
-// PreScorePlugin
+// PreScorePlugin — AI scoring (once per pod, after Filter)
 // =============================================================================
 
-// PreScore is called once per pod after all nodes have passed feasibility.
-// It calls the PlacementServer, collects AI scores for all candidate nodes,
-// and stashes them in CycleState for Score to read.
-//
-// On any error it stores an empty map so Score returns neutral 0 for all nodes.
+// PreScore calls the PlacementServer's /score endpoint, collects AI scores for
+// all candidate nodes, and stashes them in CycleState for Score to read.
+// Soft-fail open: on any error an empty map is stored so Score returns 0.
 func (h *HIROScore) PreScore(
 	ctx context.Context,
 	state fwk.CycleState,
@@ -183,25 +218,18 @@ func (h *HIROScore) PreScore(
 
 	scores := make(nodeScoreMap, len(resp.NodeScores))
 	for _, ns := range resp.NodeScores {
-		s := int64(ns.Score)
-		if s < fwk.MinNodeScore {
-			s = fwk.MinNodeScore
-		}
-		if s > fwk.MaxNodeScore {
-			s = fwk.MaxNodeScore
-		}
-		scores[ns.NodeName] = s
+		scores[ns.NodeName] = max(fwk.MinNodeScore, min(fwk.MaxNodeScore, int64(ns.Score)))
 	}
 	state.Write(cycleStateKey, scores)
 	return nil
 }
 
 // =============================================================================
-// ScorePlugin
+// ScorePlugin — returns per-node AI score (per pod/node pair)
 // =============================================================================
 
 // Score returns the AI score for the given node that was stashed in PreScore.
-// Returns 0 if the node was not scored (soft-fail).
+// Returns 0 (neutral) if the node was not scored — soft-fail.
 func (h *HIROScore) Score(
 	_ context.Context,
 	state fwk.CycleState,

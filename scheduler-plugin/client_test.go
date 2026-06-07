@@ -35,7 +35,7 @@ import (
 func testPlacementCtx() *placement.PlacementContext {
 	return &placement.PlacementContext{
 		Pod: &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default", UID: "test-uid-1234"},
 		},
 		CandidateNodes: []*corev1.Node{
 			{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
@@ -73,7 +73,7 @@ func TestDecide_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := schedulerplugin.NewPlacementClient(srv.URL, "/placement", 5*time.Second)
+	client := schedulerplugin.NewPlacementClient(srv.URL, "/placement", "/filter", 5*time.Second)
 	got, err := client.Decide(context.Background(), testPlacementCtx())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -97,7 +97,7 @@ func TestDecide_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := schedulerplugin.NewPlacementClient(srv.URL, "/placement", 5*time.Second)
+	client := schedulerplugin.NewPlacementClient(srv.URL, "/placement", "/filter", 5*time.Second)
 	_, err := client.Decide(context.Background(), testPlacementCtx())
 	if err == nil {
 		t.Fatal("expected error for HTTP 500, got nil")
@@ -111,7 +111,7 @@ func TestDecide_Timeout(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := schedulerplugin.NewPlacementClient(srv.URL, "/placement", 50*time.Millisecond)
+	client := schedulerplugin.NewPlacementClient(srv.URL, "/placement", "/filter", 50*time.Millisecond)
 	_, err := client.Decide(context.Background(), testPlacementCtx())
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
@@ -125,7 +125,7 @@ func TestDecide_InvalidJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := schedulerplugin.NewPlacementClient(srv.URL, "/placement", 5*time.Second)
+	client := schedulerplugin.NewPlacementClient(srv.URL, "/placement", "/filter", 5*time.Second)
 	_, err := client.Decide(context.Background(), testPlacementCtx())
 	if err == nil {
 		t.Fatal("expected JSON decode error, got nil")
@@ -141,7 +141,7 @@ func TestDecide_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	client := schedulerplugin.NewPlacementClient(srv.URL, "/placement", 5*time.Second)
+	client := schedulerplugin.NewPlacementClient(srv.URL, "/placement", "/filter", 5*time.Second)
 	_, err := client.Decide(ctx, testPlacementCtx())
 	if err == nil {
 		t.Fatal("expected error for cancelled context, got nil")
@@ -150,7 +150,8 @@ func TestDecide_ContextCancelled(t *testing.T) {
 
 func TestNewPlacementClientFromEnv_Defaults(t *testing.T) {
 	os.Unsetenv("PLACEMENT_SERVER_URL")
-	os.Unsetenv("PLACEMENT_SERVER_PATH")
+	os.Unsetenv("PLACEMENT_SCORE_PATH")
+	os.Unsetenv("PLACEMENT_FILTER_PATH")
 
 	client := schedulerplugin.NewPlacementClientFromEnv(5 * time.Second)
 	if client == nil {

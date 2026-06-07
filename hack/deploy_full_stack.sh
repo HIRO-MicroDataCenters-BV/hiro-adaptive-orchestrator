@@ -24,7 +24,7 @@
 # ─── PlacementServer (operator exposes / scheduler calls) ────────────────────
 #   PLACEMENT_SERVICE_NAME    k8s Service name            (default: <NAME_PREFIX>controller-manager-placement-service)
 #   PLACEMENT_SERVER_PORT     listening port              (default: :8090)
-#   PLACEMENT_SERVER_PATH     decision endpoint path      (default: /api/v1/placement/decision)
+#   PLACEMENT_SCORE_PATH     decision endpoint path      (default: /api/v1/placement/score)
 #   PLACEMENT_SERVER_HEALTH_PATH  health endpoint path    (default: /healthz)
 #   PLACEMENT_TIMEOUT_SECS    scheduler→server timeout    (default: 8)
 #
@@ -106,7 +106,8 @@ export KUBECONFIG="$KUBECONFIG_PATH"
 
 export PLACEMENT_SERVICE_NAME=${PLACEMENT_SERVICE_NAME:-${NAME_PREFIX}controller-manager-placement-service}
 export PLACEMENT_SERVER_PORT=${PLACEMENT_SERVER_PORT:-:8090}
-export PLACEMENT_SERVER_PATH=${PLACEMENT_SERVER_PATH:-/api/v1/placement/decision}
+export PLACEMENT_SCORE_PATH=${PLACEMENT_SCORE_PATH:-/api/v1/placement/score}
+export PLACEMENT_FILTER_PATH=${PLACEMENT_FILTER_PATH:-/api/v1/placement/filter}
 export PLACEMENT_SERVER_HEALTH_PATH=${PLACEMENT_SERVER_HEALTH_PATH:-/healthz}
 export PLACEMENT_TIMEOUT_SECS=${PLACEMENT_TIMEOUT_SECS:-8}
 
@@ -204,7 +205,7 @@ print_config() {
   echo "  ── PlacementServer ───────────────────────────────────────"
   echo "    Service Name           : $PLACEMENT_SERVICE_NAME"
   echo "    Port                   : $PLACEMENT_SERVER_PORT"
-  echo "    Decision Path          : $PLACEMENT_SERVER_PATH"
+  echo "    Decision Path          : $PLACEMENT_SCORE_PATH"
   echo "    Health Path            : $PLACEMENT_SERVER_HEALTH_PATH"
   echo "    Scheduler Timeout (s)  : $PLACEMENT_TIMEOUT_SECS"
   echo ""

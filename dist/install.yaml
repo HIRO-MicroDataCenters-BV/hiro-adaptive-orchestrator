@@ -517,8 +517,10 @@ spec:
           value: /api/v1/agent/placement/decision
         - name: PLACEMENT_SERVER_PORT
           value: :8090
-        - name: PLACEMENT_SERVER_PATH
-          value: /api/v1/placement/decision
+        - name: PLACEMENT_SCORE_PATH
+          value: /api/v1/placement/score
+        - name: PLACEMENT_FILTER_PATH
+          value: /api/v1/placement/filter
         - name: PLACEMENT_SERVER_HEALTH_PATH
           value: /healthz
         - name: EAO_GROUP

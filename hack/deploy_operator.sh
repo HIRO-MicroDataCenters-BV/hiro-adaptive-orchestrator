@@ -15,7 +15,7 @@
 # ─── PlacementServer (served by this operator) ───────────────────────────────
 #   PLACEMENT_SERVICE_NAME    k8s Service name            (default: <NAME_PREFIX>controller-manager-placement-service)
 #   PLACEMENT_SERVER_PORT     listening port              (default: :8090)
-#   PLACEMENT_SERVER_PATH     decision endpoint path      (default: /api/v1/placement/decision)
+#   PLACEMENT_SCORE_PATH     decision endpoint path      (default: /api/v1/placement/score)
 #   PLACEMENT_SERVER_HEALTH_PATH  health endpoint path    (default: /healthz)
 #
 # ─── Decision Agent ──────────────────────────────────────────────────────────
@@ -92,7 +92,7 @@ export EAO_KIND="${EAO_KIND:-EnergyAwareOrchestration}"
 
 # PlacementServer paths (must match what the operator reads from env)
 export PLACEMENT_SERVER_PORT=${PLACEMENT_SERVER_PORT:-:8090}
-export PLACEMENT_SERVER_PATH=${PLACEMENT_SERVER_PATH:-/api/v1/placement/decision}
+export PLACEMENT_SCORE_PATH=${PLACEMENT_SCORE_PATH:-/api/v1/placement/score}
 export PLACEMENT_SERVER_HEALTH_PATH=${PLACEMENT_SERVER_HEALTH_PATH:-/healthz}
 export DECISION_AGENT_PATH=${DECISION_AGENT_PATH:-/api/v1/agent/placement/decision}
 export EXTENDER_FILTER_PATH=${EXTENDER_FILTER_PATH:-/extender/filter}
@@ -119,7 +119,7 @@ print_config() {
   echo "Operator Image     : $IMG"
   echo "Kubeconfig         : $KUBECONFIG"
   echo "EAO CRD            : $EAO_GROUP/$EAO_VERSION, Kind=$EAO_KIND"
-  echo "PlacementServer    : Service=$PLACEMENT_SERVICE_NAME  Port=$PLACEMENT_SERVER_PORT  Path=$PLACEMENT_SERVER_PATH  Health=$PLACEMENT_SERVER_HEALTH_PATH"
+  echo "PlacementServer    : Service=$PLACEMENT_SERVICE_NAME  Port=$PLACEMENT_SERVER_PORT  Path=$PLACEMENT_SCORE_PATH  Health=$PLACEMENT_SERVER_HEALTH_PATH"
   echo "Extender Filter    : $EXTENDER_FILTER_PATH"
   echo "Extender Prioritize: $EXTENDER_PRIORITIZE_PATH"
   if [ "$USE_MOCK_AGENT" = "true" ]; then
@@ -199,7 +199,7 @@ inject_operator_env_vars() {
     DECISION_AGENT_URL="$DECISION_AGENT_URL" \
     DECISION_AGENT_PATH="$DECISION_AGENT_PATH" \
     PLACEMENT_SERVER_PORT="$PLACEMENT_SERVER_PORT" \
-    PLACEMENT_SERVER_PATH="$PLACEMENT_SERVER_PATH" \
+    PLACEMENT_SCORE_PATH="$PLACEMENT_SCORE_PATH" \
     PLACEMENT_SERVER_HEALTH_PATH="$PLACEMENT_SERVER_HEALTH_PATH" \
     EXTENDER_FILTER_PATH="$EXTENDER_FILTER_PATH" \
     EXTENDER_PRIORITIZE_PATH="$EXTENDER_PRIORITIZE_PATH" \

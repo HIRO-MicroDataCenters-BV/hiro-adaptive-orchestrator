@@ -60,3 +60,16 @@ type NodeScore struct {
 	// Typically in range 0–100 to align with Kubernetes scoring conventions.
 	Score float64 `json:"score"`
 }
+
+// EnergyGateRequest is the request body for POST /api/v1/placement/filter.
+// Sent by the scheduler plugin's PreFilter phase once per pod.
+type EnergyGateRequest struct {
+	Pod *corev1.Pod `json:"pod"`
+}
+
+// EnergyGateResponse is the response from POST /api/v1/placement/filter.
+// Allowed=false means the pod must not be scheduled due to energy constraints.
+type EnergyGateResponse struct {
+	Allowed bool   `json:"allowed"`
+	Reason  string `json:"reason,omitempty"`
+}

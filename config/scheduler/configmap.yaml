@@ -45,5 +45,6 @@ data:
               # Update this if you deploy the operator with a custom NAMESPACE or NAME_PREFIX.
               # Pattern: http://<NAME_PREFIX>controller-manager-placement-service.<NAMESPACE>.svc.cluster.local:8090
               placementServerURL: "http://hiro-adaptive-orchestrator-controller-manager-placement-service.hiro-adaptive-orchestrator-system.svc.cluster.local:8090"
-              placementServerPath: "/api/v1/placement/decision"
+              placementServerPath: "/api/v1/placement/score"
+              filterPath: "/api/v1/placement/filter"
               timeoutSeconds: 8

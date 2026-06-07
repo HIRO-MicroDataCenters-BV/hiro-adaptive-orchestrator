@@ -219,8 +219,10 @@ func main() {
 	//   DECISION_AGENT_PATH     — HTTP path on the AI agent (optional)
 	//                             default: "/api/v1/agent/placement/decision"
 	//   PLACEMENT_SERVER_PORT   — listening address (optional, default ":8090")
-	//   PLACEMENT_SERVER_PATH        — HTTP path for placement decisions (optional)
-	//                                  default: "/api/v1/placement/decision"
+	//   PLACEMENT_SCORE_PATH         — HTTP path for AI scoring (optional)
+	//                                  default: "/api/v1/placement/score"
+	//   PLACEMENT_FILTER_PATH        — HTTP path for energy gate filter (optional)
+	//                                  default: "/api/v1/placement/filter"
 	//   PLACEMENT_SERVER_HEALTH_PATH — HTTP path for health probes (optional)
 	//                                  default: "/healthz"
 	//   EAO_GROUP               — API group of EnergyAwareOrchestration CRD
@@ -246,9 +248,14 @@ func main() {
 		placementServerPort = ":8090"
 	}
 
-	placementServerPath := os.Getenv("PLACEMENT_SERVER_PATH")
-	if placementServerPath == "" {
-		placementServerPath = "/api/v1/placement/decision"
+	placementScorePath := os.Getenv("PLACEMENT_SCORE_PATH")
+	if placementScorePath == "" {
+		placementScorePath = "/api/v1/placement/score"
+	}
+
+	placementFilterPath := os.Getenv("PLACEMENT_FILTER_PATH")
+	if placementFilterPath == "" {
+		placementFilterPath = "/api/v1/placement/filter"
 	}
 
 	placementServerHealthPath := os.Getenv("PLACEMENT_SERVER_HEALTH_PATH")
@@ -286,7 +293,8 @@ func main() {
 	setupLog.Info("decision layer configured",
 		"agentURL", decisionAgentURL,
 		"agentPath", decisionAgentPath,
-		"placementDecisionPath", placementServerPath,
+		"placementScorePath", placementScorePath,
+		"placementFilterPath", placementFilterPath,
 		"placementHealthPath", placementServerHealthPath,
 		"extenderFilterPath", extenderFilterPath,
 		"extenderPrioritizePath", extenderPrioritizePath,
@@ -315,7 +323,8 @@ func main() {
 		contextBuilder,
 		decisionClient,
 		placementServerPort,
-		placementServerPath,
+		placementScorePath,
+		placementFilterPath,
 		placementServerHealthPath,
 		extenderFilterPath,
 		extenderPrioritizePath,

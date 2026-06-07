@@ -425,20 +425,20 @@ func mapEAOToProfileContext(eao *unstructured.Unstructured) *EAOProfileContext {
 func (b *DecisionContextBuilder) CheckEnergyGate(
 	ctx context.Context,
 	pod *corev1.Pod,
-) (EnergyGateResult, error) {
+) (EnergyGateResponse, error) {
 	profile, err := b.findProfileForPod(ctx, pod)
 	if err != nil {
 		// Allow on lookup error -- do not block scheduling
-		return EnergyGateResult{Allowed: true}, err
+		return EnergyGateResponse{Allowed: true}, err
 	}
 	if profile == nil || !profile.Spec.Placement.Awareness.Energy {
-		return EnergyGateResult{Allowed: true}, nil
+		return EnergyGateResponse{Allowed: true}, nil
 	}
 
 	eaoProfile, err := b.fetchEAOProfile(ctx, pod)
 	if err != nil || eaoProfile == nil {
 		// EAO data unavailable -- allow scheduling (best-effort energy gating)
-		return EnergyGateResult{Allowed: true}, nil
+		return EnergyGateResponse{Allowed: true}, nil
 	}
 
 	if eaoProfile.EnergyMetrics != nil && !eaoProfile.EnergyMetrics.Sufficient {
@@ -446,10 +446,10 @@ func (b *DecisionContextBuilder) CheckEnergyGate(
 		if eaoProfile.Decision != nil && eaoProfile.Decision.Reason != "" {
 			reason = eaoProfile.Decision.Reason
 		}
-		return EnergyGateResult{Allowed: false, Reason: reason}, nil
+		return EnergyGateResponse{Allowed: false, Reason: reason}, nil
 	}
 
-	return EnergyGateResult{Allowed: true}, nil
+	return EnergyGateResponse{Allowed: true}, nil
 }
 
 // =============================================================================
