@@ -13,6 +13,7 @@ A Kubernetes operator that provides intelligent, AI-driven pod placement and ada
   - [Flow 2 — Plugin Path](#flow-2--plugin-path-hiro-scheduler--placementserver)
   - [Flow 3 — Extender Path](#flow-3--extender-path-default-kube-scheduler--placementserver)
   - [Parameter Flow](#parameter-flow)
+- [Detailed Scheduling Flows](docs/scheduling-flows.md) ← function-level call chains for both paths
 - [Features](#features)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
@@ -180,6 +181,8 @@ hiro-scheduler selects highest-scored node → binds pod
 
 Plugin configuration (URL, path, timeout) is injected into the `KubeSchedulerConfiguration` ConfigMap at deploy time — see [Scheduler Plugin Config](#scheduler-plugin-config).
 
+For a detailed function-level trace of every call in this path see [docs/scheduling-flows.md — Path A](docs/scheduling-flows.md#path-a--scheduler-plugin-hiro-scheduler).
+
 ### Flow 3 — Extender Path: default kube-scheduler + PlacementServer
 
 End-to-end flow when the extender is deployed. The default `kube-scheduler` calls the PlacementServer during its filter and prioritize phases for **all pods** cluster-wide. No custom scheduler pod is needed.
@@ -239,6 +242,8 @@ If extender is unreachable (ignorable: true in ConfigMap):
 ```
 
 `ignorable: true` is set in `config/extender/scheduler-config.yaml`. The extender is never a hard dependency for scheduling.
+
+For a detailed function-level trace of every call in this path see [docs/scheduling-flows.md — Path B](docs/scheduling-flows.md#path-b--extender-default-kube-scheduler).
 
 #### Operator logs (extender side)
 
