@@ -25,17 +25,22 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 )
 
 // OrchestrationProfileReconciler reconciles a OrchestrationProfile object
 type OrchestrationProfileReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme         *runtime.Scheme
+	Recorder       record.EventRecorder
+	ContextBuilder *placementserver.DecisionContextBuilder
+	DecisionClient *placementserver.DecisionClient
 }
 
 // Never Ever delete this comments as they are used by kubebuilder to generate RBAC permissions for the controller.
@@ -48,6 +53,8 @@ type OrchestrationProfileReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="apps",resources=deployments;replicasets;statefulsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="batch",resources=jobs,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=eas.hiro.io,resources=energyawareorchestrations,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -72,20 +79,20 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 	if err := r.Get(ctx, req.NamespacedName, profile); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Profile was deleted. Nothing to reconcile — GC handles cleanup.
-			logger.Info("OrchestrationProfile not found, likely deleted", "name", req.Name)
+			logger.Info("reconciler: profile not found, likely deleted", "name", req.Name)
 			return ctrl.Result{}, nil
 		}
-		logger.Error(err, "unable to fetch OrchestrationProfile")
+		logger.Error(err, "reconciler: failed to fetch profile")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	err := r.Get(ctx, req.NamespacedName, profile)
-	if err != nil {
-		logger.Error(err, "failed to reconcile OrchestrationProfile")
-		return ctrl.Result{}, err
-	}
+	// err := r.Get(ctx, req.NamespacedName, profile)
+	// if err != nil {
+	// 	logger.Error(err, "failed to reconcile OrchestrationProfile")
+	// 	return ctrl.Result{}, err
+	// }
 
-	logger.Info("Reconciling OrchestrationProfile",
+	logger.Info("reconciler: reconciling profile",
 		"name", profile.Name,
 		"strategy", profile.Spec.Placement.Strategy,
 		"awareness", profile.Spec.Placement.Awareness,
@@ -110,14 +117,12 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 	// Validation failures are permanent (user must fix spec) — mark as Error.
 	// -------------------------------------------------------------------------
 	if validationErrs := r.validateProfile(profile); len(validationErrs) > 0 {
-		logger.Error(
-			validationErrs.ToAggregate(),
-			"OrchestrationProfile spec validation failed",
-			"name", profile.Name,
-		)
+		msg := validationErrs.ToAggregate().Error()
+		logger.Error(validationErrs.ToAggregate(), "reconciler: spec validation failed", "name", profile.Name)
+		r.Recorder.Event(profile, corev1.EventTypeWarning, EventReasonValidationFailed, msg)
 		return r.updateStatus(ctx, profile, func(s *orchestrationv1alpha1.OrchestrationProfileStatus) {
 			s.Status = StatusError
-			s.Reason = validationErrs.ToAggregate().Error()
+			s.Reason = msg
 			s.PlacementStatus = orchestrationv1alpha1.PlacementStatus{
 				Strategy: profile.Spec.Placement.Strategy,
 			}
@@ -132,13 +137,20 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 	// -------------------------------------------------------------------------
 	appExists, err := r.applicationExists(ctx, profile.Spec.ApplicationRef)
 	if err != nil {
-		logger.Error(err, "failed to check application existence",
+		msg := fmt.Sprintf("error checking %s %s/%s: %v",
+			profile.Spec.ApplicationRef.Kind,
+			profile.Spec.ApplicationRef.Namespace,
+			profile.Spec.ApplicationRef.Name,
+			err,
+		)
+		logger.Error(err, "reconciler: failed to check application existence",
 			"app", profile.Spec.ApplicationRef.Name,
 			"kind", profile.Spec.ApplicationRef.Kind,
 		)
+		r.Recorder.Event(profile, corev1.EventTypeWarning, EventReasonApplicationLookupError, msg)
 		return r.updateStatus(ctx, profile, func(s *orchestrationv1alpha1.OrchestrationProfileStatus) {
 			s.Status = StatusError
-			s.Reason = fmt.Sprintf("error checking application existence: %v", err)
+			s.Reason = msg
 			s.PlacementStatus = orchestrationv1alpha1.PlacementStatus{
 				Strategy: profile.Spec.Placement.Strategy,
 			}
@@ -146,10 +158,16 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 
 	if !appExists {
-		logger.Info("referenced application does not exist yet, waiting",
+		logger.Info("reconciler: application not found, waiting",
 			"app", profile.Spec.ApplicationRef.Name,
 			"kind", profile.Spec.ApplicationRef.Kind,
 			"namespace", profile.Spec.ApplicationRef.Namespace,
+		)
+		r.Recorder.Eventf(profile, corev1.EventTypeNormal, EventReasonApplicationNotFound,
+			"Referenced %s %s/%s not found, waiting for it to be created",
+			profile.Spec.ApplicationRef.Kind,
+			profile.Spec.ApplicationRef.Namespace,
+			profile.Spec.ApplicationRef.Name,
 		)
 		return r.updateStatus(ctx, profile, func(s *orchestrationv1alpha1.OrchestrationProfileStatus) {
 			s.Status = StatusNoPods
@@ -169,13 +187,20 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 	// -------------------------------------------------------------------------
 	pods, err := r.findPodsForApplication(ctx, profile)
 	if err != nil {
-		logger.Error(err, "failed to find pods for application",
+		msg := fmt.Sprintf("error finding pods for %s %s/%s: %v",
+			profile.Spec.ApplicationRef.Kind,
+			profile.Spec.ApplicationRef.Namespace,
+			profile.Spec.ApplicationRef.Name,
+			err,
+		)
+		logger.Error(err, "reconciler: failed to find pods",
 			"app", profile.Spec.ApplicationRef.Name,
 			"namespace", profile.Spec.ApplicationRef.Namespace,
 		)
+		r.Recorder.Event(profile, corev1.EventTypeWarning, EventReasonPodDiscoveryFailed, msg)
 		return r.updateStatus(ctx, profile, func(s *orchestrationv1alpha1.OrchestrationProfileStatus) {
 			s.Status = StatusError
-			s.Reason = fmt.Sprintf("error finding pods for application: %v", err)
+			s.Reason = msg
 		})
 	}
 
@@ -197,7 +222,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 		placementStatus.PendingPods,
 	)
 
-	logger.Info("updating OrchestrationProfile status",
+	logger.Info("reconciler: updating status",
 		"name", profile.Name,
 		"status", overallStatus,
 		"observed", placementStatus.ObservedPods,

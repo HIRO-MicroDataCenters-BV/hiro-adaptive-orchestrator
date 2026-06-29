@@ -94,7 +94,7 @@ func (r *OrchestrationProfileReconciler) findPodsForApplication(
 
 	// Fallback: if selector resolution returned nothing, use the conventional app label.
 	if len(labelSelector) == 0 {
-		logger.Info("no label selector resolved, falling back to app label",
+		logger.Info("reconciler: no label selector, using app label",
 			"app", appRef.Name,
 			"namespace", appRef.Namespace,
 		)
@@ -110,7 +110,7 @@ func (r *OrchestrationProfileReconciler) findPodsForApplication(
 			appRef.Namespace, appRef.Name, labelSelector, err)
 	}
 
-	logger.Info("resolved pods for application",
+	logger.Info("reconciler: pods resolved",
 		"app", appRef.Name,
 		"namespace", appRef.Namespace,
 		"podCount", len(podList.Items),

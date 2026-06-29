@@ -1,0 +1,393 @@
+#!/bin/bash
+# hack/deploy_extender.sh
+#
+# Full extender deploy: applies the HIRO KubeSchedulerConfiguration ConfigMap
+# to kube-system AND patches the kube-scheduler static pod manifest so the
+# config is mounted and --config is passed automatically.
+#
+# The extender approach routes the DEFAULT kube-scheduler's filter and
+# prioritize calls to the HIRO operator PlacementServer.
+# Use this on clusters where a custom scheduler pod cannot be deployed
+# (GKE Autopilot, EKS Fargate, managed AKS, etc.) or on kubeadm clusters
+# for testing.
+#
+# ─── What this script does ────────────────────────────────────────────────────
+#   1. Renders hiro-scheduler-config ConfigMap (substitutes PLACEMENT_SERVICE_NAME
+#      and NAMESPACE into the urlPrefix) and applies it to kube-system.
+#   2. Creates a hiro-patch-script ConfigMap from hack/patch_scheduler_static_pod.py.
+#   3. Runs a privileged Kubernetes Job on the control-plane node that:
+#        - mounts /etc/kubernetes/manifests from the node (hostPath, read/write)
+#        - runs the Python patch script to add --config and the ConfigMap volume
+#          to kube-scheduler.yaml
+#   4. Kubelet detects the manifest change (inotify) and restarts kube-scheduler.
+#   5. Waits for the new kube-scheduler pod to be Ready.
+#   6. Verifies the --config flag is live in the running pod spec.
+#
+# ─── Prerequisites ────────────────────────────────────────────────────────────
+#   - Operator must be running (PlacementServer must be reachable)
+#   - kubectl access including kube-system namespace
+#   - Control-plane node must allow privileged pods (kube-system uses baseline PSA)
+#   - PATCHER_IMAGE must be pullable from the control-plane node
+#     (default python:3-slim requires internet access; override for air-gapped clusters)
+#
+# ─── Configuration ────────────────────────────────────────────────────────────
+#   NAMESPACE              operator namespace   (default: hiro-adaptive-orchestrator-system)
+#   NAME_PREFIX            kustomize prefix     (default: hiro-adaptive-orchestrator-)
+#   PLACEMENT_SERVICE_NAME k8s service name     (default: <NAME_PREFIX>controller-manager-placement-service)
+#   SCHEDULER_CONFIG_PATH  mount path inside scheduler pod
+#                                               (default: /etc/kubernetes/hiro-scheduler-config.yaml)
+#   PATCH_JOB_NAMESPACE    namespace for patch Job (default: kube-system)
+#   PATCHER_IMAGE          patcher container image (default: python:3-slim)
+#
+# ─── Usage ────────────────────────────────────────────────────────────────────
+#   # Standalone
+#   export GITHUB_PAT_TOKEN=<token>   # only needed if operator not yet deployed
+#   hack/deploy_extender.sh [kubeconfig-path]
+#
+#   # Via deploy_full_stack.sh
+#   APPLY_EXTENDER_CONFIG=true hack/deploy_full_stack.sh [kubeconfig-path]
+#
+#   # Custom namespace / service name
+#   NAMESPACE=my-ns PLACEMENT_SERVICE_NAME=my-svc hack/deploy_extender.sh
+#
+#   # Air-gapped: use a local mirror image that has python3+pyyaml
+#   PATCHER_IMAGE=my-registry/python3-pyyaml:latest hack/deploy_extender.sh
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+export KUBECONFIG=${1:-~/.kube/config}
+export NAME_PREFIX=${NAME_PREFIX:-hiro-adaptive-orchestrator-}
+export NAMESPACE=${NAMESPACE:-hiro-adaptive-orchestrator-system}
+export PLACEMENT_SERVICE_NAME=${PLACEMENT_SERVICE_NAME:-${NAME_PREFIX}controller-manager-placement-service}
+
+SCHEDULER_CONFIG_PATH=${SCHEDULER_CONFIG_PATH:-/etc/kubernetes/hiro-scheduler-config.yaml}
+PATCH_JOB_NAME="hiro-patch-scheduler"
+PATCH_JOB_NAMESPACE=${PATCH_JOB_NAMESPACE:-kube-system}
+PATCH_SCRIPT_CONFIGMAP="hiro-patch-script"
+PATCHER_IMAGE=${PATCHER_IMAGE:-python:3-slim}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+step() { printf '\n==> %s\n' "$*"; }
+
+# ---------------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------------
+
+print_config() {
+  echo "========================================================"
+  echo " HIRO Scheduler Extender — Full Deploy"
+  echo "========================================================"
+  echo "Namespace            : $NAMESPACE"
+  echo "Name Prefix          : $NAME_PREFIX"
+  echo "Placement Svc Name   : $PLACEMENT_SERVICE_NAME"
+  echo "Scheduler Config Path: $SCHEDULER_CONFIG_PATH"
+  echo "Patch Job Namespace  : $PATCH_JOB_NAMESPACE"
+  echo "Patcher Image        : $PATCHER_IMAGE"
+  echo "Kubeconfig           : $KUBECONFIG"
+  echo "========================================================"
+}
+
+# resolve_placement_url sets PLACEMENT_URL to the urlPrefix for KubeSchedulerConfiguration.
+#
+# Background: kube-scheduler runs as a static pod with hostNetwork: true, so it
+# uses the node's /etc/resolv.conf rather than CoreDNS.  On most clusters (Kind,
+# kubeadm, GKE, EKS, AKS) the node resolver does not know svc.cluster.local
+# and DNS-based service names are therefore unreachable from the scheduler.
+#
+# kube-proxy (or the CNI) installs iptables/eBPF rules at the kernel level on
+# every node, making ClusterIPs reachable from the host network namespace.
+# We resolve the ClusterIP at deploy time and embed it directly in the URL so
+# the scheduler can contact the extender on all cluster types.
+resolve_placement_url() {
+  local cluster_ip
+  cluster_ip=$(kubectl get svc "${PLACEMENT_SERVICE_NAME}" \
+    -n "${NAMESPACE}" \
+    -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+
+  if [[ -n "$cluster_ip" ]]; then
+    echo "  Resolved placement service ClusterIP: ${cluster_ip}"
+    echo "  (Using IP — kube-scheduler hostNetwork cannot resolve svc.cluster.local via node DNS)"
+    PLACEMENT_URL="http://${cluster_ip}:8090"
+  else
+    echo "  WARNING: could not resolve ClusterIP for ${PLACEMENT_SERVICE_NAME} in ${NAMESPACE}"
+    echo "  Falling back to DNS name — extender may be unreachable from kube-scheduler"
+    PLACEMENT_URL="http://${PLACEMENT_SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:8090"
+  fi
+}
+
+# Step 1 — Render and apply the KubeSchedulerConfiguration ConfigMap.
+# Resolves the placement service ClusterIP (see resolve_placement_url) then
+# substitutes all dynamic values into the template.
+apply_extender_configmap() {
+  step "Rendering and applying hiro-scheduler-config to kube-system..."
+
+  resolve_placement_url
+
+  local tmp_config
+  tmp_config=$(mktemp /tmp/hiro-extender-config-XXXXXX.yaml)
+
+  sed \
+    -e "s|hiro-adaptive-orchestrator-controller-manager-placement-service|${PLACEMENT_SERVICE_NAME}|g" \
+    -e "s|hiro-adaptive-orchestrator-system|${NAMESPACE}|g" \
+    -e "s|http://${PLACEMENT_SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:8090|${PLACEMENT_URL}|g" \
+    "$REPO_ROOT/config/extender/scheduler-config.yaml" > "$tmp_config"
+
+  kubectl create configmap hiro-scheduler-config \
+    --from-file=scheduler-config.yaml="$tmp_config" \
+    -n kube-system \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+  rm -f "$tmp_config"
+  echo "  ConfigMap hiro-scheduler-config applied to kube-system."
+}
+
+# Step 2 — Package the Python patch script as a ConfigMap so the Job can
+# mount and run it without requiring a custom image.
+create_patch_script_configmap() {
+  step "Creating patch-script ConfigMap from hack/patch_scheduler_static_pod.py..."
+
+  kubectl create configmap "$PATCH_SCRIPT_CONFIGMAP" \
+    --from-file=patch.py="$SCRIPT_DIR/patch_scheduler_static_pod.py" \
+    -n "$PATCH_JOB_NAMESPACE" \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+  echo "  ConfigMap '$PATCH_SCRIPT_CONFIGMAP' applied to $PATCH_JOB_NAMESPACE."
+}
+
+# Step 3 — Run the privileged Job on the control-plane node.
+#
+# Volume layout inside the patcher container:
+#   /host-manifests/          ← hostPath /etc/kubernetes/manifests  (read/write)
+#   /hiro-config/             ← ConfigMap hiro-scheduler-config      (read)
+#   /scripts/patch.py         ← ConfigMap hiro-patch-script          (executable)
+#
+# The patch script:
+#   - Backs up kube-scheduler.yaml to kube-scheduler.yaml.hiro-backup
+#   - Appends --config=SCHEDULER_CONFIG_PATH to the command
+#   - Adds a ConfigMap volumeMount and volume entry
+#   - Writes the patched manifest back in place
+#   - Is idempotent: skips if --config is already present
+#
+# Kubelet detects the manifest change via inotify and restarts kube-scheduler.
+run_patch_job() {
+  step "Running privileged patch Job on the control-plane node..."
+
+  # Remove any leftover Job from a previous run so logs are always fresh.
+  kubectl delete job "$PATCH_JOB_NAME" \
+    -n "$PATCH_JOB_NAMESPACE" \
+    --ignore-not-found
+
+  kubectl apply -f - <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${PATCH_JOB_NAME}
+  namespace: ${PATCH_JOB_NAMESPACE}
+  labels:
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+    app.kubernetes.io/component: scheduler-patcher
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+
+      # ── Target the control-plane node ───────────────────────────────────
+      # Static pod manifests live on the control-plane node's filesystem.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        effect: NoSchedule
+
+      volumes:
+      # ── Host /etc/kubernetes/manifests ──────────────────────────────────
+      # The Job writes kube-scheduler.yaml here directly on the node disk.
+      # Kubelet watches this directory (inotify) and restarts kube-scheduler
+      # when the file changes.
+      - name: host-manifests
+        hostPath:
+          path: /etc/kubernetes/manifests
+          type: Directory
+
+      # ── Host /etc/kubernetes ─────────────────────────────────────────────
+      # Used to write the scheduler config file to the node filesystem.
+      # Static pods may NOT reference ConfigMap volumes (kubelet rejects them),
+      # so we copy the config here as a plain file and reference it via a
+      # hostPath volume in the kube-scheduler manifest instead.
+      - name: host-etc-kubernetes
+        hostPath:
+          path: /etc/kubernetes
+          type: Directory
+
+      # ── HIRO extender KubeSchedulerConfiguration (source) ───────────────
+      # The ConfigMap applied in step 1. The Job reads from it and copies the
+      # content to the node filesystem — it is NOT added to the static pod.
+      - name: hiro-scheduler-config
+        configMap:
+          name: hiro-scheduler-config
+
+      # ── Python patch script ─────────────────────────────────────────────
+      - name: patch-script
+        configMap:
+          name: ${PATCH_SCRIPT_CONFIGMAP}
+          defaultMode: 0755
+
+      containers:
+      - name: patcher
+        image: ${PATCHER_IMAGE}
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          set -e
+          echo "Installing pyyaml..."
+          pip install -q pyyaml
+          echo "Copying scheduler config to node filesystem..."
+          cp /hiro-config/scheduler-config.yaml /host-etc-kubernetes/hiro-scheduler-config.yaml
+          echo "  Written: /host-etc-kubernetes/hiro-scheduler-config.yaml"
+          echo "Running patch script..."
+          python3 /scripts/patch.py
+        env:
+        - name: MANIFEST_PATH
+          value: /host-manifests/kube-scheduler.yaml
+        - name: BACKUP_PATH
+          value: /host-etc-kubernetes/kube-scheduler.yaml.hiro-backup
+        - name: SCHEDULER_CONFIG_PATH
+          value: ${SCHEDULER_CONFIG_PATH}
+        securityContext:
+          privileged: true
+          runAsUser: 0
+        volumeMounts:
+        - name: host-manifests
+          mountPath: /host-manifests
+        - name: host-etc-kubernetes
+          mountPath: /host-etc-kubernetes
+        - name: hiro-scheduler-config
+          mountPath: /hiro-config
+        - name: patch-script
+          mountPath: /scripts
+EOF
+
+}
+
+# Step 3b — Wait for the patch Job to finish and show its logs.
+wait_for_patch_job() {
+  step "Waiting for patch Job to complete (timeout 120s)..."
+  kubectl wait job/"$PATCH_JOB_NAME" \
+    -n "$PATCH_JOB_NAMESPACE" \
+    --for=condition=Complete \
+    --timeout=120s
+
+  echo ""
+  echo "  Job logs:"
+  echo "  ──────────────────────────────────────"
+  kubectl logs job/"$PATCH_JOB_NAME" -n "$PATCH_JOB_NAMESPACE" | sed 's/^/  /'
+  echo "  ──────────────────────────────────────"
+}
+
+# Step 4 — Wait for kubelet to restart the kube-scheduler container.
+#
+# patch_scheduler_static_pod.py always updates the hiro.io/last-updated
+# annotation in the static pod manifest.  Kubelet watches the manifests
+# directory (inotify) and restarts the container whenever it detects a
+# manifest change — no manual pod deletion needed.
+#
+# Pod name is derived from the control-plane node name rather than a label
+# selector: static pods are always named kube-scheduler-<node-name>, and
+# the label set varies across Kubernetes distributions.
+wait_for_scheduler_restart() {
+  step "Waiting for kubelet to restart kube-scheduler (annotation change triggers it)..."
+
+  local cp_node
+  cp_node=$(kubectl get node \
+    -l node-role.kubernetes.io/control-plane \
+    -o jsonpath='{.items[0].metadata.name}')
+  local pod_name="kube-scheduler-${cp_node}"
+
+  # Give kubelet a moment to detect the manifest change via inotify.
+  sleep 5
+
+  step "Waiting for kube-scheduler to be Ready..."
+  kubectl wait "pod/${pod_name}" \
+    -n kube-system \
+    --for=condition=Ready \
+    --timeout=120s
+
+  echo "  kube-scheduler pod is Ready."
+}
+
+# Step 5 — Confirm the patch is visible in the live pod spec.
+verify_patch() {
+  step "Verifying patch..."
+
+  local cp_node
+  cp_node=$(kubectl get node \
+    -l node-role.kubernetes.io/control-plane \
+    -o jsonpath='{.items[0].metadata.name}')
+  local pod_name="kube-scheduler-${cp_node}"
+
+  echo "  Running pod: $pod_name"
+
+  local cmd_json
+  cmd_json=$(kubectl get pod "$pod_name" \
+    -n kube-system \
+    -o jsonpath='{.spec.containers[0].command}')
+
+  if echo "$cmd_json" | grep -q "hiro-scheduler-config"; then
+    echo -e "  \033[32m✓ --config flag confirmed in the running pod spec.\033[0m"
+  else
+    echo -e "  \033[31m✗ --config flag NOT found. Kubelet may still be restarting — retry in 15s.\033[0m"
+    echo "    Full command: $cmd_json"
+    exit 1
+  fi
+
+  echo ""
+  echo "  Volume mounts on kube-scheduler:"
+  kubectl get pod "$pod_name" -n kube-system \
+    -o jsonpath='{range .spec.containers[0].volumeMounts[*]}  {.name}: {.mountPath}{"\n"}{end}'
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+main() {
+  print_config
+
+  apply_extender_configmap
+  create_patch_script_configmap
+  run_patch_job
+  wait_for_patch_job
+  wait_for_scheduler_restart
+  verify_patch
+
+  echo ""
+  echo -e "\033[32m========================================================\033[0m"
+  echo -e "\033[32m  Extender deploy complete.\033[0m"
+  echo -e "\033[32m  Filter     : POST /extender/filter\033[0m"
+  echo -e "\033[32m  Prioritize : POST /extender/prioritize\033[0m"
+  echo -e "\033[32m  Server     : ${PLACEMENT_SERVICE_NAME}.${NAMESPACE}.svc.cluster.local\033[0m"
+  echo -e "\033[32m========================================================\033[0m"
+  echo ""
+  echo "  To verify extender calls:"
+  echo "    kubectl logs -l component=kube-scheduler -n kube-system | grep -i extender"
+  echo ""
+  echo "  To undo (restore original manifest):"
+  echo "    hack/undeploy_extender.sh"
+}
+
+main "$@"

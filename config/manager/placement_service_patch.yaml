@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: controller-manager-placement-service
+  namespace: system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+    app.kubernetes.io/component: placement-server
+spec:
+  selector:
+    control-plane: controller-manager
+    app.kubernetes.io/name: hiro-adaptive-orchestrator
+  ports:
+  - name: placement-api
+    port: 8090
+    targetPort: 8090
+    protocol: TCP
+  type: ClusterIP

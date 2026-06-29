@@ -7,6 +7,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
   - pods
   verbs:
   - get
@@ -26,6 +33,14 @@ rules:
   - batch
   resources:
   - jobs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - eas.hiro.io
+  resources:
+  - energyawareorchestrations
   verbs:
   - get
   - list

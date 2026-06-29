@@ -2,4 +2,8 @@
 resources:
 - orchestration_v1alpha1_orchestrationprofile.yaml
 - nginx_deployment.yaml
+- orchestrationprofile_1.yaml
+- orchestrationprofile_2.yaml
+- nginx_deployment_1.yaml
+- nginx_deployment_2.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples
