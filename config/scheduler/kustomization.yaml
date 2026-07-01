@@ -6,13 +6,13 @@ namespace: hiro-adaptive-orchestrator-system
 namePrefix: hiro-adaptive-orchestrator-
 
 resources:
-  - serviceaccount.yaml
-  - clusterrole.yaml
-  - clusterrolebinding.yaml
-  - configmap.yaml
-  - deployment.yaml
+- serviceaccount.yaml
+- clusterrole.yaml
+- clusterrolebinding.yaml
+- configmap.yaml
+- deployment.yaml
 
 images:
-  - name: hiro-scheduler
-    newName: ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/hiro-scheduler
-    newTag: v0.1.0-k8sv1.35.0
+- name: hiro-scheduler
+  newName: ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/hiro-scheduler
+  newTag: v0.1.0-k8sv1.35.0

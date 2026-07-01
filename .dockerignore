@@ -9,3 +9,9 @@
 # Re-include Go module files
 !go.mod
 !go.sum
+
+# Re-include scheduler-plugin module files and the version-pin script.
+# These are excluded by the ** rule above but required by scheduler-plugin/Dockerfile.
+!scheduler-plugin/go.mod
+!scheduler-plugin/go.sum
+!scheduler-plugin/pin_k8s_version.sh

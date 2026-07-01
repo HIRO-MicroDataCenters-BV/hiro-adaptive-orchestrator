@@ -321,6 +321,7 @@ Each sub-script also works **standalone** — it carries its own `:-` defaults f
 - **Dynamic rebalancing** — trigger-based (energy threshold, CPU/memory threshold, node failure, scheduled)
 - **AI-delegated scoring** — pluggable external decision agent via HTTP
 - **Custom scheduler plugin** — `HIROScore` runs as a separate `hiro-scheduler` binary; pods opt in via `schedulerName: hiro-scheduler`
+- **Pod scheduler webhook** — `MutatingAdmissionWebhook` auto-sets `spec.schedulerName: hiro-scheduler` on pods governed by an `OrchestrationProfile`; TLS provisioned automatically by cert-manager; enabled with `DEPLOY_SCHEDULER_PLUGIN=true`
 - **Scheduler extender support** — for managed clusters where a custom scheduler pod cannot be deployed; uses ClusterIP for reliable reachability from `hostNetwork` kube-scheduler
 - **Status observability** — `NoPods` → `Pending` → `Active` → `Partial` → `Degraded` → `Error`
 - **Kubernetes events** — status transitions and errors recorded as events on `OrchestrationProfile`
@@ -339,8 +340,11 @@ Each sub-script also works **standalone** — it carries its own `:-` defaults f
 | Helm | v3+ | Deploy via Helm chart |
 | Kind | any recent | Local / E2E testing |
 | kubebuilder | v4 | Scaffold / code generation |
+| cert-manager | v1.17+ | TLS for the pod scheduler webhook (required when `DEPLOY_SCHEDULER_PLUGIN=true`) |
 
 A running Kubernetes cluster (v1.29+) with `~/.kube/config` pointing to it is required for deployment.
+
+> **cert-manager** is only required when deploying the scheduler plugin with the mutating webhook (`DEPLOY_SCHEDULER_PLUGIN=true`). `deploy_full_stack.sh` installs it automatically in Phase 0. For operator-only or extender-only deployments it is not needed.
 
 An **external Decision Agent** reachable at a URL you control is required for the placement server to function. For local testing, a mock agent is deployed automatically when `USE_MOCK_AGENT=true` (the default).
 

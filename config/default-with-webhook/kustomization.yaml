@@ -32,9 +32,9 @@ resources:
 components:
 - ../components/metrics
 
-patches:
 # [WEBHOOK] Mount the cert-manager Secret (optional) and expose port 9443.
 # optional: true means the pod starts safely before cert-manager issues the cert.
+patches:
 - path: manager_webhook_patch.yaml
   target:
     kind: Deployment
@@ -48,117 +48,114 @@ patches:
 # Certificate placeholder format:  SERVICE_NAME.SERVICE_NAMESPACE.svc[.cluster.local]
 # MWC annotation placeholder:      CERT_NAMESPACE/CERT_NAME
 #
-replacements:
 
 # ── Webhook Certificate dnsNames ─────────────────────────────────────────────
 # Read the webhook Service name (post-namePrefix) and namespace (post-namespace)
 # and write them into the two dnsNames of the webhook Certificate.
-- source:
-    kind: Service
-    version: v1
-    name: webhook-service
-    fieldPath: .metadata.name
-  targets:
-  - select:
-      kind: Certificate
-      group: cert-manager.io
-      version: v1
-      name: serving-cert
-    fieldPaths:
-    - .spec.dnsNames.0
-    - .spec.dnsNames.1
-    options:
-      delimiter: '.'
-      index: 0
-      create: true
-- source:
-    kind: Service
-    version: v1
-    name: webhook-service
-    fieldPath: .metadata.namespace
-  targets:
-  - select:
-      kind: Certificate
-      group: cert-manager.io
-      version: v1
-      name: serving-cert
-    fieldPaths:
-    - .spec.dnsNames.0
-    - .spec.dnsNames.1
-    options:
-      delimiter: '.'
-      index: 1
-      create: true
 
 # ── Metrics Certificate dnsNames ─────────────────────────────────────────────
-- source:
-    kind: Service
-    version: v1
-    name: controller-manager-metrics-service
-    fieldPath: .metadata.name
-  targets:
-  - select:
-      kind: Certificate
-      group: cert-manager.io
-      version: v1
-      name: metrics-certs
-    fieldPaths:
-    - .spec.dnsNames.0
-    - .spec.dnsNames.1
-    options:
-      delimiter: '.'
-      index: 0
-      create: true
-- source:
-    kind: Service
-    version: v1
-    name: controller-manager-metrics-service
-    fieldPath: .metadata.namespace
-  targets:
-  - select:
-      kind: Certificate
-      group: cert-manager.io
-      version: v1
-      name: metrics-certs
-    fieldPaths:
-    - .spec.dnsNames.0
-    - .spec.dnsNames.1
-    options:
-      delimiter: '.'
-      index: 1
-      create: true
 
 # ── MutatingWebhookConfiguration CA injection annotation ─────────────────────
 # cert-manager ca-injector reads cert-manager.io/inject-ca-from: <ns>/<cert-name>
 # and injects the CA bundle automatically.  Read both fields from the Certificate
 # resource itself so they always match after namePrefix/namespace transforms.
+replacements:
 - source:
-    kind: Certificate
-    group: cert-manager.io
-    version: v1
-    name: serving-cert
-    fieldPath: .metadata.namespace
-  targets:
-  - select:
-      kind: MutatingWebhookConfiguration
-    fieldPaths:
-    - .metadata.annotations.[cert-manager.io/inject-ca-from]
-    options:
-      delimiter: '/'
-      index: 0
-      create: true
-- source:
-    kind: Certificate
-    group: cert-manager.io
-    version: v1
-    name: serving-cert
     fieldPath: .metadata.name
+    kind: Service
+    name: webhook-service
+    version: v1
   targets:
-  - select:
-      kind: MutatingWebhookConfiguration
-    fieldPaths:
+  - fieldPaths:
+    - .spec.dnsNames.0
+    - .spec.dnsNames.1
+    options:
+      create: true
+      delimiter: .
+    select:
+      group: cert-manager.io
+      kind: Certificate
+      name: serving-cert
+      version: v1
+- source:
+    fieldPath: .metadata.namespace
+    kind: Service
+    name: webhook-service
+    version: v1
+  targets:
+  - fieldPaths:
+    - .spec.dnsNames.0
+    - .spec.dnsNames.1
+    options:
+      create: true
+      delimiter: .
+      index: 1
+    select:
+      group: cert-manager.io
+      kind: Certificate
+      name: serving-cert
+      version: v1
+- source:
+    fieldPath: .metadata.name
+    kind: Service
+    name: controller-manager-metrics-service
+    version: v1
+  targets:
+  - fieldPaths:
+    - .spec.dnsNames.0
+    - .spec.dnsNames.1
+    options:
+      create: true
+      delimiter: .
+    select:
+      group: cert-manager.io
+      kind: Certificate
+      name: metrics-certs
+      version: v1
+- source:
+    fieldPath: .metadata.namespace
+    kind: Service
+    name: controller-manager-metrics-service
+    version: v1
+  targets:
+  - fieldPaths:
+    - .spec.dnsNames.0
+    - .spec.dnsNames.1
+    options:
+      create: true
+      delimiter: .
+      index: 1
+    select:
+      group: cert-manager.io
+      kind: Certificate
+      name: metrics-certs
+      version: v1
+- source:
+    fieldPath: .metadata.namespace
+    group: cert-manager.io
+    kind: Certificate
+    name: serving-cert
+    version: v1
+  targets:
+  - fieldPaths:
     - .metadata.annotations.[cert-manager.io/inject-ca-from]
     options:
-      delimiter: '/'
-      index: 1
       create: true
+      delimiter: /
+    select:
+      kind: MutatingWebhookConfiguration
+- source:
+    fieldPath: .metadata.name
+    group: cert-manager.io
+    kind: Certificate
+    name: serving-cert
+    version: v1
+  targets:
+  - fieldPaths:
+    - .metadata.annotations.[cert-manager.io/inject-ca-from]
+    options:
+      create: true
+      delimiter: /
+      index: 1
+    select:
+      kind: MutatingWebhookConfiguration

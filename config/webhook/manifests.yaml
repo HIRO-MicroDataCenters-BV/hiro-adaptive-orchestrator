@@ -3,12 +3,6 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
   name: mutating-webhook-configuration
-  annotations:
-    # cert-manager's ca-injector controller watches for this annotation and
-    # automatically injects the CA bundle from the Certificate into this MWC.
-    # Format: <namespace>/<certificate-name>  (both after kustomize namePrefix).
-    # Substituted at deploy time by hack/deploy_webhook.sh.
-    cert-manager.io/inject-ca-from: CERT_NAMESPACE/CERT_NAME
 webhooks:
 - admissionReviewVersions:
   - v1
@@ -19,14 +13,6 @@ webhooks:
       path: /mutate--v1-pod
   failurePolicy: Ignore
   name: mpod-v1.kb.io
-  namespaceSelector:
-    matchExpressions:
-    - key: kubernetes.io/metadata.name
-      operator: NotIn
-      values:
-      - kube-system
-      - kube-public
-      - kube-node-lease
   rules:
   - apiGroups:
     - ""

@@ -20,7 +20,7 @@
 # ─── PlacementServer (operator endpoint this scheduler calls) ────────────────
 #   PLACEMENT_SERVICE_NAME    k8s Service name            (default: <NAME_PREFIX>controller-manager-placement-service)
 #   PLACEMENT_SERVER_PORT     PlacementServer port        (default: :8090)
-#   PLACEMENT_SCORE_PATH     decision endpoint path      (default: /api/v1/placement/score)
+#   PLACEMENT_SCORE_PATH      decision endpoint path      (default: /api/v1/placement/score)
 #   PLACEMENT_TIMEOUT_SECS    plugin→server timeout (s)   (default: 8)
 #
 # These three values are injected into the HIROScore pluginConfig inside the
@@ -37,38 +37,32 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths / config
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 KUSTOMIZE="$REPO_ROOT/bin/kustomize"
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
 GITHUB_USERNAME=${GITHUB_USERNAME:-sskrishnav}
-: "${GITHUB_PAT_TOKEN:?GITHUB_PAT_TOKEN must be set (export GITHUB_PAT_TOKEN=<your-ghcr-token>)}"
+: "${GITHUB_PAT_TOKEN:?GITHUB_PAT_TOKEN must be set}"
 
 export KUBECONFIG=${1:-~/.kube/config}
 export CR_PAT="$GITHUB_PAT_TOKEN"
-
 export NAME_PREFIX=${NAME_PREFIX:-hiro-adaptive-orchestrator-}
 export NAMESPACE=${NAMESPACE:-hiro-adaptive-orchestrator-system}
 
 SCHED_K8S_VERSION=${SCHED_K8S_VERSION:-v1.35.0}
 SCHED_VERSION=${SCHED_VERSION:-v0.1.0}
+SCHED_IMG="ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/hiro-scheduler:${SCHED_VERSION}-k8s${SCHED_K8S_VERSION}"
 
-DOCKER_REGISTRY=ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator
-SCHED_IMG="${DOCKER_REGISTRY}/hiro-scheduler:${SCHED_VERSION}-k8s${SCHED_K8S_VERSION}"
-
-# PlacementServer config — injected into the HIROScore pluginConfig at deploy time.
 PLACEMENT_SERVER_PORT=${PLACEMENT_SERVER_PORT:-:8090}
 PLACEMENT_SCORE_PATH=${PLACEMENT_SCORE_PATH:-/api/v1/placement/score}
 PLACEMENT_TIMEOUT_SECS=${PLACEMENT_TIMEOUT_SECS:-8}
-# Derived after NAME_PREFIX is set — override only if the operator service was renamed.
 PLACEMENT_SERVICE_NAME=${PLACEMENT_SERVICE_NAME:-${NAME_PREFIX}controller-manager-placement-service}
+
+SCHED_DEPLOYMENT="${NAME_PREFIX}hiro-scheduler"
+SCHED_SA="${NAME_PREFIX}hiro-scheduler"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -81,7 +75,6 @@ step() { printf '\n==> %s\n' "$*"; }
 # ---------------------------------------------------------------------------
 
 print_config() {
-  local placement_svc="$PLACEMENT_SERVICE_NAME"
   echo "========================================================"
   echo " HIRO Scheduler Plugin — Deploy"
   echo "========================================================"
@@ -90,46 +83,38 @@ print_config() {
   echo "Scheduler Image        : $SCHED_IMG"
   echo "K8s Target Version     : $SCHED_K8S_VERSION"
   echo "Kubeconfig             : $KUBECONFIG"
-  echo "PlacementServer Svc    : ${placement_svc}.${NAMESPACE}.svc.cluster.local${PLACEMENT_SERVER_PORT}"
+  echo "PlacementServer Svc    : ${PLACEMENT_SERVICE_NAME}.${NAMESPACE}.svc.cluster.local${PLACEMENT_SERVER_PORT}"
   echo "PlacementServer Path   : $PLACEMENT_SCORE_PATH"
   echo "Placement Timeout (s)  : $PLACEMENT_TIMEOUT_SECS"
   echo "========================================================"
 }
 
-build_and_push_scheduler_image() {
-  step "Authenticating with GitHub Container Registry..."
-  echo "$CR_PAT" | docker login ghcr.io -u "$GITHUB_USERNAME" --password-stdin
-
+build_scheduler_image() {
   step "Building scheduler image: $SCHED_IMG"
   docker build \
     --build-arg K8S_VERSION="$SCHED_K8S_VERSION" \
     -t "$SCHED_IMG" \
     -f "$REPO_ROOT/scheduler-plugin/Dockerfile" \
     "$REPO_ROOT"
+}
 
-  step "Pushing scheduler image: $SCHED_IMG"
+push_scheduler_image() {
+  step "Authenticating and pushing scheduler image..."
+  echo "$CR_PAT" | docker login ghcr.io -u "$GITHUB_USERNAME" --password-stdin
   docker push "$SCHED_IMG"
 }
 
-deploy_scheduler_resources() {
+configure_kustomize() {
   step "Configuring Kustomize for scheduler..."
-  echo "  Namespace  : $NAMESPACE"
-  echo "  NamePrefix : $NAME_PREFIX"
-  echo "  Image      : $SCHED_IMG"
-
-  # Pin namespace, namePrefix, and image in config/scheduler/kustomization.yaml.
-  # These edits are idempotent — safe to re-run.
   (cd "$REPO_ROOT/config/scheduler" && "$KUSTOMIZE" edit set namespace "$NAMESPACE")
   (cd "$REPO_ROOT/config/scheduler" && "$KUSTOMIZE" edit set nameprefix "$NAME_PREFIX")
   (cd "$REPO_ROOT/config/scheduler" && "$KUSTOMIZE" edit set image hiro-scheduler="$SCHED_IMG")
+}
 
-  # Build the placement server URL from user-supplied (or default) values.
-  # kustomize cannot substitute values inside ConfigMap data, so we patch the
-  # rendered YAML before applying.
-  local placement_svc="$PLACEMENT_SERVICE_NAME"
-  local placement_url="http://${placement_svc}.${NAMESPACE}.svc.cluster.local${PLACEMENT_SERVER_PORT}"
+apply_scheduler_resources() {
+  local placement_url="http://${PLACEMENT_SERVICE_NAME}.${NAMESPACE}.svc.cluster.local${PLACEMENT_SERVER_PORT}"
 
-  step "Deploying scheduler k8s resources..."
+  step "Applying scheduler k8s resources..."
   echo "  PlacementServer URL  : $placement_url"
   echo "  PlacementServer Path : $PLACEMENT_SCORE_PATH"
   echo "  Timeout              : ${PLACEMENT_TIMEOUT_SECS}s"
@@ -140,12 +125,29 @@ deploy_scheduler_resources() {
         -e "s|placementServerPath:.*|placementServerPath: \"${PLACEMENT_SCORE_PATH}\"|" \
         -e "s|timeoutSeconds:.*|timeoutSeconds: ${PLACEMENT_TIMEOUT_SECS}|" \
     | kubectl apply -f -
+}
 
-  step "Waiting for scheduler deployment to be ready..."
-  kubectl rollout status deployment/"${NAME_PREFIX}hiro-scheduler" \
+attach_image_pull_secret() {
+  step "Attaching GHCR pull secret to scheduler service account..."
+  kubectl create secret docker-registry ghcr-secret \
+    --docker-server=ghcr.io \
+    --docker-username="$GITHUB_USERNAME" \
+    --docker-password="$GITHUB_PAT_TOKEN" \
+    --namespace="$NAMESPACE" \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+  kubectl patch serviceaccount "$SCHED_SA" \
     -n "$NAMESPACE" \
-    --timeout=120s
-  echo "Scheduler deployment is ready."
+    -p '{"imagePullSecrets": [{"name": "ghcr-secret"}]}'
+}
+
+wait_for_scheduler() {
+  # Restart so pods pick up the updated SA (imagePullSecrets are resolved at
+  # pod creation time — ImagePullBackOff pods won't recover on their own).
+  step "Restarting and waiting for scheduler rollout..."
+  kubectl rollout restart deployment/"$SCHED_DEPLOYMENT" -n "$NAMESPACE"
+  kubectl rollout status deployment/"$SCHED_DEPLOYMENT" -n "$NAMESPACE" --timeout=120s
+  echo "Scheduler is ready."
 }
 
 # ---------------------------------------------------------------------------
@@ -155,8 +157,12 @@ deploy_scheduler_resources() {
 main() {
   print_config
 
-  build_and_push_scheduler_image
-  deploy_scheduler_resources
+  build_scheduler_image
+  push_scheduler_image
+  configure_kustomize
+  apply_scheduler_resources
+  attach_image_pull_secret
+  wait_for_scheduler
 
   echo ""
   echo -e "\033[32m========================================================\033[0m"

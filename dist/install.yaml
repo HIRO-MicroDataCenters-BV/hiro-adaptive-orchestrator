@@ -533,6 +533,10 @@ spec:
           value: /extender/filter
         - name: EXTENDER_PRIORITIZE_PATH
           value: /extender/prioritize
+        - name: ENABLE_WEBHOOKS
+          value: "false"
+        - name: HIRO_SCHEDULER_NAME
+          value: hiro-scheduler
         image: ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/hiro-adaptive-orchestrator-controller:latest
         livenessProbe:
           httpGet:

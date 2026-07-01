@@ -231,16 +231,13 @@ inject_operator_env_vars() {
 }
 
 restart_and_wait_for_operator() {
-  # We use app.kubernetes.io/name=hiro-adaptive-orchestrator as the label selector to 
-  # target the operator pod, which is set in config/default/kustomization.yaml.
-  step "Restarting operator pod to pick up new image and env vars..."
-  kubectl delete pod -l control-plane=controller-manager -n "$NAMESPACE" --ignore-not-found
-
-  step "Waiting for operator pod to be ready..."
-  kubectl wait --for=condition=Ready pod \
-    -l app.kubernetes.io/name=hiro-adaptive-orchestrator \
+  # inject_operator_env_vars already triggered a rolling update via kubectl set env.
+  # Just wait for that rollout to fully settle — no need to delete pods manually,
+  # which would race with the in-progress ReplicaSet transition.
+  step "Waiting for operator rollout to complete..."
+  kubectl rollout status deployment/"$DEPLOYMENT_NAME" \
     -n "$NAMESPACE" \
-    --timeout=180s
+    --timeout=300s
 
   kubectl get pods -n "$NAMESPACE"
 }

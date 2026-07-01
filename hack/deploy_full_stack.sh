@@ -350,14 +350,14 @@ deploy_mock_agent() {
 # ---------------------------------------------------------------------------
 
 wait_for_placement_server() {
+  local operator="${NAME_PREFIX}controller-manager"
   step "Phase 3 — Waiting for PlacementServer to be reachable..."
   echo "  Service : ${PLACEMENT_SERVICE_NAME}.${NAMESPACE}.svc.cluster.local${PLACEMENT_SERVER_PORT}"
-  echo "  Waiting for operator pod to be Ready..."
+  echo "  Waiting for operator deployment rollout..."
 
-  kubectl wait --for=condition=Ready pod \
-    -l app.kubernetes.io/name=hiro-adaptive-orchestrator \
+  kubectl rollout status deployment/"${operator}" \
     -n "$NAMESPACE" \
-    --timeout=120s
+    --timeout=300s
 
   echo "  PlacementServer is healthy."
 }
