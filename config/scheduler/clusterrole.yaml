@@ -37,6 +37,18 @@ rules:
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses", "csinodes", "csidrivers", "csistoragecapacities"]
     verbs: ["get", "list", "watch"]
+  # VolumeAttachments — required by the VolumeBinding scheduling plugin
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch"]
+  # Dynamic Resource Allocation (DRA) — k8s v1.31+
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaims", "resourceslices", "deviceclasses"]
+    verbs: ["get", "list", "watch"]
+  # ConfigMaps — extension-apiserver-authentication in kube-system (auth delegation)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
   # Namespace and events
   - apiGroups: [""]
     resources: ["namespaces"]

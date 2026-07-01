@@ -34,10 +34,16 @@ components:
 
 # [WEBHOOK] Mount the cert-manager Secret (optional) and expose port 9443.
 # optional: true means the pod starts safely before cert-manager issues the cert.
+# [NAMESPACE-EXCLUSION] Adds namespaceSelector to exclude system namespaces.
+# This is the static default; deploy_full_stack.sh Phase 4b replaces it with
+# WEBHOOK_EXCLUDE_NAMESPACES when that env var is set.
 patches:
 - path: manager_webhook_patch.yaml
   target:
     kind: Deployment
+- path: mwc_namespace_patch.yaml
+  target:
+    kind: MutatingWebhookConfiguration
 
 # ── Parameterized replacements ────────────────────────────────────────────────
 #

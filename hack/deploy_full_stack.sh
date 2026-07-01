@@ -62,6 +62,10 @@
 #   Phase 4b waits for the cert to be issued, enables the webhook, and restarts.
 #
 #   CERT_MANAGER_VERSION      cert-manager version to install (default: v1.17.2)
+#   WEBHOOK_EXCLUDE_NAMESPACES  comma-separated namespaces the webhook will NOT intercept
+#                               (default: kube-system,kube-public,kube-node-lease)
+#                               Phase 4b patches the MWC with this list at deploy time.
+#                               Always keep system namespaces in any custom list.
 #
 # ─── Deploy options ──────────────────────────────────────────────────────────
 #   DEPLOY_SCHEDULER_PLUGIN   true|false                  (default: false)
@@ -162,6 +166,9 @@ export SCHED_K8S_VERSION=${SCHED_K8S_VERSION:-v1.35.0}
 export SCHED_VERSION=${SCHED_VERSION:-v0.1.0}
 export HIRO_SCHEDULER_NAME=${HIRO_SCHEDULER_NAME:-hiro-scheduler}
 export CERT_MANAGER_VERSION=${CERT_MANAGER_VERSION:-v1.17.2}
+# Namespaces the webhook will NOT intercept (applied by Phase 4b kubectl patch).
+# Kustomize applies the same defaults statically; this allows deploy-time override.
+WEBHOOK_EXCLUDE_NAMESPACES=${WEBHOOK_EXCLUDE_NAMESPACES:-kube-system,kube-public,kube-node-lease}
 
 # ---------------------------------------------------------------------------
 # Deploy options — consumed by this script only
@@ -251,6 +258,7 @@ print_config() {
   echo "  ── Webhook TLS ───────────────────────────────────────────"
   echo "    TLS Provider           : cert-manager ${CERT_MANAGER_VERSION}"
   echo "    Webhook enabled        : $DEPLOY_SCHEDULER_PLUGIN  (Phase 4b)"
+  echo "    Excluded Namespaces    : ${WEBHOOK_EXCLUDE_NAMESPACES}"
   echo ""
   echo "  ── Deploy Options ────────────────────────────────────────"
   echo "    Mock Agent             : $USE_MOCK_AGENT"
@@ -378,6 +386,35 @@ deploy_scheduler_plugin() {
 }
 
 # ---------------------------------------------------------------------------
+# Webhook namespace exclusions — patches the MutatingWebhookConfiguration so
+# the webhook never intercepts pods in the specified namespaces.
+#
+# Called at the end of Phase 4b AFTER the MWC is live in the cluster.
+# The kustomize overlay (mwc_namespace_patch.yaml) applies the same defaults
+# statically; this call lets WEBHOOK_EXCLUDE_NAMESPACES override them.
+# ---------------------------------------------------------------------------
+
+configure_webhook_namespace_exclusions() {
+  local mwc="${NAME_PREFIX}mutating-webhook-configuration"
+
+  # Build a JSON array from the comma-separated namespace list.
+  local json_values="["
+  IFS=',' read -ra ns_array <<< "$WEBHOOK_EXCLUDE_NAMESPACES"
+  for ns in "${ns_array[@]}"; do
+    ns="${ns#"${ns%%[![:space:]]*}"}"   # trim leading whitespace
+    ns="${ns%"${ns##*[![:space:]]}"}"   # trim trailing whitespace
+    [[ -n "$ns" ]] && json_values+="\"$ns\","
+  done
+  json_values="${json_values%,}]"
+
+  echo "  Configuring webhook namespace exclusions: ${WEBHOOK_EXCLUDE_NAMESPACES}"
+  kubectl patch mutatingwebhookconfiguration "$mwc" \
+    --type=json \
+    -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/namespaceSelector\",\"value\":{\"matchExpressions\":[{\"key\":\"kubernetes.io/metadata.name\",\"operator\":\"NotIn\",\"values\":${json_values}}]}}]"
+  echo "  Webhook will not intercept pods in: ${WEBHOOK_EXCLUDE_NAMESPACES}"
+}
+
+# ---------------------------------------------------------------------------
 # Phase 4b — Enable pod scheduler webhook (DEPLOY_SCHEDULER_PLUGIN=true only)
 #
 # By this point Phase 0 has installed cert-manager and Phase 1 (make deploy)
@@ -429,6 +466,8 @@ deploy_scheduler_webhook() {
     -n "${NAMESPACE}" \
     --timeout=120s
   echo "  Webhook enabled and operator is ready."
+
+  configure_webhook_namespace_exclusions
 }
 
 # ---------------------------------------------------------------------------
