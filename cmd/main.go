@@ -41,6 +41,7 @@ import (
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/controller"
 	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
+	webhookv1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/webhook/v1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -303,11 +304,33 @@ func main() {
 		"eaoKind", eaoGVK.Kind,
 	)
 
+	enableWebhooks := os.Getenv("ENABLE_WEBHOOKS") != "false"
+	hiroSchedulerName := os.Getenv("HIRO_SCHEDULER_NAME")
+	if hiroSchedulerName == "" {
+		hiroSchedulerName = webhookv1.DefaultSchedulerName
+	}
+	setupLog.Info("webhook configured",
+		"enableWebhooks", enableWebhooks,
+		"schedulerName", hiroSchedulerName,
+	)
+
 	contextBuilder := placementserver.NewDecisionContextBuilder(
 		mgr.GetClient(),
 		controller.ProfileByAppRefIndex,
 		eaoGVK,
 	)
+
+	// Register the pod scheduler MutatingAdmissionWebhook.
+	// Sets spec.schedulerName automatically on pods governed by an OrchestrationProfile,
+	// removing the need for users to set it manually in their pod specs.
+	// Controlled by ENABLE_WEBHOOKS (default "false" in manager.yaml;
+	// set to "true" by hack/deploy_webhook.sh when deploying with the scheduler plugin).
+	if enableWebhooks {
+		if err := webhookv1.SetupPodWebhookWithManager(mgr, contextBuilder, hiroSchedulerName); err != nil {
+			setupLog.Error(err, "Failed to create webhook", "webhook", "Pod")
+			os.Exit(1)
+		}
+	}
 
 	// Create the DecisionClient with the External AI Agent URL and path.
 	// The client will be used by the PlacementServer to send placement decision requests to the AI agent.

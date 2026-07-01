@@ -113,7 +113,7 @@ func (b *DecisionContextBuilder) Build(
 	// Step 1: Find the OrchestrationProfile governing this pod.
 	// Use the app label from the pod to build the index key.
 	// -------------------------------------------------------------------------
-	profile, err := b.findProfileForPod(ctx, pod)
+	profile, err := b.FindProfileForPod(ctx, pod)
 	if err != nil {
 		return nil, fmt.Errorf("finding profile for pod %s/%s: %w",
 			pod.Namespace, pod.Name, err)
@@ -189,15 +189,12 @@ func (b *DecisionContextBuilder) Build(
 // Profile lookup
 // =============================================================================
 
-// findProfileForPod finds the OrchestrationProfile governing the pod's
+// FindProfileForPod finds the OrchestrationProfile governing the pod's
 // application using the field index for O(1) lookup.
 //
-// It tries two strategies in order:
-//  1. app label:              pod.Labels["app"]
-//  2. app.kubernetes.io/name: pod.Labels["app.kubernetes.io/name"]
-//
 // Returns nil (no error) if no profile is found — caller decides how to handle.
-func (b *DecisionContextBuilder) findProfileForPod(
+// Used by the placement server and the pod scheduler MutatingAdmissionWebhook.
+func (b *DecisionContextBuilder) FindProfileForPod(
 	ctx context.Context,
 	pod *corev1.Pod,
 ) (*orchestrationv1alpha1.OrchestrationProfile, error) {
@@ -426,7 +423,7 @@ func (b *DecisionContextBuilder) CheckEnergyGate(
 	ctx context.Context,
 	pod *corev1.Pod,
 ) (EnergyGateResponse, error) {
-	profile, err := b.findProfileForPod(ctx, pod)
+	profile, err := b.FindProfileForPod(ctx, pod)
 	if err != nil {
 		// Allow on lookup error -- do not block scheduling
 		return EnergyGateResponse{Allowed: true}, err

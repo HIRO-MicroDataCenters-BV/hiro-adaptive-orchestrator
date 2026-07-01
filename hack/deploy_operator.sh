@@ -27,6 +27,12 @@
 #   EXTENDER_FILTER_PATH      extender filter path        (default: /extender/filter)
 #   EXTENDER_PRIORITIZE_PATH  extender prioritize path    (default: /extender/prioritize)
 #
+# ─── Scheduler webhook (optional) ────────────────────────────────────────────
+#   DEPLOY_SCHEDULER_PLUGIN   true → use config/default-with-webhook overlay
+#                             false → use config/default (no webhook, no cert-manager)
+#                             (default: false)
+#   HIRO_SCHEDULER_NAME       scheduler name injected by the webhook (default: hiro-scheduler)
+#
 # ─── EnergyAwareOrchestration CRD ────────────────────────────────────────────
 #   EAO_GROUP                 CRD API group               (default: eas.hiro.io)
 #   EAO_VERSION               CRD API version             (default: v1)
@@ -69,6 +75,11 @@ export CR_PAT="$GITHUB_PAT_TOKEN"
 # Kustomize deployment identity
 export NAME_PREFIX=${NAME_PREFIX:-hiro-adaptive-orchestrator-}
 export NAMESPACE=${NAMESPACE:-hiro-adaptive-orchestrator-system}
+
+# Scheduler webhook — set DEPLOY_SCHEDULER_PLUGIN=true to deploy with cert-manager TLS.
+# PREREQUISITE when true: cert-manager must already be installed before this script runs.
+DEPLOY_SCHEDULER_PLUGIN=${DEPLOY_SCHEDULER_PLUGIN:-false}
+export HIRO_SCHEDULER_NAME=${HIRO_SCHEDULER_NAME:-hiro-scheduler}
 
 # Derived names (kubebuilder convention: <NAME_PREFIX>controller-manager)
 SA_NAME="${NAME_PREFIX}controller-manager"
@@ -118,6 +129,7 @@ print_config() {
   echo "Deployment         : $DEPLOYMENT_NAME  (derived)"
   echo "Operator Image     : $IMG"
   echo "Kubeconfig         : $KUBECONFIG"
+  echo "Scheduler Plugin   : $DEPLOY_SCHEDULER_PLUGIN  (overlay: $([ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ] && echo config/default-with-webhook || echo config/default))"
   echo "EAO CRD            : $EAO_GROUP/$EAO_VERSION, Kind=$EAO_KIND"
   echo "PlacementServer    : Service=$PLACEMENT_SERVICE_NAME  Port=$PLACEMENT_SERVER_PORT  Path=$PLACEMENT_SCORE_PATH  Health=$PLACEMENT_SERVER_HEALTH_PATH"
   echo "Extender Filter    : $EXTENDER_FILTER_PATH"
@@ -161,10 +173,13 @@ configure_kustomize() {
   step "Configuring Kustomize (namespace=$NAMESPACE, namePrefix=$NAME_PREFIX)..."
   (cd "$REPO_ROOT/config/default" && "$KUSTOMIZE" edit set namespace "$NAMESPACE")
   (cd "$REPO_ROOT/config/default" && "$KUSTOMIZE" edit set nameprefix "$NAME_PREFIX")
+  if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
+    (cd "$REPO_ROOT/config/default-with-webhook" && "$KUSTOMIZE" edit set namespace "$NAMESPACE")
+    (cd "$REPO_ROOT/config/default-with-webhook" && "$KUSTOMIZE" edit set nameprefix "$NAME_PREFIX")
+  fi
 }
 
 deploy_operator() {
-  step "Deploying operator via Kustomize..."
   # Strip NAME_PREFIX to get the base name kustomize will expand back with namePrefix.
   # e.g. PLACEMENT_SERVICE_NAME=hiro-adaptive-orchestrator-my-svc → base=my-svc
   #      kustomize namePrefix hiro-adaptive-orchestrator- + my-svc → hiro-adaptive-orchestrator-my-svc ✓
@@ -172,7 +187,14 @@ deploy_operator() {
   sed -i.bak "s/name: controller-manager-placement-service/name: ${desired_base}/" \
     "$REPO_ROOT/config/manager/placement_service_patch.yaml"
   rm -f "$REPO_ROOT/config/manager/placement_service_patch.yaml.bak"
-  make deploy IMG="$IMG"
+
+  if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
+    step "Deploying operator + webhook overlay via Kustomize (config/default-with-webhook)..."
+    make deploy-scheduler IMG="$IMG"
+  else
+    step "Deploying operator via Kustomize (config/default)..."
+    make deploy IMG="$IMG"
+  fi
 }
 
 create_image_pull_secret() {

@@ -88,6 +88,10 @@ spec:
           value: "/extender/filter"
         - name: EXTENDER_PRIORITIZE_PATH
           value: "/extender/prioritize"
+        - name: ENABLE_WEBHOOKS
+          value: "false"
+        - name: HIRO_SCHEDULER_NAME
+          value: "hiro-scheduler"
         ports: 
         - containerPort: 8090 # Update with actual Placement Server port
           name: placement-srv

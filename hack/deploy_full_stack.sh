@@ -47,6 +47,21 @@
 # ─── Scheduler ───────────────────────────────────────────────────────────────
 #   SCHED_K8S_VERSION         k8s version to build for    (default: v1.35.0)
 #   SCHED_VERSION             scheduler release version   (default: v0.1.0)
+#   HIRO_SCHEDULER_NAME       name of the custom scheduler (default: hiro-scheduler)
+#                             Injected by the webhook into spec.schedulerName.
+#                             Must match the scheduler Deployment in config/scheduler/.
+#
+# ─── Webhook TLS (Phase 4b — pod scheduler MutatingAdmissionWebhook) ─────────
+#   When DEPLOY_SCHEDULER_PLUGIN=true, Phase 4b deploys the webhook that
+#   automatically sets spec.schedulerName = HIRO_SCHEDULER_NAME on pods governed
+#   by an OrchestrationProfile. TLS is required for Kubernetes admission webhooks.
+#
+#   This project uses cert-manager (free, open-source — CNCF project).
+#   Phase 0 installs cert-manager (idempotent) and waits for it to be ready.
+#   Phase 1 (make deploy) applies Issuer + Certificate via config/default.
+#   Phase 4b waits for the cert to be issued, enables the webhook, and restarts.
+#
+#   CERT_MANAGER_VERSION      cert-manager version to install (default: v1.17.2)
 #
 # ─── Deploy options ──────────────────────────────────────────────────────────
 #   DEPLOY_SCHEDULER_PLUGIN   true|false                  (default: false)
@@ -145,6 +160,8 @@ export EAO_KIND=${EAO_KIND:-EnergyAwareOrchestration}
 
 export SCHED_K8S_VERSION=${SCHED_K8S_VERSION:-v1.35.0}
 export SCHED_VERSION=${SCHED_VERSION:-v0.1.0}
+export HIRO_SCHEDULER_NAME=${HIRO_SCHEDULER_NAME:-hiro-scheduler}
+export CERT_MANAGER_VERSION=${CERT_MANAGER_VERSION:-v1.17.2}
 
 # ---------------------------------------------------------------------------
 # Deploy options — consumed by this script only
@@ -229,12 +246,65 @@ print_config() {
   echo "  ── Scheduler ─────────────────────────────────────────────"
   echo "    K8s Target Version     : $SCHED_K8S_VERSION"
   echo "    Scheduler Version      : $SCHED_VERSION"
+  echo "    Scheduler Name         : $HIRO_SCHEDULER_NAME"
+  echo ""
+  echo "  ── Webhook TLS ───────────────────────────────────────────"
+  echo "    TLS Provider           : cert-manager ${CERT_MANAGER_VERSION}"
+  echo "    Webhook enabled        : $DEPLOY_SCHEDULER_PLUGIN  (Phase 4b)"
   echo ""
   echo "  ── Deploy Options ────────────────────────────────────────"
   echo "    Mock Agent             : $USE_MOCK_AGENT"
   echo "    Scheduler Plugin       : $DEPLOY_SCHEDULER_PLUGIN"
   echo "    Extender               : $DEPLOY_EXTENDER"
   echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Phase 0 — Prerequisites
+#
+# Installs cluster-level tools that must be present before the main kustomize
+# apply in Phase 1.  Add new prerequisites here as the stack grows.
+#
+# Current prerequisites (conditional):
+#   cert-manager  — required when DEPLOY_SCHEDULER_PLUGIN=true because
+#                   config/default/kustomization.yaml includes ../certmanager
+#                   (Issuer + Certificate CRDs) and they must exist before
+#                   kustomize build | kubectl apply runs in make deploy.
+# ---------------------------------------------------------------------------
+
+install_prerequisites() {
+  step "Phase 0 — Installing prerequisites..."
+
+  # ── cert-manager ────────────────────────────────────────────────────────
+  # Required when the scheduler webhook is enabled (includes cert-manager
+  # Issuer + Certificate resources in the main kustomize deploy).
+  if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
+    echo "  [cert-manager] DEPLOY_SCHEDULER_PLUGIN=true — installing cert-manager ${CERT_MANAGER_VERSION}..."
+
+    local cm_url="https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+
+    if kubectl get deployment cert-manager -n cert-manager &>/dev/null; then
+      local installed
+      installed=$(kubectl get deployment cert-manager -n cert-manager \
+        -o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}' 2>/dev/null || echo "unknown")
+      echo "  [cert-manager] Already installed (version: ${installed}). Skipping."
+    else
+      kubectl apply -f "${cm_url}"
+      echo "  [cert-manager] Applied."
+    fi
+
+    kubectl wait deployment/cert-manager \
+      -n cert-manager --for=condition=Available --timeout=120s
+    kubectl wait deployment/cert-manager-webhook \
+      -n cert-manager --for=condition=Available --timeout=120s
+    kubectl wait deployment/cert-manager-cainjector \
+      -n cert-manager --for=condition=Available --timeout=120s
+    echo "  [cert-manager] Ready."
+  else
+    echo "  [cert-manager] Skipped (DEPLOY_SCHEDULER_PLUGIN=false)."
+  fi
+
+  # ── Add future prerequisites here ───────────────────────────────────────
 }
 
 # ---------------------------------------------------------------------------
@@ -308,6 +378,60 @@ deploy_scheduler_plugin() {
 }
 
 # ---------------------------------------------------------------------------
+# Phase 4b — Enable pod scheduler webhook (DEPLOY_SCHEDULER_PLUGIN=true only)
+#
+# By this point Phase 0 has installed cert-manager and Phase 1 (make deploy)
+# has applied everything in config/default:
+#   - self-signed Issuer + webhook Certificate  (config/certmanager)
+#   - webhook Service + MutatingWebhookConfiguration  (config/webhook)
+#   - operator Deployment with cert volume (optional) + port 9443
+#
+# cert-manager starts issuing the TLS cert after Phase 1 applies the
+# Certificate resource.  We must wait for the cert Secret before flipping
+# ENABLE_WEBHOOKS=true — if the operator starts without certs it crashes.
+# ---------------------------------------------------------------------------
+
+deploy_scheduler_webhook() {
+  if [ "$DEPLOY_SCHEDULER_PLUGIN" != "true" ]; then
+    step "Phase 4b — Skipping webhook                (DEPLOY_SCHEDULER_PLUGIN=false)."
+    echo "  Webhook is only deployed with the scheduler plugin."
+    return
+  fi
+
+  local operator="${NAME_PREFIX}controller-manager"
+  local cert="${NAME_PREFIX}serving-cert"
+
+  step "Phase 4b — Enabling pod scheduler webhook..."
+
+  # Wait for cert-manager to issue the TLS certificate before enabling the
+  # webhook server — the operator crashes if ENABLE_WEBHOOKS=true and the
+  # cert Secret does not exist yet.
+  echo "  Waiting for cert-manager to issue certificate '${cert}'..."
+  sleep 5
+  kubectl wait certificate "${cert}" \
+    -n "${NAMESPACE}" \
+    --for=condition=Ready \
+    --timeout=120s
+  echo "  Certificate is Ready."
+
+  # Flip ENABLE_WEBHOOKS=true now that the cert Secret exists.
+  # HIRO_SCHEDULER_NAME is already set in config/manager/manager.yaml;
+  # passing it here lets the user override it via the env var.
+  kubectl set env deployment/"${operator}" \
+    -n "${NAMESPACE}" \
+    ENABLE_WEBHOOKS=true \
+    HIRO_SCHEDULER_NAME="${HIRO_SCHEDULER_NAME}"
+  echo "  ENABLE_WEBHOOKS=true set (schedulerName=${HIRO_SCHEDULER_NAME})."
+
+  # Restart so the operator picks up the new env and mounts the cert Secret.
+  kubectl rollout restart deployment/"${operator}" -n "${NAMESPACE}"
+  kubectl rollout status deployment/"${operator}" \
+    -n "${NAMESPACE}" \
+    --timeout=120s
+  echo "  Webhook enabled and operator is ready."
+}
+
+# ---------------------------------------------------------------------------
 # Phase 5 — Extender (opt-in: DEPLOY_EXTENDER=true)
 # ---------------------------------------------------------------------------
 
@@ -340,9 +464,11 @@ print_summary() {
     echo -e "\033[33m    Mock Agent      : not deployed  (using real agent)\033[0m"
   fi
   if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
-    echo -e "\033[32m    Scheduler Plugin: deployed  (opt-in: schedulerName=hiro-scheduler)\033[0m"
+    echo -e "\033[32m    Scheduler Plugin: deployed  (opt-in: schedulerName=${HIRO_SCHEDULER_NAME})\033[0m"
+    echo -e "\033[32m    Webhook (mutator): deployed  (auto-sets schedulerName, TLS via cert-manager)\033[0m"
   else
     echo -e "\033[33m    Scheduler Plugin: not deployed\033[0m"
+    echo -e "\033[33m    Webhook (mutator): not deployed\033[0m"
   fi
   if [ "$DEPLOY_EXTENDER" = "true" ]; then
     echo -e "\033[32m    Extender        : deployed  (all pods via default scheduler)\033[0m"
@@ -360,10 +486,12 @@ main() {
   validate_inputs
   print_config
 
+  install_prerequisites
   deploy_oprator_with_samples
   deploy_mock_agent
   wait_for_placement_server
   deploy_scheduler_plugin
+  deploy_scheduler_webhook
   deploy_extender
 
   print_summary
