@@ -260,7 +260,16 @@ For a detailed function-level trace of every call in this path see [docs/schedul
 deploy_full_stack.sh  (master parameter sheet — all vars defined here)
         │  exports every variable
         │
+        ├──► Phase 0: install_prerequisites  (when DEPLOY_SCHEDULER_PLUGIN=true)
+        │         kubectl apply -f cert-manager.yaml (idempotent)
+        │         kubectl wait deployment/cert-manager* --for=condition=Available
+        │
         ├──► Phase 1: deploy_operator.sh
+        │         │
+        │         ├─ DEPLOY_SCHEDULER_PLUGIN=false → make deploy     (config/default)
+        │         ├─ DEPLOY_SCHEDULER_PLUGIN=true  → make deploy-scheduler (config/default-with-webhook)
+        │         │     Deploys: Issuer + Certificate + webhook Service + MutatingWebhookConfiguration
+        │         │     ENABLE_WEBHOOKS=false in manager.yaml → operator starts without webhook server
         │         │
         │         ├─ sed placement_service_patch.yaml base name
         │         │       → kustomize applies NAME_PREFIX
@@ -278,7 +287,7 @@ deploy_full_stack.sh  (master parameter sheet — all vars defined here)
         │         mock-decision-agent Service → http://mock-decision-agent:8080
         │
         ├──► Phase 3: wait_for_placement_server
-        │         kubectl wait pod -l app.kubernetes.io/name=hiro-adaptive-orchestrator --for=condition=Ready
+        │         kubectl rollout status deployment/<NAME_PREFIX>controller-manager
         │
         ├──► Phase 4: deploy_scheduler.sh  (when DEPLOY_SCHEDULER_PLUGIN=true)
         │         kustomize build config/scheduler/ | sed (patches pluginConfig)
@@ -288,6 +297,16 @@ deploy_full_stack.sh  (master parameter sheet — all vars defined here)
         │         hiro-scheduler pod mounts ConfigMap
         │                 ▼
         │         HIROScore.New() reads pluginConfig.args → NewPlacementClient(url, path, timeout)
+        │         ghcr-secret attached to scheduler ServiceAccount → image pull succeeds
+        │
+        ├──► Phase 4b: deploy_scheduler_webhook  (when DEPLOY_SCHEDULER_PLUGIN=true)
+        │         kubectl wait certificate <NAME_PREFIX>serving-cert --for=condition=Ready
+        │         kubectl set env deployment/... ENABLE_WEBHOOKS=true HIRO_SCHEDULER_NAME=...
+        │         kubectl rollout restart + rollout status
+        │                 ▼
+        │           Operator restarts with webhook server active
+        │           MutatingWebhookConfiguration CA bundle already injected by cert-manager ca-injector
+        │           Pods governed by OrchestrationProfile → spec.schedulerName auto-set to hiro-scheduler
         │
         └──► Phase 5: deploy_extender.sh  (when DEPLOY_EXTENDER=true)
                   resolve_placement_url()
@@ -361,7 +380,9 @@ hack/deploy_full_stack.sh
 # Operator + mock agent + extender (patches default kube-scheduler)
 DEPLOY_EXTENDER=true hack/deploy_full_stack.sh
 
-# Operator + mock agent + custom scheduler plugin (pods opt in via schedulerName)
+# Operator + mock agent + custom scheduler plugin + mutating webhook
+# Installs cert-manager, deploys webhook overlay, and auto-enables TLS.
+# Pods governed by an OrchestrationProfile automatically get schedulerName: hiro-scheduler.
 DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_full_stack.sh
 
 # Real AI agent, custom namespace
@@ -385,15 +406,19 @@ export GITHUB_PAT_TOKEN=<token>
 DEPLOY_EXTENDER=true hack/deploy_full_stack.sh [kubeconfig-path]
 ```
 
-Runs five phases in order:
+Runs these phases in order:
 
 | Phase | What runs | Condition |
 |-------|-----------|-----------|
-| 1 | `deploy_operator.sh` — build, push, and deploy the operator | Always |
+| 0 | `install_prerequisites` — install cert-manager and wait for it to be ready | `DEPLOY_SCHEDULER_PLUGIN=true` |
+| 1 | `deploy_operator.sh` — build, push, and deploy the operator (base or webhook overlay) | Always |
 | 2 | `deploy_mock_agent` — deploy `hack/mock_decision_agent.yaml` into the operator namespace | `USE_MOCK_AGENT=true` (default) |
-| 3 | `wait_for_placement_server` — wait for the operator pod to be Ready | Always |
+| 3 | `wait_for_placement_server` — wait for operator deployment rollout to complete | Always |
 | 4 | `deploy_scheduler.sh` — build, push, and deploy the HIRO scheduler pod | `DEPLOY_SCHEDULER_PLUGIN=true` |
+| 4b | `deploy_scheduler_webhook` — wait for cert-manager to issue the TLS cert, then set `ENABLE_WEBHOOKS=true` and restart the operator | `DEPLOY_SCHEDULER_PLUGIN=true` |
 | 5 | `deploy_extender.sh` — resolve ClusterIP, apply ConfigMap, patch kube-scheduler | `DEPLOY_EXTENDER=true` |
+
+> **Phase 4b two-phase design:** The operator starts with `ENABLE_WEBHOOKS=false` (set in `config/manager/manager.yaml`). cert-manager issues the TLS certificate after Phase 1 applies the `Certificate` resource. Phase 4b waits for the cert `Secret` to exist before flipping `ENABLE_WEBHOOKS=true` — if the webhook server starts before the cert is ready the operator crashes. The cert volume is mounted `optional: true` so the operator pod starts safely in the interim.
 
 ### Operator Only
 
@@ -407,11 +432,11 @@ Steps performed:
 2. Build and push operator Docker image to GHCR
 3. Configure Kustomize (namespace + namePrefix)
 4. Patch `placement_service_patch.yaml` with the derived base name so kustomize produces `PLACEMENT_SERVICE_NAME` as the Service name
-5. Deploy operator via `make deploy`
+5. Deploy operator — `make deploy` (base, no webhook) or `make deploy-scheduler` (with webhook + cert-manager) based on `DEPLOY_SCHEDULER_PLUGIN`
 6. Create GHCR image pull secret
 7. Patch ServiceAccount with pull secret
 8. Inject environment variables into the operator Deployment
-9. Restart operator pod and wait for Ready
+9. Wait for deployment rollout via `kubectl rollout status`
 10. Apply sample `OrchestrationProfile` resources
 
 > **Mock agent:** when running `deploy_operator.sh` standalone with `USE_MOCK_AGENT=true`, deploy the mock agent separately:
@@ -434,11 +459,13 @@ hack/deploy_scheduler.sh [kubeconfig-path]
 ```
 
 Steps performed:
-1. Build and push scheduler Docker image (`hiro-scheduler:<version>-k8s<K8S_VERSION>`)
-2. Configure Kustomize for `config/scheduler/` (namespace, namePrefix, image)
-3. Patch `KubeSchedulerConfiguration` ConfigMap with placement server URL/path/timeout
-4. Apply manifests (ServiceAccount, ClusterRole, ClusterRoleBinding, ConfigMap, Deployment)
-5. Wait for scheduler deployment rollout
+1. Build scheduler Docker image (build context: repo root; Dockerfile: `scheduler-plugin/Dockerfile`)
+2. Push to GHCR — `hiro-scheduler:<SCHED_VERSION>-k8sv<SCHED_K8S_VERSION>`
+3. Configure Kustomize for `config/scheduler/` (namespace, namePrefix, image)
+4. Patch `KubeSchedulerConfiguration` ConfigMap with placement server URL/path/timeout
+5. Apply manifests (ServiceAccount, ClusterRole, ClusterRoleBinding, ConfigMap, Deployment)
+6. Create `ghcr-secret` and attach to the scheduler ServiceAccount (required to pull from private GHCR)
+7. Rollout restart and wait for scheduler deployment
 
 ### Extender Only
 
@@ -465,7 +492,13 @@ See [Extender Approach](#extender-approach) for the full step-by-step breakdown.
 ```bash
 export IMG=<registry>/<image>:<tag>
 make docker-build docker-push IMG=$IMG
+
+# Base deploy — operator only, no webhook
 make deploy IMG=$IMG
+
+# Webhook overlay — operator + MutatingWebhook + cert-manager TLS
+# Requires cert-manager to already be installed.
+make deploy-scheduler IMG=$IMG
 
 # Tear down
 make undeploy && make uninstall
@@ -556,11 +589,18 @@ Every parameter can be set as an environment variable before calling any deploy 
 | `SCHED_K8S_VERSION` | `v1.35.0` | Kubernetes minor version the scheduler binary is compiled against |
 | `SCHED_VERSION` | `v0.1.0` | Scheduler release version (used in the Docker image tag) |
 
+#### Scheduler Plugin + Webhook
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEPLOY_SCHEDULER_PLUGIN` | `false` | `true` → deploy `hiro-scheduler` pod (Phase 4) + mutating webhook (Phase 4b); use `make deploy-scheduler` overlay |
+| `HIRO_SCHEDULER_NAME` | `hiro-scheduler` | Scheduler name the webhook injects into `spec.schedulerName`; must match the scheduler Deployment |
+| `CERT_MANAGER_VERSION` | `v1.17.2` | cert-manager release installed by Phase 0 when `DEPLOY_SCHEDULER_PLUGIN=true` |
+
 #### Deploy Options
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DEPLOY_SCHEDULER_PLUGIN` | `false` | Set to `true` to deploy the HIRO custom scheduler pod (Phase 4) |
 | `DEPLOY_EXTENDER` | `false` | Set to `true` to deploy the extender and patch kube-scheduler (Phase 5) |
 
 > `DEPLOY_SCHEDULER_PLUGIN` and `DEPLOY_EXTENDER` are mutually exclusive in practice — choose one scheduler integration approach per cluster.
@@ -569,7 +609,7 @@ Every parameter can be set as an environment variable before calling any deploy 
 
 ### Operator Environment Variables
 
-The operator pod reads configuration exclusively from environment variables injected by `deploy_operator.sh` via `kubectl set env`.
+The operator pod reads configuration exclusively from environment variables — set in `config/manager/manager.yaml` and overridden at deploy time by `deploy_operator.sh` via `kubectl set env`.
 
 | Variable | Default | Read by |
 |----------|---------|---------|
@@ -583,6 +623,8 @@ The operator pod reads configuration exclusively from environment variables inje
 | `EAO_GROUP` | `eas.hiro.io` | `decision.NewDecisionContextBuilder` |
 | `EAO_VERSION` | `v1` | `decision.NewDecisionContextBuilder` |
 | `EAO_KIND` | `EnergyAwareOrchestration` | `decision.NewDecisionContextBuilder` |
+| `ENABLE_WEBHOOKS` | `false` | `cmd/main.go` — starts the webhook server when `!= "false"`; set to `true` by Phase 4b after the TLS cert is ready |
+| `HIRO_SCHEDULER_NAME` | `hiro-scheduler` | `cmd/main.go` → `SetupPodWebhookWithManager` — the name injected into `spec.schedulerName` |
 
 ---
 
@@ -648,7 +690,9 @@ spec:
   schedulerName: hiro-scheduler
 ```
 
-Pods without `schedulerName` use the default scheduler. When the extender approach is deployed, the default scheduler calls HIRO automatically for all pods.
+**When `DEPLOY_SCHEDULER_PLUGIN=true`, you do not need to set `schedulerName` manually.** The `MutatingAdmissionWebhook` automatically sets `spec.schedulerName: hiro-scheduler` on any pod whose owning workload is referenced by an `OrchestrationProfile`. The webhook runs at pod CREATE time with `failurePolicy: Ignore` — pods are never blocked if the webhook is unavailable.
+
+Pods without `schedulerName` (and not covered by a profile) use the default scheduler. When the extender approach is deployed, the default scheduler calls HIRO automatically for all pods.
 
 #### Placement Strategies
 
@@ -679,22 +723,41 @@ kubectl describe orchestrationprofile <name>
 
 ### Plugin Approach (recommended)
 
-Deploys `hiro-scheduler` as a standalone scheduler pod. Pods explicitly opt in by setting `spec.schedulerName: hiro-scheduler`. The default `kube-scheduler` continues to handle all other pods.
+Deploys `hiro-scheduler` as a standalone scheduler pod. Pods opt in by setting `spec.schedulerName: hiro-scheduler` (manually or automatically via the mutating webhook). The default `kube-scheduler` continues to handle all other pods.
 
 **Pros:** Clean separation, no changes to existing workloads, per-pod opt-in, HA-ready (2 replicas with leader election).
 
 ```bash
-# Deploy (operator must be running first)
+# Full deploy — installs cert-manager, deploys webhook overlay, enables webhook after TLS cert is ready
 DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_full_stack.sh
-# or standalone:
+
+# Standalone scheduler deploy (operator must already be running)
 hack/deploy_scheduler.sh
 
 # Verify
 kubectl get pods -n hiro-adaptive-orchestrator-system -l app=hiro-scheduler
 kubectl logs -n hiro-adaptive-orchestrator-system deployment/hiro-adaptive-orchestrator-hiro-scheduler
 
-# Pin a workload to the HIRO scheduler
+# Manually pin a workload (not needed if webhook is enabled — it does this automatically)
 kubectl patch deployment my-app -p '{"spec":{"template":{"spec":{"schedulerName":"hiro-scheduler"}}}}'
+```
+
+#### Mutating Webhook (auto-schedulerName injection)
+
+When `DEPLOY_SCHEDULER_PLUGIN=true`, a `MutatingAdmissionWebhook` is deployed alongside the scheduler. It intercepts pod CREATE requests and sets `spec.schedulerName: hiro-scheduler` on any pod whose owning Deployment/StatefulSet/Job is referenced by an `OrchestrationProfile`. Users do not need to touch pod templates.
+
+TLS is provisioned entirely by cert-manager — a self-signed `Issuer` and `Certificate` are created automatically by the `config/default-with-webhook` Kustomize overlay. The operator starts with `ENABLE_WEBHOOKS=false`; Phase 4b of `deploy_full_stack.sh` waits for the cert `Secret` to be issued and then enables the webhook via `kubectl set env ENABLE_WEBHOOKS=true`.
+
+```bash
+# Verify webhook is live
+kubectl get mutatingwebhookconfiguration hiro-adaptive-orchestrator-mutating-webhook-configuration
+kubectl get secret hiro-adaptive-orchestrator-webhook-server-cert -n hiro-adaptive-orchestrator-system
+
+# Check operator has webhook enabled
+kubectl get deployment hiro-adaptive-orchestrator-controller-manager \
+  -n hiro-adaptive-orchestrator-system \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="ENABLE_WEBHOOKS")].value}'
+# Expected: true
 ```
 
 To build the scheduler for a different Kubernetes version:
@@ -909,6 +972,9 @@ internal/
     extender_types.go                  # Kubernetes scheduler extender protocol types
                                        #   ExtenderArgs, ExtenderFilterResult, HostPriorityList,
                                        #   HostPriority, EnergyGateResult
+  webhook/v1/
+    pod_webhook.go                     # PodCustomDefaulter — sets spec.schedulerName on governed pods
+                                       # Soft-fail: profile lookup errors allow pod unchanged
   utils/
     helpers.go                         # ResolveAppFromPod, KeysOf, NodeNames
 scheduler-plugin/                      # Separate Go module (own go.mod)
@@ -937,11 +1003,26 @@ config/
     scheduler-config.yaml              # Extender KubeSchedulerConfiguration template
                                        # (urlPrefix uses DNS; deploy_extender.sh substitutes ClusterIP)
   samples/                             # Example OrchestrationProfile + nginx Deployment
-  default/                             # Kustomize overlay (namespace, namePrefix)
+  components/
+    metrics/                           # Kustomize Component — metrics Service + manager_metrics_patch.yaml
+                                       # Shared by config/default and config/default-with-webhook
+  default/                             # Kustomize base — operator only, no webhook
+  default-with-webhook/                # Kustomize overlay — operator + MutatingWebhook + cert-manager TLS
+                                       # Used by make deploy-scheduler; replacements: block derives all
+                                       # Certificate dnsNames and MWC CA annotation from resource names
+                                       # (no hardcoded values)
+  webhook/
+    service.yaml                       # Webhook Service (port 443 → 9443)
+    manifests.yaml                     # MutatingWebhookConfiguration (failurePolicy: Ignore, CREATE only)
+  certmanager/
+    certificate-webhook.yaml           # cert-manager Certificate for webhook TLS
+    certificate-metrics.yaml           # cert-manager Certificate for metrics TLS
+    issuer.yaml                        # Self-signed Issuer
+    kustomizeconfig.yaml               # nameReference: Issuer → Certificate.spec.issuerRef
 hack/
-  deploy_full_stack.sh                 # Full-stack entry point (5 phases) — all parameters defined here
-  deploy_operator.sh                   # Operator-only deploy
-  deploy_scheduler.sh                  # Scheduler-only deploy
+  deploy_full_stack.sh                 # Full-stack entry point (phases 0–5) — all parameters defined here
+  deploy_operator.sh                   # Operator-only deploy (base or webhook overlay per DEPLOY_SCHEDULER_PLUGIN)
+  deploy_scheduler.sh                  # Scheduler-only deploy (build → push → kustomize → pull secret → rollout)
   deploy_extender.sh                   # Extender deploy: resolve ClusterIP → ConfigMap → privileged Job → kubelet restart
   undeploy_extender.sh                 # Roll back: restore original kube-scheduler manifest
   patch_scheduler_static_pod.py        # Patch Job script: adds --config, hostPath volume, and
