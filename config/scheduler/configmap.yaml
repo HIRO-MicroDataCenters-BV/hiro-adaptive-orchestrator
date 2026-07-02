@@ -4,8 +4,9 @@
 # to be scheduled by this scheduler instead of the default kube-scheduler.
 #
 # HIROScore is registered at the filter, preScore, and score extension points.
-# Default scoring plugins are kept (additive) so node resource fit, topology
-# spread, etc. still apply alongside HIRO's energy-aware scores.
+# Default scoring plugins remain active (additive) so resource fit, topology
+# spread, etc. still gate candidate nodes — but HIROScore runs at weight=10,
+# outweighing any single default plugin 10:1 so the AI recommendation dominates.
 #
 # leaderElection: uses kube-system as the lease namespace, matching the
 # kube-scheduler convention. The lease name (hiro-scheduler) is distinct
@@ -38,6 +39,7 @@ data:
           score:
             enabled:
               - name: HIROScore
+                weight: 10    # HIROScore outweighs any single default plugin 10:1
         pluginConfig:
           - name: HIROScore
             args:

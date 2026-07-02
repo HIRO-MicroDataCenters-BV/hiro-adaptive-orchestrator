@@ -54,7 +54,8 @@ export NAMESPACE=${NAMESPACE:-hiro-adaptive-orchestrator-system}
 
 SCHED_K8S_VERSION=${SCHED_K8S_VERSION:-v1.35.0}
 SCHED_VERSION=${SCHED_VERSION:-v0.1.0}
-SCHED_IMG="ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/hiro-scheduler:${SCHED_VERSION}-k8s${SCHED_K8S_VERSION}"
+GIT_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+SCHED_IMG="ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/hiro-scheduler:${SCHED_VERSION}-k8s${SCHED_K8S_VERSION}-${GIT_SHA}"
 
 PLACEMENT_SERVER_PORT=${PLACEMENT_SERVER_PORT:-:8090}
 PLACEMENT_SCORE_PATH=${PLACEMENT_SCORE_PATH:-/api/v1/placement/score}
