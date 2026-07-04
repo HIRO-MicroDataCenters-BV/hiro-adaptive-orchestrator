@@ -51,20 +51,20 @@
 #                             Injected by the webhook into spec.schedulerName.
 #                             Must match the scheduler Deployment in config/scheduler/.
 #
-# ─── Webhook TLS (Phase 7 — pod scheduler MutatingAdmissionWebhook) ──────────
-#   When DEPLOY_SCHEDULER_PLUGIN=true, Phase 7 deploys the webhook that
+# ─── Webhook TLS (Phase 8 — pod scheduler MutatingAdmissionWebhook) ──────────
+#   When DEPLOY_SCHEDULER_PLUGIN=true, Phase 8 deploys the webhook that
 #   automatically sets spec.schedulerName = HIRO_SCHEDULER_NAME on pods governed
 #   by an OrchestrationProfile. TLS is required for Kubernetes admission webhooks.
 #
 #   This project uses cert-manager (free, open-source — CNCF project).
 #   Phase 2 installs cert-manager (idempotent) and waits for it to be ready.
-#   Phase 3 (make deploy) applies Issuer + Certificate via config/default.
-#   Phase 7 waits for the cert to be issued, enables the webhook, and restarts.
+#   Phase 4 (make deploy) applies Issuer + Certificate via config/default.
+#   Phase 8 waits for the cert to be issued, enables the webhook, and restarts.
 #
 #   CERT_MANAGER_VERSION      cert-manager version to install (default: v1.17.2)
 #   WEBHOOK_EXCLUDE_NAMESPACES  comma-separated namespaces the webhook will NOT intercept
 #                               (default: kube-system,kube-public,kube-node-lease)
-#                               Phase 7 patches the MWC with this list at deploy time.
+#                               Phase 8 patches the MWC with this list at deploy time.
 #                               Always keep system namespaces in any custom list.
 #
 # ─── Deploy options ──────────────────────────────────────────────────────────
@@ -166,7 +166,7 @@ export SCHED_K8S_VERSION=${SCHED_K8S_VERSION:-v1.35.0}
 export SCHED_VERSION=${SCHED_VERSION:-v0.1.0}
 export HIRO_SCHEDULER_NAME=${HIRO_SCHEDULER_NAME:-hiro-scheduler}
 export CERT_MANAGER_VERSION=${CERT_MANAGER_VERSION:-v1.17.2}
-# Namespaces the webhook will NOT intercept (applied by Phase 7 kubectl patch).
+# Namespaces the webhook will NOT intercept (applied by Phase 8 kubectl patch).
 # Kustomize applies the same defaults statically; this allows deploy-time override.
 WEBHOOK_EXCLUDE_NAMESPACES=${WEBHOOK_EXCLUDE_NAMESPACES:-kube-system,kube-public,kube-node-lease}
 
@@ -257,7 +257,7 @@ print_config() {
   echo ""
   echo "  ── Webhook TLS ───────────────────────────────────────────"
   echo "    TLS Provider           : cert-manager ${CERT_MANAGER_VERSION}"
-  echo "    Webhook enabled        : $DEPLOY_SCHEDULER_PLUGIN  (Phase 7)"
+  echo "    Webhook enabled        : $DEPLOY_SCHEDULER_PLUGIN  (Phase 8)"
   echo "    Excluded Namespaces    : ${WEBHOOK_EXCLUDE_NAMESPACES}"
   echo ""
   echo "  ── Deploy Options ────────────────────────────────────────"
@@ -268,7 +268,7 @@ print_config() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 1 — Cleanup
+# Phase 3 — Cleanup
 #
 # Detects and tears down the opposing scheduler integration so the cluster is
 # never in a mixed state.  At most one of (plugin, extender) is active at a time.
@@ -317,7 +317,7 @@ uninstall_scheduler_plugin_if_running() {
 }
 
 cleanup_conflicting_integration() {
-  step "Phase 1 — Cleanup: removing conflicting scheduler integration if any..."
+  step "Phase 3 — Cleanup: removing conflicting scheduler integration if any..."
   if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
     uninstall_extender_if_running
   elif [ "$DEPLOY_EXTENDER" = "true" ]; then
@@ -328,10 +328,81 @@ cleanup_conflicting_integration() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 2 — Prerequisites
+# Phase 1 — Pre-flight checks
 #
-# Installs cluster-level tools that must be present before the main kustomize
-# apply in Phase 3.  Add new prerequisites here as the stack grows.
+# Verifies the local environment and cluster are ready before any deployment
+# work begins.  Fails fast with a clear message so nothing is deployed into
+# a broken environment.
+#
+# Checks (in order):
+#   1. Required binaries (kubectl, docker) are in PATH
+#   2. Docker daemon is running
+#   3. Kubeconfig file exists on disk
+#   4. Kubernetes cluster is reachable
+# ---------------------------------------------------------------------------
+
+check_prerequisites() {
+  step "Phase 1 — Pre-flight checks..."
+
+  local errors=0
+
+  # ── Required binaries ──────────────────────────────────────────────────
+  for cmd in kubectl docker; do
+    if ! command -v "$cmd" &>/dev/null; then
+      echo "  ERROR: '$cmd' not found in PATH." >&2
+      errors=1
+    else
+      echo "  [ok] $cmd  →  $(command -v "$cmd")"
+    fi
+  done
+
+  # ── Docker daemon ──────────────────────────────────────────────────────
+  if command -v docker &>/dev/null; then
+    if ! docker info &>/dev/null 2>&1; then
+      echo "  ERROR: Docker daemon is not running. Start Docker Desktop or the Docker service." >&2
+      errors=1
+    else
+      echo "  [ok] Docker daemon is running"
+    fi
+  fi
+
+  # ── Kubeconfig ─────────────────────────────────────────────────────────
+  if [ ! -f "$KUBECONFIG_PATH" ]; then
+    echo "  ERROR: Kubeconfig not found: $KUBECONFIG_PATH" >&2
+    errors=1
+  else
+    echo "  [ok] Kubeconfig found: $KUBECONFIG_PATH"
+  fi
+
+  # ── Cluster reachability ───────────────────────────────────────────────
+  if [ "$errors" -eq 0 ]; then
+    echo "  Checking cluster reachability..."
+    if ! kubectl cluster-info --request-timeout=10s &>/dev/null 2>&1; then
+      echo "  ERROR: Cannot reach the Kubernetes cluster." >&2
+      echo "         Verify your kubeconfig and that the cluster is running:" >&2
+      echo "           kubectl cluster-info --kubeconfig=$KUBECONFIG_PATH" >&2
+      errors=1
+    else
+      local server ctx
+      server=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || echo "unknown")
+      ctx=$(kubectl config current-context 2>/dev/null || echo "unknown")
+      echo "  [ok] Cluster reachable: $server"
+      echo "  [ok] Current context  : $ctx"
+    fi
+  fi
+
+  if [ "$errors" -ne 0 ]; then
+    echo "" >&2
+    echo "  Pre-flight checks failed. Fix the errors above and retry." >&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Install prerequisites
+#
+# Installs cluster-level tools required before the main kustomize apply.
+# Add new prerequisites here as the stack grows.
 #
 # Current prerequisites (conditional):
 #   cert-manager  — required when DEPLOY_SCHEDULER_PLUGIN=true because
@@ -376,16 +447,16 @@ install_prerequisites() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 3 — Operator
+# Phase 4 — Operator
 # ---------------------------------------------------------------------------
 
 deploy_oprator_with_samples() {
-  step "Phase 3 — Deploying operator..."
+  step "Phase 4 — Deploying operator..."
   bash "$SCRIPT_DIR/deploy_operator.sh" "$KUBECONFIG_PATH"
 }
 
 # ---------------------------------------------------------------------------
-# Phase 4 — Mock Decision Agent (when USE_MOCK_AGENT=true)
+# Phase 5 — Mock Decision Agent (when USE_MOCK_AGENT=true)
 #
 # The mock agent is a lightweight Python HTTP server that scores every
 # candidate node at 50.  It is deployed in the same namespace as the operator
@@ -397,7 +468,7 @@ deploy_oprator_with_samples() {
 
 deploy_mock_agent() {
   if [ "$USE_MOCK_AGENT" = "true" ]; then
-    step "Phase 4 — Deploying mock decision agent..."
+    step "Phase 5 — Deploying mock decision agent..."
     sed "s/namespace: hiro-adaptive-orchestrator-system/namespace: $NAMESPACE/g" \
       "$SCRIPT_DIR/mock_decision_agent.yaml" | kubectl apply -f -
 
@@ -408,18 +479,18 @@ deploy_mock_agent() {
       --timeout=120s
     echo "  Mock decision agent is ready."
   else
-    step "Phase 4 — Skipping mock agent              (USE_MOCK_AGENT=false)."
+    step "Phase 5 — Skipping mock agent              (USE_MOCK_AGENT=false)."
     echo "  Decision agent URL : $DECISION_AGENT_URL"
   fi
 }
 
 # ---------------------------------------------------------------------------
-# Phase 5 — PlacementServer health gate
+# Phase 6 — PlacementServer health gate
 # ---------------------------------------------------------------------------
 
 wait_for_placement_server() {
   local operator="${NAME_PREFIX}controller-manager"
-  step "Phase 5 — Waiting for PlacementServer to be reachable..."
+  step "Phase 6 — Waiting for PlacementServer to be reachable..."
   echo "  Service : ${PLACEMENT_SERVICE_NAME}.${NAMESPACE}.svc.cluster.local${PLACEMENT_SERVER_PORT}"
   echo "  Waiting for operator deployment rollout..."
 
@@ -431,15 +502,15 @@ wait_for_placement_server() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 6 — Scheduler plugin (opt-in: DEPLOY_SCHEDULER_PLUGIN=true)
+# Phase 7 — Scheduler plugin (opt-in: DEPLOY_SCHEDULER_PLUGIN=true)
 # ---------------------------------------------------------------------------
 
 deploy_scheduler_plugin() {
   if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
-    step "Phase 6 — Deploying HIRO scheduler plugin..."
+    step "Phase 7 — Deploying HIRO scheduler plugin..."
     bash "$SCRIPT_DIR/deploy_scheduler.sh" "$KUBECONFIG_PATH"
   else
-    step "Phase 6 — Skipping scheduler plugin        (DEPLOY_SCHEDULER_PLUGIN=false)."
+    step "Phase 7 — Skipping scheduler plugin        (DEPLOY_SCHEDULER_PLUGIN=false)."
     echo "  To deploy: DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_full_stack.sh"
     echo "  Standalone: hack/deploy_scheduler.sh"
   fi
@@ -449,7 +520,7 @@ deploy_scheduler_plugin() {
 # Webhook namespace exclusions — patches the MutatingWebhookConfiguration so
 # the webhook never intercepts pods in the specified namespaces.
 #
-# Called at the end of Phase 7 AFTER the MWC is live in the cluster.
+# Called at the end of Phase 8 AFTER the MWC is live in the cluster.
 # The kustomize overlay (mwc_namespace_patch.yaml) applies the same defaults
 # statically; this call lets WEBHOOK_EXCLUDE_NAMESPACES override them.
 # ---------------------------------------------------------------------------
@@ -475,22 +546,22 @@ configure_webhook_namespace_exclusions() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 7 — Enable pod scheduler webhook (DEPLOY_SCHEDULER_PLUGIN=true only)
+# Phase 8 — Enable pod scheduler webhook (DEPLOY_SCHEDULER_PLUGIN=true only)
 #
-# By this point Phase 2 has installed cert-manager and Phase 3 (make deploy)
+# By this point Phase 2 has installed cert-manager and Phase 4 (make deploy)
 # has applied everything in config/default-with-webhook:
 #   - self-signed Issuer + webhook Certificate  (config/certmanager)
 #   - webhook Service + MutatingWebhookConfiguration  (config/webhook)
 #   - operator Deployment with cert volume (optional) + port 9443
 #
-# cert-manager starts issuing the TLS cert after Phase 3 applies the
+# cert-manager starts issuing the TLS cert after Phase 4 applies the
 # Certificate resource.  We must wait for the cert Secret before flipping
 # ENABLE_WEBHOOKS=true — if the operator starts without certs it crashes.
 # ---------------------------------------------------------------------------
 
 deploy_scheduler_webhook() {
   if [ "$DEPLOY_SCHEDULER_PLUGIN" != "true" ]; then
-    step "Phase 7 — Skipping webhook                (DEPLOY_SCHEDULER_PLUGIN=false)."
+    step "Phase 8 — Skipping webhook                (DEPLOY_SCHEDULER_PLUGIN=false)."
     echo "  Webhook is only deployed with the scheduler plugin."
     return
   fi
@@ -498,7 +569,7 @@ deploy_scheduler_webhook() {
   local operator="${NAME_PREFIX}controller-manager"
   local cert="${NAME_PREFIX}serving-cert"
 
-  step "Phase 7 — Enabling pod scheduler webhook..."
+  step "Phase 8 — Enabling pod scheduler webhook..."
 
   # Wait for cert-manager to issue the TLS certificate before enabling the
   # webhook server — the operator crashes if ENABLE_WEBHOOKS=true and the
@@ -531,15 +602,15 @@ deploy_scheduler_webhook() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 8 — Extender (opt-in: DEPLOY_EXTENDER=true)
+# Phase 9 — Extender (opt-in: DEPLOY_EXTENDER=true)
 # ---------------------------------------------------------------------------
 
 deploy_extender() {
   if [ "$DEPLOY_EXTENDER" = "true" ]; then
-    step "Phase 8 — Deploying extender (patches kube-scheduler)..."
+    step "Phase 9 — Deploying extender (patches kube-scheduler)..."
     bash "$SCRIPT_DIR/deploy_extender.sh" "$KUBECONFIG_PATH"
   else
-    step "Phase 8 — Skipping extender                (DEPLOY_EXTENDER=false)."
+    step "Phase 9 — Skipping extender                (DEPLOY_EXTENDER=false)."
     echo "  To deploy: DEPLOY_EXTENDER=true hack/deploy_full_stack.sh"
     echo "  Standalone: hack/deploy_extender.sh"
   fi
@@ -585,8 +656,9 @@ main() {
   validate_inputs
   print_config
 
-  cleanup_conflicting_integration
+  check_prerequisites
   install_prerequisites
+  cleanup_conflicting_integration
   deploy_oprator_with_samples
   deploy_mock_agent
   wait_for_placement_server

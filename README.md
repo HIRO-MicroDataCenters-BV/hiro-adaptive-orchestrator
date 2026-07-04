@@ -260,16 +260,22 @@ For a detailed function-level trace of every call in this path see [docs/schedul
 deploy_full_stack.sh  (master parameter sheet — all vars defined here)
         │  exports every variable
         │
-        ├──► Phase 1: cleanup_conflicting_integration  (always)
-        │         DEPLOY_SCHEDULER_PLUGIN=true → undeploy_extender.sh if extender running
-        │         DEPLOY_EXTENDER=true         → delete scheduler resources + disable ENABLE_WEBHOOKS
-        │                                        if scheduler plugin running
+        ├──► Phase 1: check_prerequisites  (always)
+        │         command -v kubectl docker
+        │         docker info (daemon running)
+        │         kubeconfig file exists on disk
+        │         kubectl cluster-info --request-timeout=10s (cluster reachable)
         │
         ├──► Phase 2: install_prerequisites  (when DEPLOY_SCHEDULER_PLUGIN=true)
         │         kubectl apply -f cert-manager.yaml (idempotent)
         │         kubectl wait deployment/cert-manager* --for=condition=Available
         │
-        ├──► Phase 3: deploy_operator.sh
+        ├──► Phase 3: cleanup_conflicting_integration  (always)
+        │         DEPLOY_SCHEDULER_PLUGIN=true → undeploy_extender.sh if extender running
+        │         DEPLOY_EXTENDER=true         → delete scheduler resources + disable ENABLE_WEBHOOKS
+        │                                        if scheduler plugin running
+        │
+        ├──► Phase 4: deploy_operator.sh
         │         │
         │         ├─ DEPLOY_SCHEDULER_PLUGIN=false → make deploy     (config/default)
         │         ├─ DEPLOY_SCHEDULER_PLUGIN=true  → make deploy-scheduler (config/default-with-webhook)
@@ -286,15 +292,15 @@ deploy_full_stack.sh  (master parameter sheet — all vars defined here)
         │                 ▼
         │           PlacementServer / DecisionClient constructed with those values
         │
-        ├──► Phase 4: deploy_mock_agent  (when USE_MOCK_AGENT=true)
+        ├──► Phase 5: deploy_mock_agent  (when USE_MOCK_AGENT=true)
         │         kubectl apply -f hack/mock_decision_agent.yaml
         │         sed substitutes namespace before apply
         │         mock-decision-agent Service → http://mock-decision-agent:8080
         │
-        ├──► Phase 5: wait_for_placement_server
+        ├──► Phase 6: wait_for_placement_server
         │         kubectl rollout status deployment/<NAME_PREFIX>controller-manager
         │
-        ├──► Phase 6: deploy_scheduler.sh  (when DEPLOY_SCHEDULER_PLUGIN=true)
+        ├──► Phase 7: deploy_scheduler.sh  (when DEPLOY_SCHEDULER_PLUGIN=true)
         │         kustomize build config/scheduler/ | sed (patches pluginConfig)
         │                 ▼
         │         ConfigMap hiro-scheduler-config  (KubeSchedulerConfiguration)
@@ -304,7 +310,7 @@ deploy_full_stack.sh  (master parameter sheet — all vars defined here)
         │         HIROScore.New() reads pluginConfig.args → NewPlacementClient(url, path, timeout)
         │         ghcr-secret attached to scheduler ServiceAccount → image pull succeeds
         │
-        ├──► Phase 7: deploy_scheduler_webhook  (when DEPLOY_SCHEDULER_PLUGIN=true)
+        ├──► Phase 8: deploy_scheduler_webhook  (when DEPLOY_SCHEDULER_PLUGIN=true)
         │         kubectl wait certificate <NAME_PREFIX>serving-cert --for=condition=Ready
         │         kubectl set env deployment/... ENABLE_WEBHOOKS=true HIRO_SCHEDULER_NAME=...
         │         kubectl rollout restart + rollout status
@@ -314,7 +320,7 @@ deploy_full_stack.sh  (master parameter sheet — all vars defined here)
         │           Pods governed by OrchestrationProfile → spec.schedulerName auto-set to hiro-scheduler
         │           kubectl patch MWC — namespaceSelector excludes WEBHOOK_EXCLUDE_NAMESPACES
         │
-        └──► Phase 8: deploy_extender.sh  (when DEPLOY_EXTENDER=true)
+        └──► Phase 9: deploy_extender.sh  (when DEPLOY_EXTENDER=true)
                   resolve_placement_url()
                   │   kubectl get svc → ClusterIP (bypasses hostNetwork DNS limitation)
                   │
@@ -416,18 +422,21 @@ Runs these phases in order:
 
 | Phase | What runs | Condition |
 |-------|-----------|-----------|
-| 1 | `cleanup_conflicting_integration` — auto-remove the opposing scheduler integration if one is running (plugin ↔ extender) | Always |
+| 1 | `check_prerequisites` — verify required binaries, Docker daemon, kubeconfig, and cluster reachability | Always |
 | 2 | `install_prerequisites` — install cert-manager and wait for it to be ready | `DEPLOY_SCHEDULER_PLUGIN=true` |
-| 3 | `deploy_operator.sh` — build, push, and deploy the operator (base or webhook overlay) | Always |
-| 4 | `deploy_mock_agent` — deploy `hack/mock_decision_agent.yaml` into the operator namespace | `USE_MOCK_AGENT=true` (default) |
-| 5 | `wait_for_placement_server` — wait for operator deployment rollout to complete | Always |
-| 6 | `deploy_scheduler.sh` — build, push, and deploy the HIRO scheduler pod | `DEPLOY_SCHEDULER_PLUGIN=true` |
-| 7 | `deploy_scheduler_webhook` — wait for cert-manager to issue the TLS cert, then set `ENABLE_WEBHOOKS=true` and restart the operator | `DEPLOY_SCHEDULER_PLUGIN=true` |
-| 8 | `deploy_extender.sh` — resolve ClusterIP, apply ConfigMap, patch kube-scheduler | `DEPLOY_EXTENDER=true` |
+| 3 | `cleanup_conflicting_integration` — auto-remove the opposing scheduler integration if one is running (plugin ↔ extender) | Always |
+| 4 | `deploy_operator.sh` — build, push, and deploy the operator (base or webhook overlay) | Always |
+| 5 | `deploy_mock_agent` — deploy `hack/mock_decision_agent.yaml` into the operator namespace | `USE_MOCK_AGENT=true` (default) |
+| 6 | `wait_for_placement_server` — wait for operator deployment rollout to complete | Always |
+| 7 | `deploy_scheduler.sh` — build, push, and deploy the HIRO scheduler pod | `DEPLOY_SCHEDULER_PLUGIN=true` |
+| 8 | `deploy_scheduler_webhook` — wait for cert-manager to issue the TLS cert, then set `ENABLE_WEBHOOKS=true` and restart the operator | `DEPLOY_SCHEDULER_PLUGIN=true` |
+| 9 | `deploy_extender.sh` — resolve ClusterIP, apply ConfigMap, patch kube-scheduler | `DEPLOY_EXTENDER=true` |
 
-> **Phase 1 — Mutual exclusivity:** Only one scheduler integration (plugin or extender) should be active at a time. If you switch from extender to plugin (or vice versa), Phase 1 automatically tears down the running integration before deploying the new one — no manual cleanup needed.
+> **Phase 1 — Pre-flight checks:** Runs before any cluster interaction. Verifies `kubectl` and `docker` are in PATH, Docker daemon is running, the kubeconfig file exists, and the cluster is reachable. Fails fast with a clear error so nothing is deployed into a broken environment.
 
-> **Phase 7 two-phase webhook design:** The operator starts with `ENABLE_WEBHOOKS=false` (set in `config/manager/manager.yaml`). cert-manager issues the TLS certificate after Phase 3 applies the `Certificate` resource. Phase 7 waits for the cert `Secret` to exist before flipping `ENABLE_WEBHOOKS=true` — if the webhook server starts before the cert is ready the operator crashes. The cert volume is mounted `optional: true` so the operator pod starts safely in the interim.
+> **Phase 3 — Mutual exclusivity:** Only one scheduler integration (plugin or extender) should be active at a time. If you switch from extender to plugin (or vice versa), Phase 3 automatically tears down the running integration before deploying the new one — no manual cleanup needed.
+
+> **Phase 8 two-phase webhook design:** The operator starts with `ENABLE_WEBHOOKS=false` (set in `config/manager/manager.yaml`). cert-manager issues the TLS certificate after Phase 4 applies the `Certificate` resource. Phase 8 waits for the cert `Secret` to exist before flipping `ENABLE_WEBHOOKS=true` — if the webhook server starts before the cert is ready the operator crashes. The cert volume is mounted `optional: true` so the operator pod starts safely in the interim.
 
 ### Operator Only
 
@@ -452,7 +461,7 @@ Steps performed:
 > ```bash
 > kubectl apply -f hack/mock_decision_agent.yaml
 > ```
-> When using `deploy_full_stack.sh`, the mock agent is deployed automatically in Phase 4.
+> When using `deploy_full_stack.sh`, the mock agent is deployed automatically in Phase 5.
 
 ### Mock Decision Agent
 
@@ -572,7 +581,7 @@ Every parameter can be set as an environment variable before calling any deploy 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `USE_MOCK_AGENT` | `true` | Deploy and use the in-cluster mock agent (Phase 4 of `deploy_full_stack.sh`) |
+| `USE_MOCK_AGENT` | `true` | Deploy and use the in-cluster mock agent (Phase 5 of `deploy_full_stack.sh`) |
 | `DECISION_AGENT_URL` | `http://mock-decision-agent:8080` (mock) | Base URL of the AI agent. **Required when `USE_MOCK_AGENT=false`.** |
 | `DECISION_AGENT_PATH` | `/api/v1/agent/placement/decision` | HTTP path on the AI agent |
 
@@ -602,18 +611,18 @@ Every parameter can be set as an environment variable before calling any deploy 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DEPLOY_SCHEDULER_PLUGIN` | `false` | `true` → deploy `hiro-scheduler` pod (Phase 6) + mutating webhook (Phase 7); use `make deploy-scheduler` overlay |
+| `DEPLOY_SCHEDULER_PLUGIN` | `false` | `true` → deploy `hiro-scheduler` pod (Phase 7) + mutating webhook (Phase 8); use `make deploy-scheduler` overlay |
 | `HIRO_SCHEDULER_NAME` | `hiro-scheduler` | Scheduler name the webhook injects into `spec.schedulerName`; must match the scheduler Deployment |
 | `CERT_MANAGER_VERSION` | `v1.17.2` | cert-manager release installed by Phase 2 when `DEPLOY_SCHEDULER_PLUGIN=true` |
-| `WEBHOOK_EXCLUDE_NAMESPACES` | `kube-system,kube-public,kube-node-lease` | Comma-separated namespaces the webhook will **not** intercept. Phase 7 patches the `MutatingWebhookConfiguration` with this list. Always include system namespaces in any custom list. |
+| `WEBHOOK_EXCLUDE_NAMESPACES` | `kube-system,kube-public,kube-node-lease` | Comma-separated namespaces the webhook will **not** intercept. Phase 8 patches the `MutatingWebhookConfiguration` with this list. Always include system namespaces in any custom list. |
 
 #### Deploy Options
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DEPLOY_EXTENDER` | `false` | Set to `true` to deploy the extender and patch kube-scheduler (Phase 8) |
+| `DEPLOY_EXTENDER` | `false` | Set to `true` to deploy the extender and patch kube-scheduler (Phase 9) |
 
-> `DEPLOY_SCHEDULER_PLUGIN` and `DEPLOY_EXTENDER` are mutually exclusive — only one scheduler integration can be active at a time. Phase 1 automatically removes the running integration if you switch between them.
+> `DEPLOY_SCHEDULER_PLUGIN` and `DEPLOY_EXTENDER` are mutually exclusive — only one scheduler integration can be active at a time. Phase 3 automatically removes the running integration if you switch between them.
 
 ---
 
@@ -633,7 +642,7 @@ The operator pod reads configuration exclusively from environment variables — 
 | `EAO_GROUP` | `eas.hiro.io` | `decision.NewDecisionContextBuilder` |
 | `EAO_VERSION` | `v1` | `decision.NewDecisionContextBuilder` |
 | `EAO_KIND` | `EnergyAwareOrchestration` | `decision.NewDecisionContextBuilder` |
-| `ENABLE_WEBHOOKS` | `false` | `cmd/main.go` — starts the webhook server when `!= "false"`; set to `true` by Phase 7 after the TLS cert is ready |
+| `ENABLE_WEBHOOKS` | `false` | `cmd/main.go` — starts the webhook server when `!= "false"`; set to `true` by Phase 8 after the TLS cert is ready |
 | `HIRO_SCHEDULER_NAME` | `hiro-scheduler` | `cmd/main.go` → `SetupPodWebhookWithManager` — the name injected into `spec.schedulerName` |
 
 ---
@@ -756,7 +765,7 @@ kubectl patch deployment my-app -p '{"spec":{"template":{"spec":{"schedulerName"
 
 When `DEPLOY_SCHEDULER_PLUGIN=true`, a `MutatingAdmissionWebhook` is deployed alongside the scheduler. It intercepts pod CREATE requests and sets `spec.schedulerName: hiro-scheduler` on any pod whose owning Deployment/StatefulSet/Job is referenced by an `OrchestrationProfile`. Users do not need to touch pod templates.
 
-TLS is provisioned entirely by cert-manager — a self-signed `Issuer` and `Certificate` are created automatically by the `config/default-with-webhook` Kustomize overlay. The operator starts with `ENABLE_WEBHOOKS=false`; Phase 7 of `deploy_full_stack.sh` waits for the cert `Secret` to be issued and then enables the webhook via `kubectl set env ENABLE_WEBHOOKS=true`.
+TLS is provisioned entirely by cert-manager — a self-signed `Issuer` and `Certificate` are created automatically by the `config/default-with-webhook` Kustomize overlay. The operator starts with `ENABLE_WEBHOOKS=false`; Phase 8 of `deploy_full_stack.sh` waits for the cert `Secret` to be issued and then enables the webhook via `kubectl set env ENABLE_WEBHOOKS=true`.
 
 ```bash
 # Verify webhook is live
@@ -873,7 +882,7 @@ GET  /healthz                    →  200 ok
 The mock agent runs as a Python 3 `http.server` in a `python:3.11-slim` container. It is deployed into the same namespace as the operator so the short DNS name `mock-decision-agent` resolves from the operator pod.
 
 ```bash
-# Deployed automatically in Phase 4 when USE_MOCK_AGENT=true (the default)
+# Deployed automatically in Phase 5 when USE_MOCK_AGENT=true (the default)
 DEPLOY_EXTENDER=true hack/deploy_full_stack.sh
 
 # Deploy manually
@@ -1030,7 +1039,7 @@ config/
     issuer.yaml                        # Self-signed Issuer
     kustomizeconfig.yaml               # nameReference: Issuer → Certificate.spec.issuerRef
 hack/
-  deploy_full_stack.sh                 # Full-stack entry point (phases 1–8) — all parameters defined here
+  deploy_full_stack.sh                 # Full-stack entry point (phases 1–9) — all parameters defined here
   deploy_operator.sh                   # Operator-only deploy (base or webhook overlay per DEPLOY_SCHEDULER_PLUGIN)
   deploy_scheduler.sh                  # Scheduler-only deploy (build → push → kustomize → pull secret → rollout)
   deploy_extender.sh                   # Extender deploy: resolve ClusterIP → ConfigMap → privileged Job → kubelet restart
