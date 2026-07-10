@@ -3,7 +3,7 @@
 # schedulerName: hiro-scheduler — pods must set spec.schedulerName: hiro-scheduler
 # to be scheduled by this scheduler instead of the default kube-scheduler.
 #
-# HIROScore is registered at the filter, preScore, and score extension points.
+# HIROScore is registered at the preFilter, filter, preScore, and score extension points.
 # Default scoring plugins remain active (additive) so resource fit, topology
 # spread, etc. still gate candidate nodes — but HIROScore runs at weight=10,
 # outweighing any single default plugin 10:1 so the AI recommendation dominates.
@@ -30,6 +30,9 @@ data:
     profiles:
       - schedulerName: hiro-scheduler
         plugins:
+          preFilter:
+            enabled:
+              - name: HIROScore
           filter:
             enabled:
               - name: HIROScore
