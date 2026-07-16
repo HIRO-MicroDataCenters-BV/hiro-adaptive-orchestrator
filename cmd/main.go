@@ -41,6 +41,7 @@ import (
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/controller"
 	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/rebalance"
 	webhookv1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/webhook/v1"
 	// +kubebuilder:scaffold:imports
 )
@@ -339,6 +340,27 @@ func main() {
 		decisionAgentPath,
 		8*time.Second, // must be < PlacementServer requestTimeout (10s)
 	)
+
+	// -------------------------------------------------------------------------
+	// Rebalance Engine
+	//
+	// Runtime loop that acts on the AI's guidance after initial placement:
+	// Detection (Triggered) → Decision (Evaluating → Decided/NoOp/Rejected/
+	// Failed) → Enaction (Enacting → Enacted/Deferred/Failed). Registered as
+	// a manager.Runnable so its lifecycle matches every other component here.
+	//
+	// StateWriter is the only component permitted to mutate
+	// status.rebalancingStatus — see internal/rebalance/writer.go.
+	// -------------------------------------------------------------------------
+	rebalanceWriter := rebalance.NewStateWriter(
+		mgr.GetClient(),
+		mgr.GetEventRecorderFor("rebalance-engine"), //nolint:staticcheck
+	)
+	rebalanceEngine := rebalance.NewEngine(mgr.GetClient(), rebalanceWriter)
+	if err := mgr.Add(rebalanceEngine); err != nil {
+		setupLog.Error(err, "unable to register rebalance engine")
+		os.Exit(1)
+	}
 
 	// Create the PlacementServer with the context builder and decision client.
 	// The server will use these to handle incoming placement decision requests from the kube-scheduler plugin.

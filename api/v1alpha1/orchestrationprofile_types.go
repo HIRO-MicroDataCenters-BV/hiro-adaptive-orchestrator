@@ -84,10 +84,92 @@ type PlacementStatus struct {
 	PodStatuses  []PodStatus `json:"podStatuses,omitempty"`
 }
 
+// RebalancingStateType enumerates the states of the rebalance decision
+// lifecycle state machine (see the rebalance engine design).
+type RebalancingStateType string
+
+const (
+	RebalancingStateTriggered  RebalancingStateType = "Triggered"
+	RebalancingStateEvaluating RebalancingStateType = "Evaluating"
+	RebalancingStateDecided    RebalancingStateType = "Decided"
+	RebalancingStateEnacting   RebalancingStateType = "Enacting"
+	RebalancingStateEnacted    RebalancingStateType = "Enacted"
+	RebalancingStateNoOp       RebalancingStateType = "NoOp"
+	RebalancingStateRejected   RebalancingStateType = "Rejected"
+	RebalancingStateDeferred   RebalancingStateType = "Deferred"
+	RebalancingStateFailed     RebalancingStateType = "Failed"
+)
+
+// RebalanceDecision is a single terminal-outcome record kept in the profile's
+// rolling decision history.
+type RebalanceDecision struct {
+	// decisionId correlates this record with engine logs and Kubernetes Events.
+	DecisionID string `json:"decisionId"`
+
+	// state is the terminal state this decision ended in.
+	// +kubebuilder:validation:Enum=Triggered;Evaluating;Decided;Enacting;Enacted;NoOp;Rejected;Deferred;Failed
+	State RebalancingStateType `json:"state"`
+
+	// action is the AI-returned action that was processed (e.g. "Move", "NoOp").
+	Action string `json:"action,omitempty"`
+
+	// reason explains why the decision ended in this state.
+	Reason string `json:"reason,omitempty"`
+
+	// details carries free-form, state-specific context (e.g. target node,
+	// improvement score, dry-run marker).
+	Details string `json:"details,omitempty"`
+
+	// startedAt is when this decision's cycle entered Triggered.
+	StartedAt metav1.Time `json:"startedAt,omitempty"`
+
+	// lastTransitionAt is when this decision reached its terminal state.
+	LastTransitionAt metav1.Time `json:"lastTransitionAt,omitempty"`
+}
+
 // Rebalancing Status
 type RebalancingStatus struct {
-	LastTriggeredAt string `json:"lastTriggeredAt,omitempty"`
-	Reason          string `json:"reason,omitempty"`
+	// state is the current position of this workload's decision lifecycle
+	// state machine. Empty when no rebalance cycle has ever been triggered.
+	// +kubebuilder:validation:Enum=Triggered;Evaluating;Decided;Enacting;Enacted;NoOp;Rejected;Deferred;Failed
+	// +optional
+	State RebalancingStateType `json:"state,omitempty"`
+
+	// reason explains why the current state was entered.
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// decisionId correlates the current cycle with engine logs and Kubernetes Events.
+	// +optional
+	DecisionID string `json:"decisionId,omitempty"`
+
+	// action is the AI-returned action being processed for the current cycle
+	// (e.g. "Move", "NoOp"). Empty before the AI has responded.
+	// +optional
+	Action string `json:"action,omitempty"`
+
+	// details carries free-form, state-specific context for the current cycle
+	// (e.g. target node, improvement score, dry-run marker).
+	// +optional
+	Details string `json:"details,omitempty"`
+
+	// startedAt is when the current cycle entered Triggered.
+	// +optional
+	StartedAt metav1.Time `json:"startedAt,omitempty"`
+
+	// lastTransitionAt is when state last changed.
+	// +optional
+	LastTransitionAt metav1.Time `json:"lastTransitionAt,omitempty"`
+
+	// cooldownUntil blocks new Triggered transitions for this workload until
+	// this time has passed.
+	// +optional
+	CooldownUntil metav1.Time `json:"cooldownUntil,omitempty"`
+
+	// recentDecisions is a rolling window of the most recent terminal
+	// outcomes, newest first, trimmed to a bounded length (default 10).
+	// +optional
+	RecentDecisions []RebalanceDecision `json:"recentDecisions,omitempty"`
 }
 
 // OrchestrationProfileStatus defines the observed state of OrchestrationProfile.

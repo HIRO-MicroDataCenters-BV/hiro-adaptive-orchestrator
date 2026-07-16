@@ -165,7 +165,12 @@ func (s *PlacementServer) score(
 	if err != nil {
 		return nil, err
 	}
-	return s.client.RequestDecision(ctx, req)
+	resp, err := s.client.RequestDecision(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	logInitialPlacementDecision(ctx, req, resp)
+	return resp, nil
 }
 
 // filter runs the energy gate check for a single pod.
