@@ -44,6 +44,15 @@
 #   EAO_VERSION               CRD API version             (default: v1)
 #   EAO_KIND                  CRD Kind                    (default: EnergyAwareOrchestration)
 #
+# ─── metrics-server (rebalance engine CPU/Memory triggers) ───────────────────
+#   INSTALL_METRICS_SERVER     true|false                  (default: true)
+#                              Idempotent — skips if already installed.
+#                              See hack/install_metrics_server.sh.
+#   METRICS_SERVER_VERSION     release tag to install       (default: latest)
+#   METRICS_SERVER_INSECURE_TLS true|false                  (default: true)
+#                              Needed on kind/minikube/k3d; set false on
+#                              real clusters with valid kubelet certs.
+#
 # ─── Scheduler ───────────────────────────────────────────────────────────────
 #   SCHED_K8S_VERSION         k8s version to build for    (default: v1.35.0)
 #   SCHED_VERSION             scheduler release version   (default: v0.1.0)
@@ -171,6 +180,15 @@ export CERT_MANAGER_VERSION=${CERT_MANAGER_VERSION:-v1.17.2}
 WEBHOOK_EXCLUDE_NAMESPACES=${WEBHOOK_EXCLUDE_NAMESPACES:-kube-system,kube-public,kube-node-lease}
 
 # ---------------------------------------------------------------------------
+# metrics-server — powers the rebalance engine's CPU/Memory triggers.
+# See hack/install_metrics_server.sh.
+# ---------------------------------------------------------------------------
+
+export INSTALL_METRICS_SERVER=${INSTALL_METRICS_SERVER:-true}
+export METRICS_SERVER_VERSION=${METRICS_SERVER_VERSION:-latest}
+export METRICS_SERVER_INSECURE_TLS=${METRICS_SERVER_INSECURE_TLS:-true}
+
+# ---------------------------------------------------------------------------
 # Deploy options — consumed by this script only
 # ---------------------------------------------------------------------------
 
@@ -255,6 +273,10 @@ print_config() {
   echo "  ── EAO CRD ───────────────────────────────────────────────"
   echo "    Group/Version          : $EAO_GROUP/$EAO_VERSION"
   echo "    Kind                   : $EAO_KIND"
+  echo ""
+  echo "  ── metrics-server ────────────────────────────────────────"
+  echo "    Install                : $INSTALL_METRICS_SERVER  (version: $METRICS_SERVER_VERSION)"
+  echo "    Insecure kubelet TLS   : $METRICS_SERVER_INSECURE_TLS"
   echo ""
   echo "  ── Scheduler ─────────────────────────────────────────────"
   echo "    K8s Target Version     : $SCHED_K8S_VERSION"
@@ -410,11 +432,16 @@ check_prerequisites() {
 # Installs cluster-level tools required before the main kustomize apply.
 # Add new prerequisites here as the stack grows.
 #
-# Current prerequisites (conditional):
-#   cert-manager  — required when DEPLOY_SCHEDULER_PLUGIN=true because
-#                   config/default-with-webhook/kustomization.yaml includes
-#                   ../certmanager (Issuer + Certificate CRDs) and they must
-#                   exist before kustomize build | kubectl apply runs.
+# Current prerequisites:
+#   cert-manager    (conditional) — required when DEPLOY_SCHEDULER_PLUGIN=true
+#                   because config/default-with-webhook/kustomization.yaml
+#                   includes ../certmanager (Issuer + Certificate CRDs) and
+#                   they must exist before kustomize build | kubectl apply runs.
+#   metrics-server  (default on)  — required for the rebalance engine's
+#                   CPUThreshold/MemoryThreshold trigger conditions
+#                   (internal/rebalance/pressure.go). Everything else works
+#                   fine without it; those two conditions just never fire.
+#                   See hack/install_metrics_server.sh.
 # ---------------------------------------------------------------------------
 
 install_prerequisites() {
@@ -447,6 +474,17 @@ install_prerequisites() {
     echo "  [cert-manager] Ready."
   else
     echo "  [cert-manager] Skipped (DEPLOY_SCHEDULER_PLUGIN=false)."
+  fi
+
+  # ── metrics-server ──────────────────────────────────────────────────────
+  # Powers the rebalance engine's CPUThreshold/MemoryThreshold triggers.
+  # Idempotent — hack/install_metrics_server.sh skips if already installed.
+  if [ "$INSTALL_METRICS_SERVER" = "true" ]; then
+    echo "  [metrics-server] INSTALL_METRICS_SERVER=true — checking/installing..."
+    bash "$SCRIPT_DIR/install_metrics_server.sh" "$KUBECONFIG_PATH"
+  else
+    echo "  [metrics-server] Skipped (INSTALL_METRICS_SERVER=false) — CPU/Memory"
+    echo "                   rebalance triggers will never fire until it's installed."
   fi
 
   # ── Add future prerequisites here ───────────────────────────────────────
@@ -641,6 +679,11 @@ print_summary() {
     echo -e "\033[32m    Mock Agent      : deployed  (mock-decision-agent.$NAMESPACE)\033[0m"
   else
     echo -e "\033[33m    Mock Agent      : not deployed  (using real agent)\033[0m"
+  fi
+  if [ "$INSTALL_METRICS_SERVER" = "true" ]; then
+    echo -e "\033[32m    metrics-server  : installed  (powers CPU/Memory rebalance triggers)\033[0m"
+  else
+    echo -e "\033[33m    metrics-server  : not installed  (CPU/Memory triggers won't fire)\033[0m"
   fi
   if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
     echo -e "\033[32m    Scheduler Plugin: deployed  (opt-in: schedulerName=${HIRO_SCHEDULER_NAME})\033[0m"
