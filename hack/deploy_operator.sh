@@ -4,6 +4,24 @@
 # Builds, pushes, and deploys the HIRO Adaptive Orchestrator (operator only).
 # For a full-stack deploy (operator + scheduler) use hack/deploy_full_stack.sh.
 #
+# ─── What one operator Deployment bundles ────────────────────────────────────
+#   This script deploys a SINGLE binary/Deployment/pod. There is nothing to
+#   separately enable or deploy for the pieces below — they all start
+#   together the moment the operator pod is Ready:
+#
+#     1. OrchestrationProfile controller
+#          Reconciles OrchestrationProfile CRs, resolves their pods, and
+#          computes PlacementStatus (Active/Pending/Degraded/...).
+#     2. Placement Server (HTTP, :8090 by default)
+#          AI-backed node scoring + energy gate filtering, called by the
+#          scheduler plugin or the kube-scheduler extender per pod.
+#     3. Rebalance Engine
+#          Hybrid (periodic + event-driven) trigger detection feeding the
+#          decision lifecycle state machine — see status.rebalancingStatus
+#          on each OrchestrationProfile.
+#     4. Pod scheduler admission webhook (opt-in via DEPLOY_SCHEDULER_PLUGIN)
+#          Auto-sets spec.schedulerName on pods governed by a profile.
+#
 # ─── Required ────────────────────────────────────────────────────────────────
 #   GITHUB_PAT_TOKEN          GitHub PAT with write:packages scope
 #
@@ -123,6 +141,12 @@ print_config() {
   echo "========================================================"
   echo " HIRO Adaptive Orchestrator — Operator Deploy"
   echo "========================================================"
+  echo " One Deployment bundles all of the following:"
+  echo "   1) OrchestrationProfile controller  — CR reconciliation, PlacementStatus"
+  echo "   2) PlacementServer                  — AI node scoring + energy gate"
+  echo "   3) Rebalance Engine                 — hybrid trigger detection"
+  echo "   4) Pod scheduler webhook (opt-in)   — auto-sets schedulerName"
+  echo "--------------------------------------------------------"
   echo "Namespace          : $NAMESPACE"
   echo "Name Prefix        : $NAME_PREFIX"
   echo "Service Account    : $SA_NAME  (derived)"

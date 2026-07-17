@@ -13,6 +13,7 @@ rules:
     - apiGroups:
         - ""
       resources:
+        - nodes
         - pods
       verbs:
         - get
@@ -44,6 +45,12 @@ rules:
         - get
         - list
         - watch
+    - apiGroups:
+        - metrics.k8s.io
+      resources:
+        - nodes
+      verbs:
+        - get
     - apiGroups:
         - orchestration.hiro.io
       resources:

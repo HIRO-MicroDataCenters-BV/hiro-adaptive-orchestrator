@@ -152,7 +152,7 @@ func TestStateWriter_Transition_RecentDecisionsTrimmed(t *testing.T) {
 	ctx := context.Background()
 	key := types.NamespacedName{Name: "profile-d"}
 
-	for i := 0; i < MaxRecentDecisions+3; i++ {
+	for i := range MaxRecentDecisions + 3 {
 		if err := writer.Transition(ctx, key, StateTriggered, "cycle", TransitionOptions{}); err != nil {
 			t.Fatalf("cycle %d Triggered: %v", i, err)
 		}

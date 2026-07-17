@@ -24,6 +24,8 @@ limitations under the License.
 package rebalance
 
 import (
+	"slices"
+
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 )
 
@@ -73,12 +75,7 @@ var terminalStates = map[orchestrationv1alpha1.RebalancingStateType]bool{
 // IsValidTransition reports whether moving from `from` to `to` is allowed by
 // the decision lifecycle state machine.
 func IsValidTransition(from, to orchestrationv1alpha1.RebalancingStateType) bool {
-	for _, allowed := range validTransitions[from] {
-		if allowed == to {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(validTransitions[from], to)
 }
 
 // IsTerminal reports whether the given state ends a decision cycle.

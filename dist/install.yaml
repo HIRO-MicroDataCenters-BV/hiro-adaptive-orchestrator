@@ -155,9 +155,106 @@ spec:
                 description: rebalancingStatus provides details about the current
                   rebalancing state of the application.
                 properties:
-                  lastTriggeredAt:
+                  action:
+                    description: |-
+                      action is the AI-returned action being processed for the current cycle
+                      (e.g. "Move", "NoOp"). Empty before the AI has responded.
+                    type: string
+                  cooldownUntil:
+                    description: |-
+                      cooldownUntil blocks new Triggered transitions for this workload until
+                      this time has passed.
+                    format: date-time
+                    type: string
+                  decisionId:
+                    description: decisionId correlates the current cycle with engine
+                      logs and Kubernetes Events.
+                    type: string
+                  details:
+                    description: |-
+                      details carries free-form, state-specific context for the current cycle
+                      (e.g. target node, improvement score, dry-run marker).
+                    type: string
+                  lastTransitionAt:
+                    description: lastTransitionAt is when state last changed.
+                    format: date-time
                     type: string
                   reason:
+                    description: reason explains why the current state was entered.
+                    type: string
+                  recentDecisions:
+                    description: |-
+                      recentDecisions is a rolling window of the most recent terminal
+                      outcomes, newest first, trimmed to a bounded length (default 10).
+                    items:
+                      description: |-
+                        RebalanceDecision is a single terminal-outcome record kept in the profile's
+                        rolling decision history.
+                      properties:
+                        action:
+                          description: action is the AI-returned action that was processed
+                            (e.g. "Move", "NoOp").
+                          type: string
+                        decisionId:
+                          description: decisionId correlates this record with engine
+                            logs and Kubernetes Events.
+                          type: string
+                        details:
+                          description: |-
+                            details carries free-form, state-specific context (e.g. target node,
+                            improvement score, dry-run marker).
+                          type: string
+                        lastTransitionAt:
+                          description: lastTransitionAt is when this decision reached
+                            its terminal state.
+                          format: date-time
+                          type: string
+                        reason:
+                          description: reason explains why the decision ended in this
+                            state.
+                          type: string
+                        startedAt:
+                          description: startedAt is when this decision's cycle entered
+                            Triggered.
+                          format: date-time
+                          type: string
+                        state:
+                          description: state is the terminal state this decision ended
+                            in.
+                          enum:
+                          - Triggered
+                          - Evaluating
+                          - Decided
+                          - Enacting
+                          - Enacted
+                          - NoOp
+                          - Rejected
+                          - Deferred
+                          - Failed
+                          type: string
+                      required:
+                      - decisionId
+                      - state
+                      type: object
+                    type: array
+                  startedAt:
+                    description: startedAt is when the current cycle entered Triggered.
+                    format: date-time
+                    type: string
+                  state:
+                    description: |-
+                      state is the current position of this workload's decision lifecycle
+                      state machine. Empty when no rebalance cycle has ever been triggered.
+                    enum:
+                    - Triggered
+                    - Evaluating
+                    - Decided
+                    - Enacting
+                    - Enacted
+                    - NoOp
+                    - Rejected
+                    - Deferred
+                    - Failed
                     type: string
                 type: object
               status:
@@ -238,6 +335,7 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - nodes
   - pods
   verbs:
   - get
@@ -269,6 +367,12 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - metrics.k8s.io
+  resources:
+  - nodes
+  verbs:
+  - get
 - apiGroups:
   - orchestration.hiro.io
   resources:

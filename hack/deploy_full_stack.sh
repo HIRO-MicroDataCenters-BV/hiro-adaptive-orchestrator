@@ -221,6 +221,12 @@ print_config() {
   echo "  ║           HIRO Full-Stack Deploy — Configuration         ║"
   echo "  ╚══════════════════════════════════════════════════════════╝"
   echo ""
+  echo "  ── Operator (one Deployment bundles all four) ───────────"
+  echo "    1. OrchestrationProfile controller — CR reconciliation, PlacementStatus"
+  echo "    2. PlacementServer                 — AI node scoring energy gate (:8090)"
+  echo "    3. Rebalance Engine                — hybrid trigger detection → decision lifecycle state machine"
+  echo "    4. Pod scheduler webhook           — opt-in, auto-sets schedulerName (DEPLOY_SCHEDULER_PLUGIN=true)"
+  echo ""
   echo "  ── Identity ──────────────────────────────────────────────"
   echo "    Namespace              : $NAMESPACE"
   echo "    Name Prefix            : $NAME_PREFIX"
@@ -628,6 +634,9 @@ print_summary() {
   echo ""
   echo -e "\033[32m  ── Components ────────────────────────────────────────────\033[0m"
   echo -e "\033[32m    Operator        : deployed  (namespace/$NAMESPACE)\033[0m"
+  echo -e "\033[32m      ├─ OrchestrationProfile controller\033[0m"
+  echo -e "\033[32m      ├─ PlacementServer (AI node scoring, :8090)\033[0m"
+  echo -e "\033[32m      └─ Rebalance Engine (hybrid trigger detection)\033[0m"
   if [ "$USE_MOCK_AGENT" = "true" ]; then
     echo -e "\033[32m    Mock Agent      : deployed  (mock-decision-agent.$NAMESPACE)\033[0m"
   else

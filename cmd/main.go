@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -31,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -160,7 +162,8 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -359,6 +362,35 @@ func main() {
 	rebalanceEngine := rebalance.NewEngine(mgr.GetClient(), rebalanceWriter)
 	if err := mgr.Add(rebalanceEngine); err != nil {
 		setupLog.Error(err, "unable to register rebalance engine")
+		os.Exit(1)
+	}
+
+	// metricsClient talks to metrics-server (metrics.k8s.io) for the
+	// CPUThreshold/MemoryThreshold trigger conditions. metrics-server is an
+	// optional cluster component — NodePressureEvaluator soft-fails per node
+	// when it's unavailable, so this client is safe to construct unconditionally.
+	metricsClient, err := metricsclientset.NewForConfig(restConfig)
+	if err != nil {
+		setupLog.Error(err, "unable to create metrics-server client")
+		os.Exit(1)
+	}
+	pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, 0)
+	triggerEvaluator := rebalance.NewTriggerEvaluator(mgr.GetClient(), eaoGVK, pressureEvaluator)
+
+	rebalanceDetector := rebalance.NewReconciler(
+		mgr.GetClient(),
+		rebalanceWriter,
+		triggerEvaluator,
+		controller.ProfileByAppRefIndex,
+		0, // DefaultDetectionInterval
+	)
+	// eaoGVK above is the List kind (used for List() calls); Watches()/
+	// RESTMapper need the singular item kind, derived here rather than
+	// carrying a second GVK variable through main.go.
+	eaoItemGVK := eaoGVK
+	eaoItemGVK.Kind = strings.TrimSuffix(eaoGVK.Kind, "List")
+	if err := rebalanceDetector.SetupWithManager(mgr, eaoItemGVK); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "RebalanceDetection")
 		os.Exit(1)
 	}
 
