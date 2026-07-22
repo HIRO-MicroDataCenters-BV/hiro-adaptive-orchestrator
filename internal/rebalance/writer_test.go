@@ -45,7 +45,7 @@ func newTestWriter(t *testing.T, profile *orchestrationv1alpha1.OrchestrationPro
 	// draining the channel, and record.FakeRecorder.Eventf blocks (not
 	// drops) once the buffer fills.
 	recorder := record.NewFakeRecorder(256)
-	return NewStateWriter(c, recorder), recorder
+	return NewStateWriter(c, c, recorder), recorder
 }
 
 func testProfile(name string) *orchestrationv1alpha1.OrchestrationProfile {

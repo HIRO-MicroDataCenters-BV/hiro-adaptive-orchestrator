@@ -14,6 +14,7 @@ A Kubernetes operator that provides intelligent, AI-driven pod placement and ada
   - [Flow 3 — Extender Path](#flow-3--extender-path-default-kube-scheduler--placementserver)
   - [Parameter Flow](#parameter-flow)
 - [Detailed Scheduling Flows](docs/scheduling-flows.md) ← function-level call chains for both paths
+- [Rebalance Engine](internal/rebalance/README.md) ← decision lifecycle state machine, hybrid trigger detection, wiring
 - [Features](#features)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
@@ -349,7 +350,7 @@ Each sub-script also works **standalone** — it carries its own `:-` defaults f
 - **Placement strategies** — `Balanced`, `Packed`, `Spread`
 - **Multi-dimensional resource awareness** — CPU, Memory, GPU, Energy
 - **Energy-aware orchestration** — optional integration with an `EnergyAwareOrchestration` CRD
-- **Dynamic rebalancing** — trigger-based (energy threshold, CPU/memory threshold, node failure, scheduled)
+- **Dynamic rebalancing** — trigger-based (energy threshold, CPU/memory threshold, node failure, scheduled); hybrid periodic + event-driven detection feeding a decision lifecycle state machine — see [internal/rebalance/README.md](internal/rebalance/README.md)
 - **AI-delegated scoring** — pluggable external decision agent via HTTP
 - **Custom scheduler plugin** — `HIROScore` runs as a separate `hiro-scheduler` binary; pods opt in via `schedulerName: hiro-scheduler`
 - **Pod scheduler webhook** — `MutatingAdmissionWebhook` auto-sets `spec.schedulerName: hiro-scheduler` on pods governed by an `OrchestrationProfile`; TLS provisioned automatically by cert-manager; enabled with `DEPLOY_SCHEDULER_PLUGIN=true`
@@ -991,6 +992,13 @@ internal/
     extender_types.go                  # Kubernetes scheduler extender protocol types
                                        #   ExtenderArgs, ExtenderFilterResult, HostPriorityList,
                                        #   HostPriority, EnergyGateResult
+  rebalance/                           # See internal/rebalance/README.md for full details
+    reconciler.go                      # Detection stage — hybrid periodic + event-driven triggers
+    triggers.go                        # TriggerEvaluator — Energy/CPU/Memory/NodeFailure/Scheduled
+    pressure.go                        # NodePressureEvaluator — CPU/Memory pressure via metrics-server
+    writer.go                          # StateWriter — sole writer of status.rebalancingStatus
+    state.go                           # Decision lifecycle state machine transition table
+    engine.go                          # manager.Runnable registration
   webhook/v1/
     pod_webhook.go                     # PodCustomDefaulter — sets spec.schedulerName on governed pods
                                        # Soft-fail: profile lookup errors allow pod unchanged

@@ -32,7 +32,8 @@ import (
 )
 
 // Trigger condition names — must match validTriggerConditions in
-// internal/controller/op_constants.go.
+// internal/controller/op_constants.go. These are the only values a user can
+// declare in spec.rebalancing.triggerConditions.
 const (
 	TriggerEnergyThreshold = "EnergyThreshold"
 	TriggerCPUThreshold    = "CPUThreshold"
@@ -40,6 +41,41 @@ const (
 	TriggerNodeFailure     = "NodeFailure"
 	TriggerScheduled       = "Scheduled"
 )
+
+// ActionRetryPendingSchedule is NOT a trigger condition — it never appears
+// in spec.rebalancing.triggerConditions and is never validated against
+// validTriggerConditions. It's an internal action, produced only by
+// evaluateEnergyThreshold's pending-pod case, and consumed only via
+// TriggerResult.BypassAction: delete a Pending, unscheduled pod so its
+// owning controller creates a replacement, forcing an immediate fresh
+// scheduling attempt instead of waiting on kube-scheduler's own backoff.
+// Kept in its own block, deliberately separate from the CRD-enum constants
+// above, so it isn't mistaken for one of them.
+const ActionRetryPendingSchedule = "RetryPendingSchedule"
+
+// TriggerResult describes a matched trigger condition and how it should be
+// handled downstream.
+type TriggerResult struct {
+	// Condition is the CRD-declared trigger condition that matched (one of
+	// the Trigger* constants above).
+	Condition string
+
+	// Reason is a human-readable explanation, surfaced in status and events.
+	Reason string
+
+	// BypassAction, when non-empty (ActionRetryPendingSchedule today), names
+	// an action whose enactment doesn't need an AI consultation — the
+	// trigger's own logic already fully determined it (no judgement call for
+	// the AI to make: no target node to pick, no improvement threshold to
+	// weigh). The Reconciler still drives the full Triggered -> Evaluating ->
+	// Decided -> Enacting -> Enacted/Failed sequence for traceability;
+	// Evaluating just synthesizes the decision internally instead of calling
+	// the external AI.
+	//
+	// Empty means the normal flow applies: Evaluating calls the AI, which may
+	// return Move/NoOp/etc.
+	BypassAction string
+}
 
 // TriggerEvaluator evaluates an OrchestrationProfile's declared rebalancing
 // trigger conditions against current cluster state.
@@ -60,25 +96,28 @@ func NewTriggerEvaluator(c client.Client, eaoGVK schema.GroupVersionKind, pressu
 }
 
 // Evaluate checks every trigger condition declared on the profile, in
-// order, and returns the first one that currently matches, along with a
-// human-readable reason. matched=false means none of the declared
-// conditions currently hold — not an error, just nothing to do this cycle.
+// order, and returns the first one that currently matches. matched=false
+// means none of the declared conditions currently hold — not an error, just
+// nothing to do this cycle.
 func (e *TriggerEvaluator) Evaluate(
 	ctx context.Context,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
-) (matched bool, condition string, reason string, err error) {
+) (matched bool, result TriggerResult, err error) {
 	pods, err := utils.FindPodsForApplication(ctx, e.client, profile.Spec.ApplicationRef)
 	if err != nil {
-		return false, "", "", fmt.Errorf("finding pods for trigger evaluation: %w", err)
+		return false, TriggerResult{}, fmt.Errorf("finding pods for trigger evaluation: %w", err)
 	}
 
 	for _, cond := range profile.Spec.Rebalancing.TriggerConditions {
-		var ok bool
-		var r string
+		var (
+			ok     bool
+			r      string
+			bypass string
+		)
 
 		switch cond {
 		case TriggerEnergyThreshold:
-			ok, r = e.evaluateEnergyThreshold(ctx, profile, pods)
+			ok, r, bypass = e.evaluateEnergyThreshold(ctx, profile, pods)
 		case TriggerCPUThreshold:
 			ok, r = e.evaluateNodeResource(ctx, pods, e.pressure.EvaluateCPUPressure)
 		case TriggerMemoryThreshold:
@@ -92,10 +131,10 @@ func (e *TriggerEvaluator) Evaluate(
 		}
 
 		if ok {
-			return true, cond, r, nil
+			return true, TriggerResult{Condition: cond, Reason: r, BypassAction: bypass}, nil
 		}
 	}
-	return false, "", "", nil
+	return false, TriggerResult{}, nil
 }
 
 // evaluateNodeResource applies a per-node pressure check (CPU or Memory,
@@ -173,11 +212,16 @@ func (e *TriggerEvaluator) evaluateNodeFailure(ctx context.Context, pods []corev
 //     earlier and is worth retrying now. We deliberately don't parse
 //     nextEvaluationTime ourselves; by the time we look, the EAO's own
 //     status already reflects the new window.
+//
+// Returns (matched, reason, bypassAction). bypassAction is
+// ActionRetryPendingSchedule for case 3 (no AI consultation needed) and
+// empty for cases 1/2 (genuine problem signals — the normal Evaluating flow,
+// once built, decides what to do about them).
 func (e *TriggerEvaluator) evaluateEnergyThreshold(
 	ctx context.Context,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
 	pods []corev1.Pod,
-) (bool, string) {
+) (bool, string, string) {
 	logger := logf.FromContext(ctx)
 	appRef := profile.Spec.ApplicationRef
 
@@ -187,7 +231,7 @@ func (e *TriggerEvaluator) evaluateEnergyThreshold(
 		// EnergyAwareOrchestration is an optional component — soft-fail like
 		// internal/placement-server's DecisionContextBuilder.fetchEAOProfile.
 		logger.V(1).Info("rebalance: EAO unavailable, skipping EnergyThreshold check", "err", err)
-		return false, ""
+		return false, "", ""
 	}
 
 	for i := range eaoList.Items {
@@ -208,7 +252,7 @@ func (e *TriggerEvaluator) evaluateEnergyThreshold(
 			if reason == "" {
 				reason = "energy supply reported insufficient"
 			}
-			return true, reason
+			return true, reason, ""
 		}
 
 		action, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "action")
@@ -218,16 +262,16 @@ func (e *TriggerEvaluator) evaluateEnergyThreshold(
 			if reason == "" {
 				reason = fmt.Sprintf("energy decision action=%s", action)
 			}
-			return true, reason
+			return true, reason, ""
 		}
 
 		if (action == "DeployImmediately" || action == "Scheduled") && hasPendingPod(pods) {
-			return true, "energy window reached — retrying previously deferred pod"
+			return true, "energy window reached — retrying previously deferred pod", ActionRetryPendingSchedule
 		}
 
 		break // matched the EAO for this app — nothing more to check
 	}
-	return false, ""
+	return false, "", ""
 }
 
 // hasPendingPod reports whether any pod in the list is still Pending.

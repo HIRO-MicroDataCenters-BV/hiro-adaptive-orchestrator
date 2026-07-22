@@ -131,21 +131,102 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl
 		return ctrl.Result{}, nil
 	}
 
-	matched, condition, reason, err := r.Evaluator.Evaluate(ctx, profile)
+	matched, result, err := r.Evaluator.Evaluate(ctx, profile)
 	if err != nil {
 		logger.Error(err, "rebalance: trigger evaluation failed", "profile", profile.Name)
 		return ctrl.Result{RequeueAfter: r.DetectionInterval}, nil
 	}
 
-	if matched {
-		if err := r.Writer.Transition(ctx, req.NamespacedName, StateTriggered,
-			fmt.Sprintf("%s: %s", condition, reason), TransitionOptions{}); err != nil {
-			logger.Error(err, "rebalance: failed to transition to Triggered", "profile", profile.Name)
-			return ctrl.Result{}, err
-		}
+	if !matched {
+		return ctrl.Result{RequeueAfter: r.DetectionInterval}, nil
+	}
+
+	if result.BypassAction != "" {
+		// No AI consultation needed — the trigger already fully determined
+		// the action. Drive the whole Triggered -> ... -> Enacted/Failed
+		// sequence now instead of waiting on a future reconcile.
+		r.enactBypassAction(ctx, req.NamespacedName, profile, result)
+		return ctrl.Result{RequeueAfter: r.DetectionInterval}, nil
+	}
+
+	if err := r.Writer.Transition(ctx, req.NamespacedName, StateTriggered,
+		fmt.Sprintf("%s: %s", result.Condition, result.Reason), TransitionOptions{}); err != nil {
+		logger.Error(err, "rebalance: failed to transition to Triggered", "profile", profile.Name)
+		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{RequeueAfter: r.DetectionInterval}, nil
+}
+
+// enactBypassAction drives Triggered -> Evaluating -> Decided -> Enacting ->
+// Enacted/Failed for a trigger match whose action needs no AI consultation
+// (result.BypassAction is already the answer). Evaluating and Decided are
+// synthesized locally instead of calling the external AI — every transition
+// still goes through StateWriter, so the sequence is fully visible in
+// status/Events/recentDecisions, it just never makes an HTTP round trip.
+//
+// Errors are recorded via the terminal (Failed) transition, not returned —
+// callers still get the standard periodic requeue either way.
+func (r *Reconciler) enactBypassAction(
+	ctx context.Context,
+	key types.NamespacedName,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	result TriggerResult,
+) {
+	logger := logf.FromContext(ctx)
+	reason := fmt.Sprintf("%s: %s", result.Condition, result.Reason)
+
+	if err := r.Writer.Transition(ctx, key, StateTriggered, reason, TransitionOptions{}); err != nil {
+		logger.Error(err, "rebalance: bypass transition to Triggered failed", "profile", profile.Name)
+		return
+	}
+	if err := r.Writer.Transition(ctx, key, StateEvaluating,
+		"mechanical action determined by trigger, bypassing AI consultation", TransitionOptions{}); err != nil {
+		logger.Error(err, "rebalance: bypass transition to Evaluating failed", "profile", profile.Name)
+		return
+	}
+	if err := r.Writer.Transition(ctx, key, StateDecided, reason,
+		TransitionOptions{Action: result.BypassAction}); err != nil {
+		logger.Error(err, "rebalance: bypass transition to Decided failed", "profile", profile.Name)
+		return
+	}
+	if err := r.Writer.Transition(ctx, key, StateEnacting,
+		fmt.Sprintf("enacting %s", result.BypassAction), TransitionOptions{Action: result.BypassAction}); err != nil {
+		logger.Error(err, "rebalance: bypass transition to Enacting failed", "profile", profile.Name)
+		return
+	}
+
+	// CooldownSeconds is read directly here (rather than via a general
+	// cooldown-computation helper, which doesn't exist yet for the AI-driven
+	// path) specifically to prevent this mechanical action from retrying in
+	// a tight loop every DetectionInterval if the delete doesn't actually fix
+	// the underlying scheduling problem.
+	cooldown := time.Duration(profile.Spec.Rebalancing.CooldownSeconds) * time.Second
+
+	if err := r.enact(ctx, profile, result.BypassAction); err != nil {
+		if tErr := r.Writer.Transition(ctx, key, StateFailed, err.Error(),
+			TransitionOptions{Action: result.BypassAction, Cooldown: cooldown}); tErr != nil {
+			logger.Error(tErr, "rebalance: bypass transition to Failed failed", "profile", profile.Name)
+		}
+		return
+	}
+
+	if err := r.Writer.Transition(ctx, key, StateEnacted, reason,
+		TransitionOptions{Action: result.BypassAction, Cooldown: cooldown}); err != nil {
+		logger.Error(err, "rebalance: bypass transition to Enacted failed", "profile", profile.Name)
+	}
+}
+
+// enact dispatches a bypass action to its enactor. Unknown actions are a
+// programmer error — TriggerEvaluator should never produce one that isn't
+// handled here.
+func (r *Reconciler) enact(ctx context.Context, profile *orchestrationv1alpha1.OrchestrationProfile, action string) error {
+	switch action {
+	case ActionRetryPendingSchedule:
+		return retryPendingSchedule(ctx, r.Client, profile)
+	default:
+		return fmt.Errorf("unknown bypass action %q", action)
+	}
 }
 
 // SetupWithManager registers the Reconciler with the Manager.

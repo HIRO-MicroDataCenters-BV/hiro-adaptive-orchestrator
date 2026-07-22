@@ -64,12 +64,24 @@ type TransitionOptions struct {
 // StateWriter is safe for concurrent use.
 type StateWriter struct {
 	client   client.Client
+	reader   client.Reader
 	recorder record.EventRecorder
 }
 
 // NewStateWriter creates a StateWriter.
-func NewStateWriter(c client.Client, recorder record.EventRecorder) *StateWriter {
-	return &StateWriter{client: c, recorder: recorder}
+//
+// reader MUST be a non-cached reader (mgr.GetAPIReader(), not mgr.GetClient())
+// when multiple Transition calls are chained back-to-back within the same
+// Reconcile invocation (as enactBypassAction in reconciler.go does, and as
+// the future Evaluating/Decided/Enacting sequence will too): the manager's
+// cached client only reflects a write after an asynchronous watch round-trip
+// from the API server, so a Transition immediately following another would
+// read stale state from the cache — even though the prior write already
+// landed on the server — and reject a transition that's actually valid.
+// Status().Update always goes straight to the API server regardless, so
+// only the read side needs the uncached reader.
+func NewStateWriter(c client.Client, reader client.Reader, recorder record.EventRecorder) *StateWriter {
+	return &StateWriter{client: c, reader: reader, recorder: recorder}
 }
 
 // Transition moves the OrchestrationProfile identified by key from its
@@ -93,7 +105,7 @@ func (w *StateWriter) Transition(
 
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		profile := &orchestrationv1alpha1.OrchestrationProfile{}
-		if err := w.client.Get(ctx, key, profile); err != nil {
+		if err := w.reader.Get(ctx, key, profile); err != nil {
 			return fmt.Errorf("rebalance writer: fetching profile %s: %w", key.Name, err)
 		}
 

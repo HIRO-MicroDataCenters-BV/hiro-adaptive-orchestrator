@@ -80,7 +80,7 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*Reconciler, client
 		).
 		Build()
 
-	writer := NewStateWriter(c, record.NewFakeRecorder(256))
+	writer := NewStateWriter(c, c, record.NewFakeRecorder(256))
 	metricsClient := metricsfake.NewSimpleClientset() //nolint:staticcheck // see pressure_test.go
 	pressure := NewNodePressureEvaluator(c, metricsClient, 0.90)
 	evaluator := NewTriggerEvaluator(c, testEAOGVK, pressure)
@@ -229,5 +229,46 @@ func TestReconciler_EnergyVerdictFlipTriggersWorkload(t *testing.T) {
 	}
 	if rs.Reason == "" {
 		t.Error("expected a non-empty reason describing the energy trigger")
+	}
+}
+
+// TestReconciler_EnergyPendingRetryBypassesToEnacted covers the case we
+// discussed: EAO's window reopened (action=DeployImmediately) while a pod
+// for the app is still Pending and unscheduled. TriggerEvaluator signals
+// BypassAction (no AI consultation needed), and Reconcile should drive the
+// full Triggered -> Evaluating -> Decided -> Enacting -> Enacted sequence in
+// one pass, actually deleting the pending pod so its controller recreates it.
+func TestReconciler_EnergyPendingRetryBypassesToEnacted(t *testing.T) {
+	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	sufficient := true
+	eao := testEAO("DeployImmediately", "", &sufficient)
+	pending := testPod("app-a-pending", "", corev1.PodPending)
+	r, c := newTestReconciler(t, testDeployment(), eao, pending, profile)
+
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.RequeueAfter != 30*time.Second {
+		t.Errorf("RequeueAfter = %v, want DetectionInterval (30s)", res.RequeueAfter)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if rs.State != StateEnacted {
+		t.Fatalf("state = %q, want Enacted — bypass path should reach a terminal state in one Reconcile call", rs.State)
+	}
+	if rs.Action != ActionRetryPendingSchedule {
+		t.Errorf("action = %q, want %q", rs.Action, ActionRetryPendingSchedule)
+	}
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].State != StateEnacted {
+		t.Errorf("recentDecisions = %+v, want one Enacted entry", rs.RecentDecisions)
+	}
+
+	// The whole point: the pending pod should actually be gone, so its
+	// owning controller (Deployment) creates a replacement.
+	err = c.Get(context.Background(), types.NamespacedName{Name: "app-a-pending", Namespace: "default"}, &corev1.Pod{})
+	if err == nil {
+		t.Error("expected the pending pod to have been deleted by the bypass enactor")
 	}
 }

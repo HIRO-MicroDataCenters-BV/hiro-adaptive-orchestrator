@@ -137,15 +137,18 @@ func TestTriggerEvaluator_EnergyInsufficient(t *testing.T) {
 	eao := testEAO("DeployImmediately", "", boolPtr(false))
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao)
 
-	matched, condition, reason, err := evaluator.Evaluate(context.Background(), profile)
+	matched, result, err := evaluator.Evaluate(context.Background(), profile)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if !matched || condition != TriggerEnergyThreshold {
-		t.Fatalf("matched=%v condition=%q, want true/%q", matched, condition, TriggerEnergyThreshold)
+	if !matched || result.Condition != TriggerEnergyThreshold {
+		t.Fatalf("matched=%v condition=%q, want true/%q", matched, result.Condition, TriggerEnergyThreshold)
 	}
-	if reason == "" {
+	if result.Reason == "" {
 		t.Error("expected non-empty reason")
+	}
+	if result.BypassAction != "" {
+		t.Errorf("BypassAction = %q, want empty — insufficient energy is a genuine problem signal, needs AI", result.BypassAction)
 	}
 }
 
@@ -154,12 +157,15 @@ func TestTriggerEvaluator_EnergyDelayed(t *testing.T) {
 	eao := testEAO("Delayed", "waiting for cheaper slot", nil)
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao)
 
-	matched, condition, _, err := evaluator.Evaluate(context.Background(), profile)
+	matched, result, err := evaluator.Evaluate(context.Background(), profile)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if !matched || condition != TriggerEnergyThreshold {
-		t.Fatalf("matched=%v condition=%q, want true/%q", matched, condition, TriggerEnergyThreshold)
+	if !matched || result.Condition != TriggerEnergyThreshold {
+		t.Fatalf("matched=%v condition=%q, want true/%q", matched, result.Condition, TriggerEnergyThreshold)
+	}
+	if result.BypassAction != "" {
+		t.Errorf("BypassAction = %q, want empty — Delayed is a genuine problem signal, needs AI", result.BypassAction)
 	}
 }
 
@@ -169,15 +175,19 @@ func TestTriggerEvaluator_EnergyWindowReachedWithPendingPod(t *testing.T) {
 	pending := testPod("app-a-pending", "", corev1.PodPending)
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, pending)
 
-	matched, condition, reason, err := evaluator.Evaluate(context.Background(), profile)
+	matched, result, err := evaluator.Evaluate(context.Background(), profile)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if !matched || condition != TriggerEnergyThreshold {
-		t.Fatalf("matched=%v condition=%q, want true/%q", matched, condition, TriggerEnergyThreshold)
+	if !matched || result.Condition != TriggerEnergyThreshold {
+		t.Fatalf("matched=%v condition=%q, want true/%q", matched, result.Condition, TriggerEnergyThreshold)
 	}
-	if reason == "" {
+	if result.Reason == "" {
 		t.Error("expected non-empty reason")
+	}
+	if result.BypassAction != ActionRetryPendingSchedule {
+		t.Errorf("BypassAction = %q, want %q — no AI consultation needed for a pending-pod retry",
+			result.BypassAction, ActionRetryPendingSchedule)
 	}
 }
 
@@ -187,7 +197,7 @@ func TestTriggerEvaluator_EnergyOKNoPendingPod(t *testing.T) {
 	running := testPod("app-a-1", "node-a", corev1.PodRunning)
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, running)
 
-	matched, _, _, err := evaluator.Evaluate(context.Background(), profile)
+	matched, _, err := evaluator.Evaluate(context.Background(), profile)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
@@ -200,7 +210,7 @@ func TestTriggerEvaluator_EAOUnavailableSoftFails(t *testing.T) {
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
 	evaluator := newTestTriggerEvaluator(t, testDeployment()) // no EAO seeded
 
-	matched, _, _, err := evaluator.Evaluate(context.Background(), profile)
+	matched, _, err := evaluator.Evaluate(context.Background(), profile)
 	if err != nil {
 		t.Fatalf("Evaluate should soft-fail, not error: %v", err)
 	}
@@ -222,14 +232,14 @@ func TestTriggerEvaluator_NodeFailure(t *testing.T) {
 	}
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), pod, node)
 
-	matched, condition, reason, err := evaluator.Evaluate(context.Background(), profile)
+	matched, result, err := evaluator.Evaluate(context.Background(), profile)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if !matched || condition != TriggerNodeFailure {
-		t.Fatalf("matched=%v condition=%q, want true/%q", matched, condition, TriggerNodeFailure)
+	if !matched || result.Condition != TriggerNodeFailure {
+		t.Fatalf("matched=%v condition=%q, want true/%q", matched, result.Condition, TriggerNodeFailure)
 	}
-	if reason == "" {
+	if result.Reason == "" {
 		t.Error("expected non-empty reason")
 	}
 }
@@ -247,7 +257,7 @@ func TestTriggerEvaluator_NodeHealthyNoMatch(t *testing.T) {
 	}
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), pod, node)
 
-	matched, _, _, err := evaluator.Evaluate(context.Background(), profile)
+	matched, _, err := evaluator.Evaluate(context.Background(), profile)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
@@ -260,12 +270,12 @@ func TestTriggerEvaluator_Scheduled(t *testing.T) {
 	profile := testProfileWithConditions(TriggerScheduled)
 	evaluator := newTestTriggerEvaluator(t, testDeployment())
 
-	matched, condition, _, err := evaluator.Evaluate(context.Background(), profile)
+	matched, result, err := evaluator.Evaluate(context.Background(), profile)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if !matched || condition != TriggerScheduled {
-		t.Fatalf("matched=%v condition=%q, want true/%q", matched, condition, TriggerScheduled)
+	if !matched || result.Condition != TriggerScheduled {
+		t.Fatalf("matched=%v condition=%q, want true/%q", matched, result.Condition, TriggerScheduled)
 	}
 }
 
@@ -273,7 +283,7 @@ func TestTriggerEvaluator_NoConditionsDeclaredNoMatch(t *testing.T) {
 	profile := testProfileWithConditions() // none declared
 	evaluator := newTestTriggerEvaluator(t, testDeployment())
 
-	matched, _, _, err := evaluator.Evaluate(context.Background(), profile)
+	matched, _, err := evaluator.Evaluate(context.Background(), profile)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
@@ -297,12 +307,12 @@ func TestTriggerEvaluator_FirstMatchWins(t *testing.T) {
 	}
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), pod, node)
 
-	matched, condition, _, err := evaluator.Evaluate(context.Background(), profile)
+	matched, result, err := evaluator.Evaluate(context.Background(), profile)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if !matched || condition != TriggerScheduled {
+	if !matched || result.Condition != TriggerScheduled {
 		t.Fatalf("matched=%v condition=%q, want true/%q (NodeFailure shouldn't match, Scheduled should)",
-			matched, condition, TriggerScheduled)
+			matched, result.Condition, TriggerScheduled)
 	}
 }

@@ -357,6 +357,7 @@ func main() {
 	// -------------------------------------------------------------------------
 	rebalanceWriter := rebalance.NewStateWriter(
 		mgr.GetClient(),
+		mgr.GetAPIReader(), // uncached — see NewStateWriter's doc comment on why
 		mgr.GetEventRecorderFor("rebalance-engine"), //nolint:staticcheck
 	)
 	rebalanceEngine := rebalance.NewEngine(mgr.GetClient(), rebalanceWriter)
