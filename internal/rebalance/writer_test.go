@@ -66,7 +66,7 @@ func TestStateWriter_Transition_FirstCycle(t *testing.T) {
 	ctx := context.Background()
 	key := types.NamespacedName{Name: "profile-a"}
 
-	if err := writer.Transition(ctx, key, StateTriggered, "energy verdict flip", TransitionOptions{}); err != nil {
+	if _, err := writer.Transition(ctx, key, StateTriggered, "energy verdict flip", TransitionOptions{}); err != nil {
 		t.Fatalf("Transition to Triggered: %v", err)
 	}
 
@@ -101,7 +101,7 @@ func TestStateWriter_Transition_InvalidRejected(t *testing.T) {
 	key := types.NamespacedName{Name: "profile-b"}
 
 	// Skipping straight to Decided without going through Triggered/Evaluating.
-	err := writer.Transition(ctx, key, StateDecided, "bogus", TransitionOptions{})
+	_, err := writer.Transition(ctx, key, StateDecided, "bogus", TransitionOptions{})
 	if err == nil {
 		t.Fatal("expected error for invalid transition, got nil")
 	}
@@ -115,16 +115,17 @@ func TestStateWriter_Transition_TerminalRecordsHistoryAndCooldown(t *testing.T) 
 
 	steps := []orchestrationv1alpha1.RebalancingStateType{StateTriggered, StateEvaluating}
 	for _, s := range steps {
-		if err := writer.Transition(ctx, key, s, "progressing", TransitionOptions{}); err != nil {
+		if _, err := writer.Transition(ctx, key, s, "progressing", TransitionOptions{}); err != nil {
 			t.Fatalf("Transition to %s: %v", s, err)
 		}
 	}
 
-	if err := writer.Transition(ctx, key, StateNoOp, "AI said no action warranted", TransitionOptions{
-		Action:   "NoOp",
+	if _, err := writer.Transition(ctx, key, StateWatching, "AI said no action warranted", TransitionOptions{
+		Action:   orchestrationv1alpha1.RebalanceActionNoOp,
+		Outcome:  OutcomeNoOp,
 		Cooldown: 30 * time.Second,
 	}); err != nil {
-		t.Fatalf("Transition to NoOp: %v", err)
+		t.Fatalf("Transition to Watching (NoOp): %v", err)
 	}
 
 	got := &orchestrationv1alpha1.OrchestrationProfile{}
@@ -132,8 +133,8 @@ func TestStateWriter_Transition_TerminalRecordsHistoryAndCooldown(t *testing.T) 
 		t.Fatalf("Get: %v", err)
 	}
 	rs := got.Status.RebalancingStatus
-	if rs.State != StateNoOp {
-		t.Errorf("state = %q, want NoOp", rs.State)
+	if rs.State != StateWatching {
+		t.Errorf("state = %q, want Watching", rs.State)
 	}
 	if rs.CooldownUntil.IsZero() {
 		t.Error("cooldownUntil not set on terminal transition")
@@ -141,7 +142,7 @@ func TestStateWriter_Transition_TerminalRecordsHistoryAndCooldown(t *testing.T) 
 	if len(rs.RecentDecisions) != 1 {
 		t.Fatalf("recentDecisions len = %d, want 1", len(rs.RecentDecisions))
 	}
-	if rs.RecentDecisions[0].State != StateNoOp || rs.RecentDecisions[0].DecisionID != rs.DecisionID {
+	if rs.RecentDecisions[0].Outcome != OutcomeNoOp || rs.RecentDecisions[0].DecisionID != rs.DecisionID {
 		t.Errorf("recentDecisions[0] = %+v, want matching NoOp record", rs.RecentDecisions[0])
 	}
 }
@@ -152,15 +153,16 @@ func TestStateWriter_Transition_RecentDecisionsTrimmed(t *testing.T) {
 	ctx := context.Background()
 	key := types.NamespacedName{Name: "profile-d"}
 
-	for i := range MaxRecentDecisions + 3 {
-		if err := writer.Transition(ctx, key, StateTriggered, "cycle", TransitionOptions{}); err != nil {
+	for i := 0; i < MaxRecentDecisions+3; i++ {
+		if _, err := writer.Transition(ctx, key, StateTriggered, "cycle", TransitionOptions{}); err != nil {
 			t.Fatalf("cycle %d Triggered: %v", i, err)
 		}
-		if err := writer.Transition(ctx, key, StateEvaluating, "cycle", TransitionOptions{}); err != nil {
+		if _, err := writer.Transition(ctx, key, StateEvaluating, "cycle", TransitionOptions{}); err != nil {
 			t.Fatalf("cycle %d Evaluating: %v", i, err)
 		}
-		if err := writer.Transition(ctx, key, StateNoOp, "cycle", TransitionOptions{}); err != nil {
-			t.Fatalf("cycle %d NoOp: %v", i, err)
+		if _, err := writer.Transition(ctx, key, StateWatching, "cycle",
+			TransitionOptions{Outcome: OutcomeNoOp}); err != nil {
+			t.Fatalf("cycle %d Watching (NoOp): %v", i, err)
 		}
 	}
 

@@ -23,6 +23,8 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -191,6 +193,49 @@ func FindPodsForApplication(
 	)
 
 	return podList.Items, nil
+}
+
+// FindEAOForApp finds the EnergyAwareOrchestration resource (returned as
+// unstructured, since it's a CRD from a separate, optional component) whose
+// spec.applicationRef matches the given ApplicationReference directly.
+//
+// This is simpler than resolving from a pod's owner chain (see
+// internal/placement-server's pod-triggered EAO lookup, used for initial
+// placement): the caller already knows the app directly from the profile's
+// own ApplicationRef, no pod needed. Shared by the rebalance engine's
+// trigger evaluator and its rebalance decision context builder — kept in
+// one place so both match EAO the same way.
+//
+// Returns nil (no error) when no matching EAO exists, or when the CRD/API
+// call fails — EnergyAwareOrchestration is an optional component, so a
+// lookup failure is treated as "no EAO data available", not a hard error.
+func FindEAOForApp(
+	ctx context.Context,
+	k8sClient client.Client,
+	eaoGVK schema.GroupVersionKind,
+	appRef orchestrationv1alpha1.ApplicationReference,
+) (*unstructured.Unstructured, error) {
+	eaoList := &unstructured.UnstructuredList{}
+	eaoList.SetGroupVersionKind(eaoGVK)
+	if err := k8sClient.List(ctx, eaoList); err != nil {
+		return nil, fmt.Errorf("listing EnergyAwareOrchestration resources: %w", err)
+	}
+
+	for i := range eaoList.Items {
+		eao := &eaoList.Items[i]
+
+		refName, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "name")
+		refKind, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "kind")
+		refNamespace, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "namespace")
+		if refNamespace == "" {
+			refNamespace = eao.GetNamespace()
+		}
+
+		if refName == appRef.Name && refNamespace == appRef.Namespace && refKind == appRef.Kind {
+			return eao, nil
+		}
+	}
+	return nil, nil
 }
 
 // NodeNames extracts the names of a list of nodes as a slice.

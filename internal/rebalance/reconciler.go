@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
 )
 
@@ -40,6 +41,11 @@ import (
 // re-checked for slow-drifting trigger conditions (CPU/Memory/Scheduled)
 // when no faster event has fired first.
 const DefaultDetectionInterval = 30 * time.Second
+
+// DefaultDecisionTimeout bounds how long evaluateWithAI waits for the
+// External AI Agent to answer a rebalance decision request before treating
+// it as failed.
+const DefaultDecisionTimeout = 5 * time.Second
 
 // Never Ever delete this comments as they are used by kubebuilder to generate RBAC permissions for the controller.
 // If you need to change the permissions,
@@ -65,27 +71,46 @@ const DefaultDetectionInterval = 30 * time.Second
 // Both paths call the exact same TriggerEvaluator.Evaluate — the watches
 // and the ticker only decide *when* to check, not *what* currently holds.
 //
-// This Reconciler only drives the Triggered transition. Decision (Story
-// 27/28) and Enaction (Story 29/30) extend Reconcile to also act once a
-// profile is past Triggered — see the in-flight check below.
+// This Reconciler drives Detection (Triggered) and, for trigger matches with
+// no mechanical bypass action, the AI consultation (Evaluating) too — see
+// evaluateWithAI. Enaction on a successful AI response is not yet wired up
+// here — see evaluateWithAI's doc comment.
 type Reconciler struct {
 	client.Client
 	Writer            *StateWriter
 	Evaluator         *TriggerEvaluator
 	ProfileIndexField string
 	DetectionInterval time.Duration
+
+	// ContextBuilder and DecisionClient are the same instances the placement
+	// server uses for initial-placement decisions (see cmd/main.go) — the
+	// rebalance engine's AI consultation is a second use of the one
+	// configured External AI Agent, not a parallel HTTP path.
+	ContextBuilder *placementserver.DecisionContextBuilder
+	DecisionClient *placementserver.DecisionClient
+
+	// DecisionTimeout bounds evaluateWithAI's wait for the AI agent to
+	// respond. <= 0 uses DefaultDecisionTimeout.
+	DecisionTimeout time.Duration
 }
 
-// NewReconciler creates a Reconciler. interval <= 0 uses DefaultDetectionInterval.
+// NewReconciler creates a Reconciler. interval <= 0 uses
+// DefaultDetectionInterval; decisionTimeout <= 0 uses DefaultDecisionTimeout.
 func NewReconciler(
 	c client.Client,
 	writer *StateWriter,
 	evaluator *TriggerEvaluator,
 	profileIndexField string,
 	interval time.Duration,
+	contextBuilder *placementserver.DecisionContextBuilder,
+	decisionClient *placementserver.DecisionClient,
+	decisionTimeout time.Duration,
 ) *Reconciler {
 	if interval <= 0 {
 		interval = DefaultDetectionInterval
+	}
+	if decisionTimeout <= 0 {
+		decisionTimeout = DefaultDecisionTimeout
 	}
 	return &Reconciler{
 		Client:            c,
@@ -93,6 +118,9 @@ func NewReconciler(
 		Evaluator:         evaluator,
 		ProfileIndexField: profileIndexField,
 		DetectionInterval: interval,
+		ContextBuilder:    contextBuilder,
+		DecisionClient:    decisionClient,
+		DecisionTimeout:   decisionTimeout,
 	}
 }
 
@@ -123,10 +151,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl
 		}
 	}
 
-	if rs.State != "" && !IsTerminal(rs.State) {
+	if rs.State != "" && rs.State != StateWatching {
 		// A cycle is already past Triggered (Evaluating/Decided/Enacting) —
-		// this Reconciler's job (Detection) is done for now; let it run to a
-		// terminal state before considering a new one. Later stories extend
+		// this Reconciler's job (Detection) is done for now; let it run back
+		// to Watching before considering a new one. Later stories extend
 		// this method to act on these in-flight states rather than skip them.
 		return ctrl.Result{}, nil
 	}
@@ -149,24 +177,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl
 		return ctrl.Result{RequeueAfter: r.DetectionInterval}, nil
 	}
 
-	if err := r.Writer.Transition(ctx, req.NamespacedName, StateTriggered,
-		fmt.Sprintf("%s: %s", result.Condition, result.Reason), TransitionOptions{}); err != nil {
-		logger.Error(err, "rebalance: failed to transition to Triggered", "profile", profile.Name)
-		return ctrl.Result{}, err
-	}
-
+	r.evaluateWithAI(ctx, req.NamespacedName, profile, result)
 	return ctrl.Result{RequeueAfter: r.DetectionInterval}, nil
 }
 
 // enactBypassAction drives Triggered -> Evaluating -> Decided -> Enacting ->
-// Enacted/Failed for a trigger match whose action needs no AI consultation
-// (result.BypassAction is already the answer). Evaluating and Decided are
-// synthesized locally instead of calling the external AI — every transition
-// still goes through StateWriter, so the sequence is fully visible in
-// status/Events/recentDecisions, it just never makes an HTTP round trip.
+// Watching (Outcome Enacted/Failed) for a trigger match whose action needs
+// no AI consultation (result.BypassAction is already the answer). Evaluating
+// and Decided are synthesized locally instead of calling the external AI —
+// every transition still goes through StateWriter, so the sequence is fully
+// visible in status/Events/recentDecisions, it just never makes an HTTP
+// round trip.
 //
-// Errors are recorded via the terminal (Failed) transition, not returned —
-// callers still get the standard periodic requeue either way.
+// Errors are recorded via the terminal (Watching, Outcome Failed) transition,
+// not returned — callers still get the standard periodic requeue either way.
 func (r *Reconciler) enactBypassAction(
 	ctx context.Context,
 	key types.NamespacedName,
@@ -175,23 +199,24 @@ func (r *Reconciler) enactBypassAction(
 ) {
 	logger := logf.FromContext(ctx)
 	reason := fmt.Sprintf("%s: %s", result.Condition, result.Reason)
+	bypassAction := orchestrationv1alpha1.RebalanceAction(result.BypassAction)
 
-	if err := r.Writer.Transition(ctx, key, StateTriggered, reason, TransitionOptions{}); err != nil {
+	if _, err := r.Writer.Transition(ctx, key, StateTriggered, reason, TransitionOptions{}); err != nil {
 		logger.Error(err, "rebalance: bypass transition to Triggered failed", "profile", profile.Name)
 		return
 	}
-	if err := r.Writer.Transition(ctx, key, StateEvaluating,
+	if _, err := r.Writer.Transition(ctx, key, StateEvaluating,
 		"mechanical action determined by trigger, bypassing AI consultation", TransitionOptions{}); err != nil {
 		logger.Error(err, "rebalance: bypass transition to Evaluating failed", "profile", profile.Name)
 		return
 	}
-	if err := r.Writer.Transition(ctx, key, StateDecided, reason,
-		TransitionOptions{Action: result.BypassAction}); err != nil {
+	if _, err := r.Writer.Transition(ctx, key, StateDecided, reason,
+		TransitionOptions{Action: bypassAction}); err != nil {
 		logger.Error(err, "rebalance: bypass transition to Decided failed", "profile", profile.Name)
 		return
 	}
-	if err := r.Writer.Transition(ctx, key, StateEnacting,
-		fmt.Sprintf("enacting %s", result.BypassAction), TransitionOptions{Action: result.BypassAction}); err != nil {
+	if _, err := r.Writer.Transition(ctx, key, StateEnacting,
+		fmt.Sprintf("enacting %s", result.BypassAction), TransitionOptions{Action: bypassAction}); err != nil {
 		logger.Error(err, "rebalance: bypass transition to Enacting failed", "profile", profile.Name)
 		return
 	}
@@ -204,16 +229,91 @@ func (r *Reconciler) enactBypassAction(
 	cooldown := time.Duration(profile.Spec.Rebalancing.CooldownSeconds) * time.Second
 
 	if err := r.enact(ctx, profile, result.BypassAction); err != nil {
-		if tErr := r.Writer.Transition(ctx, key, StateFailed, err.Error(),
-			TransitionOptions{Action: result.BypassAction, Cooldown: cooldown}); tErr != nil {
-			logger.Error(tErr, "rebalance: bypass transition to Failed failed", "profile", profile.Name)
+		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, err.Error(),
+			TransitionOptions{Action: bypassAction, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			logger.Error(tErr, "rebalance: bypass transition to Watching (Failed) failed", "profile", profile.Name)
 		}
 		return
 	}
 
-	if err := r.Writer.Transition(ctx, key, StateEnacted, reason,
-		TransitionOptions{Action: result.BypassAction, Cooldown: cooldown}); err != nil {
-		logger.Error(err, "rebalance: bypass transition to Enacted failed", "profile", profile.Name)
+	if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
+		TransitionOptions{Action: bypassAction, Outcome: OutcomeEnacted, Cooldown: cooldown}); err != nil {
+		logger.Error(err, "rebalance: bypass transition to Watching (Enacted) failed", "profile", profile.Name)
+	}
+}
+
+// evaluateWithAI drives Triggered -> Evaluating and consults the External AI
+// Agent for a trigger match that has no mechanical answer (result.BypassAction
+// is empty). Unlike enactBypassAction, a successful AI response is not acted
+// on any further here — dispatching the recommended action is a deliberately
+// accepted gap for a later change. Only the timeout/error paths return the
+// cycle to Watching (Outcome Failed) for now.
+func (r *Reconciler) evaluateWithAI(
+	ctx context.Context,
+	key types.NamespacedName,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	result TriggerResult,
+) {
+	logger := logf.FromContext(ctx)
+	reason := fmt.Sprintf("%s: %s", result.Condition, result.Reason)
+
+	if _, err := r.Writer.Transition(ctx, key, StateTriggered, reason, TransitionOptions{}); err != nil {
+		logger.Error(err, "rebalance: AI-path transition to Triggered failed", "profile", profile.Name)
+		return
+	}
+
+	rs, err := r.Writer.Transition(ctx, key, StateEvaluating,
+		"requesting AI rebalance decision", TransitionOptions{})
+	if err != nil {
+		logger.Error(err, "rebalance: AI-path transition to Evaluating failed", "profile", profile.Name)
+		return
+	}
+
+	timeout := r.DecisionTimeout
+	if timeout <= 0 {
+		timeout = DefaultDecisionTimeout
+	}
+	aiCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := r.ContextBuilder.BuildRebalanceContext(aiCtx, profile, rs.DecisionID, reason, rs.RecentDecisions)
+	if err != nil {
+		r.failEvaluation(ctx, key, profile, fmt.Sprintf("building AI decision context: %v", err))
+		return
+	}
+
+	resp, err := r.DecisionClient.RequestRebalanceDecision(aiCtx, req)
+	if err != nil {
+		r.failEvaluation(ctx, key, profile, fmt.Sprintf("AI unavailable: %v", err))
+		return
+	}
+
+	// Accepted gap: the response is logged but not dispatched further — no
+	// action is enacted here yet.
+	logger.Info("rebalance: AI rebalance decision received (not yet enacted)",
+		"profile", profile.Name,
+		"action", resp.Action,
+		"podName", resp.PodName,
+		"targetNode", resp.TargetNode,
+		"improvement", resp.Improvement,
+		"reason", resp.Reason,
+	)
+}
+
+// failEvaluation returns a profile to Watching with Outcome Failed when the
+// AI consultation itself could not be completed (context assembly or the
+// HTTP round trip), as opposed to the AI successfully responding with an
+// unfavorable decision.
+func (r *Reconciler) failEvaluation(
+	ctx context.Context,
+	key types.NamespacedName,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	reason string,
+) {
+	logger := logf.FromContext(ctx)
+	if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
+		TransitionOptions{Outcome: OutcomeFailed}); err != nil {
+		logger.Error(err, "rebalance: AI-path transition to Watching (Failed) failed", "profile", profile.Name)
 	}
 }
 

@@ -31,25 +31,17 @@ func TestIsValidTransition(t *testing.T) {
 	}{
 		{"none to Triggered", stateNone, StateTriggered, true},
 		{"none to Evaluating rejected", stateNone, StateEvaluating, false},
+		{"Watching to Triggered", StateWatching, StateTriggered, true},
+		{"Watching to Evaluating rejected", StateWatching, StateEvaluating, false},
 		{"Triggered to Evaluating", StateTriggered, StateEvaluating, true},
 		{"Triggered to Decided rejected", StateTriggered, StateDecided, false},
 		{"Evaluating to Decided", StateEvaluating, StateDecided, true},
-		{"Evaluating to NoOp", StateEvaluating, StateNoOp, true},
-		{"Evaluating to Rejected", StateEvaluating, StateRejected, true},
-		{"Evaluating to Failed", StateEvaluating, StateFailed, true},
+		{"Evaluating to Watching", StateEvaluating, StateWatching, true},
 		{"Evaluating to Enacting rejected", StateEvaluating, StateEnacting, false},
 		{"Decided to Enacting", StateDecided, StateEnacting, true},
-		{"Decided to Enacted rejected", StateDecided, StateEnacted, false},
-		{"Enacting to Enacted", StateEnacting, StateEnacted, true},
-		{"Enacting to Deferred", StateEnacting, StateDeferred, true},
-		{"Enacting to Failed", StateEnacting, StateFailed, true},
+		{"Decided to Watching rejected", StateDecided, StateWatching, false},
+		{"Enacting to Watching", StateEnacting, StateWatching, true},
 		{"Enacting to Triggered rejected", StateEnacting, StateTriggered, false},
-		{"Enacted to Triggered", StateEnacted, StateTriggered, true},
-		{"NoOp to Triggered", StateNoOp, StateTriggered, true},
-		{"Rejected to Triggered", StateRejected, StateTriggered, true},
-		{"Deferred to Triggered", StateDeferred, StateTriggered, true},
-		{"Failed to Triggered", StateFailed, StateTriggered, true},
-		{"Enacted to Evaluating rejected", StateEnacted, StateEvaluating, false},
 	}
 
 	for _, tt := range tests {
@@ -58,21 +50,5 @@ func TestIsValidTransition(t *testing.T) {
 				t.Errorf("IsValidTransition(%q, %q) = %v, want %v", tt.from, tt.to, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestIsTerminal(t *testing.T) {
-	terminal := []orchestrationv1alpha1.RebalancingStateType{StateEnacted, StateNoOp, StateRejected, StateDeferred, StateFailed}
-	for _, s := range terminal {
-		if !IsTerminal(s) {
-			t.Errorf("IsTerminal(%q) = false, want true", s)
-		}
-	}
-
-	active := []orchestrationv1alpha1.RebalancingStateType{stateNone, StateTriggered, StateEvaluating, StateDecided, StateEnacting}
-	for _, s := range active {
-		if IsTerminal(s) {
-			t.Errorf("IsTerminal(%q) = true, want false", s)
-		}
 	}
 }

@@ -15,9 +15,11 @@ limitations under the License.
 */
 
 // Package rebalance implements the rebalance engine's decision lifecycle
-// state machine: Detection (Triggered) → Decision (Evaluating → Decided /
-// NoOp / Rejected / Failed) → Enaction (Enacting → Enacted / Deferred /
-// Failed).
+// state machine: Detection (Triggered) → Decision (Evaluating → Decided) →
+// Enaction (Enacting), always returning to Watching. The outcome of a cycle
+// (Enacted, NoOp, Rejected, Deferred, Failed) is not a `state` value — it is
+// recorded in RecentDecisions alongside the Watching transition that ends
+// the cycle.
 //
 // Every transition MUST go through StateWriter (writer.go) — no other code
 // in this codebase is permitted to mutate status.rebalancingStatus directly.
@@ -31,54 +33,43 @@ import (
 
 // State type aliases for readability at call sites.
 const (
+	StateWatching   = orchestrationv1alpha1.RebalancingStateWatching
 	StateTriggered  = orchestrationv1alpha1.RebalancingStateTriggered
 	StateEvaluating = orchestrationv1alpha1.RebalancingStateEvaluating
 	StateDecided    = orchestrationv1alpha1.RebalancingStateDecided
 	StateEnacting   = orchestrationv1alpha1.RebalancingStateEnacting
-	StateEnacted    = orchestrationv1alpha1.RebalancingStateEnacted
-	StateNoOp       = orchestrationv1alpha1.RebalancingStateNoOp
-	StateRejected   = orchestrationv1alpha1.RebalancingStateRejected
-	StateDeferred   = orchestrationv1alpha1.RebalancingStateDeferred
-	StateFailed     = orchestrationv1alpha1.RebalancingStateFailed
 
 	// stateNone represents a profile that has never entered the state
-	// machine (status.rebalancingStatus.state is empty).
+	// machine (status.rebalancingStatus.state is empty). Treated the same
+	// as StateWatching everywhere below.
 	stateNone = orchestrationv1alpha1.RebalancingStateType("")
 )
 
+// Outcome type aliases for readability at call sites.
+const (
+	OutcomeEnacted  = orchestrationv1alpha1.RebalanceOutcomeEnacted
+	OutcomeNoOp     = orchestrationv1alpha1.RebalanceOutcomeNoOp
+	OutcomeRejected = orchestrationv1alpha1.RebalanceOutcomeRejected
+	OutcomeDeferred = orchestrationv1alpha1.RebalanceOutcomeDeferred
+	OutcomeFailed   = orchestrationv1alpha1.RebalanceOutcomeFailed
+)
+
 // validTransitions is the authoritative transition table for the decision
-// lifecycle. Every terminal state (and the unset initial state) can only
-// move forward into Triggered — starting a fresh cycle after cooldown.
+// lifecycle. A cycle always ends by returning to Watching — the outcome of
+// that cycle (Enacted/NoOp/Rejected/Deferred/Failed) is recorded separately
+// in RecentDecisions, not as a `state` value. stateNone and StateWatching
+// are equivalent resting positions.
 var validTransitions = map[orchestrationv1alpha1.RebalancingStateType][]orchestrationv1alpha1.RebalancingStateType{
 	stateNone:       {StateTriggered},
+	StateWatching:   {StateTriggered},
 	StateTriggered:  {StateEvaluating},
-	StateEvaluating: {StateDecided, StateNoOp, StateRejected, StateFailed},
+	StateEvaluating: {StateDecided, StateWatching},
 	StateDecided:    {StateEnacting},
-	StateEnacting:   {StateEnacted, StateDeferred, StateFailed},
-	StateEnacted:    {StateTriggered},
-	StateNoOp:       {StateTriggered},
-	StateRejected:   {StateTriggered},
-	StateDeferred:   {StateTriggered},
-	StateFailed:     {StateTriggered},
-}
-
-// terminalStates are the states where a decision cycle ends. Each one
-// starts the workload's cooldown and appends a record to RecentDecisions.
-var terminalStates = map[orchestrationv1alpha1.RebalancingStateType]bool{
-	StateEnacted:  true,
-	StateNoOp:     true,
-	StateRejected: true,
-	StateDeferred: true,
-	StateFailed:   true,
+	StateEnacting:   {StateWatching},
 }
 
 // IsValidTransition reports whether moving from `from` to `to` is allowed by
 // the decision lifecycle state machine.
 func IsValidTransition(from, to orchestrationv1alpha1.RebalancingStateType) bool {
 	return slices.Contains(validTransitions[from], to)
-}
-
-// IsTerminal reports whether the given state ends a decision cycle.
-func IsTerminal(s orchestrationv1alpha1.RebalancingStateType) bool {
-	return terminalStates[s]
 }

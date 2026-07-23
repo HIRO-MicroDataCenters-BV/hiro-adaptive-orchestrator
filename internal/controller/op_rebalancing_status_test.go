@@ -15,7 +15,9 @@ limitations under the License.
 */
 
 // Integration tests proving the CRD's OpenAPI schema enforces the
-// rebalancing decision-lifecycle enum (status.rebalancingStatus.state).
+// rebalancing decision-lifecycle enums: the active-state enum
+// (status.rebalancingStatus.state) and the separate terminal-outcome enum
+// (status.rebalancingStatus.recentDecisions[].outcome).
 // Uses the same envtest apiserver as orchestrationprofile_controller_test.go.
 package controller
 
@@ -53,15 +55,11 @@ var _ = Describe("OrchestrationProfile rebalancingStatus.state CRD validation", 
 			profile.Status.RebalancingStatus.State = state
 			Expect(k8sClient.Status().Update(testCtx, profile)).To(Succeed())
 		},
+		Entry("Watching", orchestrationv1alpha1.RebalancingStateWatching),
 		Entry("Triggered", orchestrationv1alpha1.RebalancingStateTriggered),
 		Entry("Evaluating", orchestrationv1alpha1.RebalancingStateEvaluating),
 		Entry("Decided", orchestrationv1alpha1.RebalancingStateDecided),
 		Entry("Enacting", orchestrationv1alpha1.RebalancingStateEnacting),
-		Entry("Enacted", orchestrationv1alpha1.RebalancingStateEnacted),
-		Entry("NoOp", orchestrationv1alpha1.RebalancingStateNoOp),
-		Entry("Rejected", orchestrationv1alpha1.RebalancingStateRejected),
-		Entry("Deferred", orchestrationv1alpha1.RebalancingStateDeferred),
-		Entry("Failed", orchestrationv1alpha1.RebalancingStateFailed),
 	)
 
 	It("rejects an unrecognized state value", func() {
@@ -73,12 +71,38 @@ var _ = Describe("OrchestrationProfile rebalancingStatus.state CRD validation", 
 		Expect(err).To(HaveOccurred())
 	})
 
-	It("rejects an unrecognized state inside a recentDecisions entry", func() {
-		profile := newProfile("rebalance-state-invalid-history")
+	It("rejects a legacy terminal state value no longer valid as a state", func() {
+		profile := newProfile("rebalance-state-legacy-terminal")
+		Expect(k8sClient.Create(testCtx, profile)).To(Succeed())
+
+		profile.Status.RebalancingStatus.State = "Enacted"
+		err := k8sClient.Status().Update(testCtx, profile)
+		Expect(err).To(HaveOccurred())
+	})
+
+	DescribeTable("accepts every valid recentDecisions outcome",
+		func(outcome orchestrationv1alpha1.RebalanceOutcome) {
+			profile := newProfile("rebalance-outcome-valid-" + strings.ToLower(string(outcome)))
+			Expect(k8sClient.Create(testCtx, profile)).To(Succeed())
+
+			profile.Status.RebalancingStatus.RecentDecisions = []orchestrationv1alpha1.RebalanceDecision{
+				{DecisionID: "d1", Outcome: outcome},
+			}
+			Expect(k8sClient.Status().Update(testCtx, profile)).To(Succeed())
+		},
+		Entry("Enacted", orchestrationv1alpha1.RebalanceOutcomeEnacted),
+		Entry("NoOp", orchestrationv1alpha1.RebalanceOutcomeNoOp),
+		Entry("Rejected", orchestrationv1alpha1.RebalanceOutcomeRejected),
+		Entry("Deferred", orchestrationv1alpha1.RebalanceOutcomeDeferred),
+		Entry("Failed", orchestrationv1alpha1.RebalanceOutcomeFailed),
+	)
+
+	It("rejects an unrecognized outcome inside a recentDecisions entry", func() {
+		profile := newProfile("rebalance-outcome-invalid-history")
 		Expect(k8sClient.Create(testCtx, profile)).To(Succeed())
 
 		profile.Status.RebalancingStatus.RecentDecisions = []orchestrationv1alpha1.RebalanceDecision{
-			{DecisionID: "d1", State: "NotARealState"},
+			{DecisionID: "d1", Outcome: "NotARealOutcome"},
 		}
 		err := k8sClient.Status().Update(testCtx, profile)
 		Expect(err).To(HaveOccurred())

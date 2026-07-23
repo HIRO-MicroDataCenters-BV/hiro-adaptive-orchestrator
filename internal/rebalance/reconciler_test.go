@@ -18,6 +18,9 @@ package rebalance
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -35,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 )
 
 // testProfileIndexField mirrors controller.ProfileByAppRefIndex without
@@ -45,8 +49,19 @@ const testProfileIndexField = ".spec.applicationRef.namespacedName"
 
 // newTestReconciler builds a Reconciler wired to a fake client seeded with
 // the given objects, registering testProfileIndexField so profilesByIndexKey
-// works the same way it does against the real manager cache.
+// works the same way it does against the real manager cache. Its AI agent
+// URL is intentionally unreachable — tests that need a live agent response
+// use newTestReconcilerWithAgent instead.
 func newTestReconciler(t *testing.T, objs ...client.Object) (*Reconciler, client.Client) {
+	t.Helper()
+	r, c := newTestReconcilerWithAgent(t, "http://127.0.0.1:0", objs...)
+	return r, c
+}
+
+// newTestReconcilerWithAgent is newTestReconciler with the AI agent URL
+// pinned to the given address, so tests can point it at an httptest.Server
+// to exercise the evaluateWithAI success path.
+func newTestReconcilerWithAgent(t *testing.T, agentURL string, objs ...client.Object) (*Reconciler, client.Client) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -85,7 +100,11 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*Reconciler, client
 	pressure := NewNodePressureEvaluator(c, metricsClient, 0.90)
 	evaluator := NewTriggerEvaluator(c, testEAOGVK, pressure)
 
-	return NewReconciler(c, writer, evaluator, testProfileIndexField, 30*time.Second), c
+	contextBuilder := placementserver.NewDecisionContextBuilder(c, testProfileIndexField, testEAOGVK)
+	decisionClient := placementserver.NewDecisionClient(agentURL, "", 200*time.Millisecond)
+
+	return NewReconciler(c, writer, evaluator, testProfileIndexField, 30*time.Second,
+		contextBuilder, decisionClient, 200*time.Millisecond), c
 }
 
 func getProfile(t *testing.T, c client.Client, name string) *orchestrationv1alpha1.OrchestrationProfile {
@@ -178,7 +197,13 @@ func TestReconciler_NoTriggerMatchRequeuesWithoutTransition(t *testing.T) {
 	}
 }
 
-func TestReconciler_ScheduledTriggerTransitionsToTriggered(t *testing.T) {
+// TestReconciler_ScheduledTriggerReachesFailedWhenAIUnreachable covers the
+// non-bypass path end to end: a trigger match with no mechanical answer
+// drives Triggered -> Evaluating -> (AI consultation) -> Watching (Outcome
+// Failed) when the External AI Agent can't be reached, all within one
+// Reconcile call. A successful AI response's continuation is covered
+// separately by TestReconciler_AIPathSuccessStopsAtEvaluating.
+func TestReconciler_ScheduledTriggerReachesFailedWhenAIUnreachable(t *testing.T) {
 	profile := testProfileWithConditions(TriggerScheduled)
 	r, c := newTestReconciler(t, testDeployment(), profile)
 
@@ -192,22 +217,24 @@ func TestReconciler_ScheduledTriggerTransitionsToTriggered(t *testing.T) {
 
 	got := getProfile(t, c, profile.Name)
 	rs := got.Status.RebalancingStatus
-	if rs.State != StateTriggered {
-		t.Fatalf("state = %q, want Triggered", rs.State)
+	if rs.State != StateWatching {
+		t.Fatalf("state = %q, want Watching when the AI agent is unreachable", rs.State)
 	}
 	if rs.DecisionID == "" {
-		t.Error("expected decisionId to be assigned")
+		t.Error("expected decisionId to be assigned entering the cycle")
 	}
-	if rs.Reason == "" {
-		t.Error("expected a non-empty reason")
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
+		t.Errorf("recentDecisions = %+v, want one Failed-outcome entry", rs.RecentDecisions)
 	}
 }
 
-// TestReconciler_EnergyVerdictFlipTriggersWorkload is the Story 26
-// acceptance-criteria integration test: a synthetic energy-verdict flip
-// (EAO now reports insufficient energy) causes Reconcile to transition the
-// profile to Triggered, end to end through TriggerEvaluator and StateWriter
-// — not just at the evaluator-unit level (see triggers_test.go).
+// TestReconciler_EnergyVerdictFlipTriggersWorkload is the acceptance-criteria
+// integration test for trigger detection: a synthetic energy-verdict flip
+// (EAO now reports insufficient energy) causes Reconcile to enter the
+// profile's decision lifecycle end to end through TriggerEvaluator and
+// StateWriter — not just at the evaluator-unit level (see triggers_test.go).
+// The AI agent is unreachable in this fake-client setup, so the cycle ends
+// back at Watching with Outcome Failed rather than stopping at Triggered.
 func TestReconciler_EnergyVerdictFlipTriggersWorkload(t *testing.T) {
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
 	insufficient := false
@@ -224,11 +251,54 @@ func TestReconciler_EnergyVerdictFlipTriggersWorkload(t *testing.T) {
 
 	got := getProfile(t, c, profile.Name)
 	rs := got.Status.RebalancingStatus
-	if rs.State != StateTriggered {
-		t.Fatalf("state = %q, want Triggered after energy verdict flip", rs.State)
+	if rs.State != StateWatching {
+		t.Fatalf("state = %q, want Watching (AI unreachable) after energy verdict flip entered the cycle", rs.State)
 	}
-	if rs.Reason == "" {
-		t.Error("expected a non-empty reason describing the energy trigger")
+	if rs.DecisionID == "" {
+		t.Error("expected decisionId to be assigned entering the cycle")
+	}
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
+		t.Errorf("recentDecisions = %+v, want one Failed-outcome entry", rs.RecentDecisions)
+	}
+}
+
+// TestReconciler_AIPathSuccessStopsAtEvaluating covers a trigger match
+// consulting a reachable AI agent successfully: the cycle stops at
+// Evaluating rather than continuing on to Decided/Enacting — dispatching
+// the AI's recommended action is not wired up yet, only the timeout/error
+// paths reach a terminal state so far.
+func TestReconciler_AIPathSuccessStopsAtEvaluating(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+			RequestID:   "test",
+			Action:      orchestrationv1alpha1.RebalanceActionMove,
+			PodName:     "app-a-1",
+			TargetNode:  "node-b",
+			Improvement: 0.4,
+			Reason:      "better spread",
+		})
+	}))
+	defer server.Close()
+
+	profile := testProfileWithConditions(TriggerScheduled)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), profile)
+
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.RequeueAfter != 30*time.Second {
+		t.Errorf("RequeueAfter = %v, want DetectionInterval (30s)", res.RequeueAfter)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if rs.State != StateEvaluating {
+		t.Fatalf("state = %q, want Evaluating — a successful AI response isn't dispatched further yet", rs.State)
+	}
+	if rs.DecisionID == "" {
+		t.Error("expected decisionId to be assigned entering the cycle")
 	}
 }
 
@@ -236,8 +306,9 @@ func TestReconciler_EnergyVerdictFlipTriggersWorkload(t *testing.T) {
 // discussed: EAO's window reopened (action=DeployImmediately) while a pod
 // for the app is still Pending and unscheduled. TriggerEvaluator signals
 // BypassAction (no AI consultation needed), and Reconcile should drive the
-// full Triggered -> Evaluating -> Decided -> Enacting -> Enacted sequence in
-// one pass, actually deleting the pending pod so its controller recreates it.
+// full Triggered -> Evaluating -> Decided -> Enacting -> Watching (Outcome
+// Enacted) sequence in one pass, actually deleting the pending pod so its
+// controller recreates it.
 func TestReconciler_EnergyPendingRetryBypassesToEnacted(t *testing.T) {
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
 	sufficient := true
@@ -255,14 +326,14 @@ func TestReconciler_EnergyPendingRetryBypassesToEnacted(t *testing.T) {
 
 	got := getProfile(t, c, profile.Name)
 	rs := got.Status.RebalancingStatus
-	if rs.State != StateEnacted {
-		t.Fatalf("state = %q, want Enacted — bypass path should reach a terminal state in one Reconcile call", rs.State)
+	if rs.State != StateWatching {
+		t.Fatalf("state = %q, want Watching — bypass path should reach a terminal write in one Reconcile call", rs.State)
 	}
-	if rs.Action != ActionRetryPendingSchedule {
+	if rs.Action != orchestrationv1alpha1.RebalanceAction(ActionRetryPendingSchedule) {
 		t.Errorf("action = %q, want %q", rs.Action, ActionRetryPendingSchedule)
 	}
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].State != StateEnacted {
-		t.Errorf("recentDecisions = %+v, want one Enacted entry", rs.RecentDecisions)
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeEnacted {
+		t.Errorf("recentDecisions = %+v, want one Enacted-outcome entry", rs.RecentDecisions)
 	}
 
 	// The whole point: the pending pod should actually be gone, so its

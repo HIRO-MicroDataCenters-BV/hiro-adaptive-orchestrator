@@ -20,6 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
 
@@ -64,6 +65,85 @@ type DecisionRequest struct {
 	// Orchestrator. Only populated when AOProfile.Awareness.Energy == true.
 	// nil when energy awareness is disabled or E.A.O data is unavailable.
 	EAOProfile *EAOProfileContext `json:"eaoProfile,omitempty"`
+
+	// RebalanceContext is populated only for rebalance evaluations (the
+	// rebalance engine's Evaluating stage), nil for initial-placement
+	// requests. Its presence is how the AI agent distinguishes "score this
+	// new pod" from "reconsider this already-placed workload" — same
+	// endpoint, same conversation, richer payload. See the rebalance
+	// engine design notes: "No new decision path. Same brain, richer
+	// conversation."
+	RebalanceContext *RebalanceContext `json:"rebalanceContext,omitempty"`
+}
+
+// =============================================================================
+// Rebalance decision data — sourced from the rebalance engine's Evaluating
+// stage (internal/rebalance), not from the kube-scheduler.
+// =============================================================================
+
+// RebalanceContext carries what the AI needs to reconsider an
+// ALREADY-PLACED workload, as opposed to DecisionRequest's Pod field, which
+// is a single unscheduled pod (initial placement only — left nil here).
+type RebalanceContext struct {
+	// Reason is why the rebalance engine is asking — the trigger condition
+	// and detail that caused this workload to be reconsidered.
+	Reason string `json:"reason"`
+
+	// DecisionID correlates this request with the profile's decision
+	// lifecycle status, engine logs, and Kubernetes Events.
+	DecisionID string `json:"decisionId"`
+
+	// CurrentPlacements is every pod of the application and which node it's
+	// currently on. The AI needs the whole layout — not just one pod — to
+	// judge imbalance and pick both which pod to move and where.
+	CurrentPlacements []PodPlacement `json:"currentPlacements"`
+
+	// RecentDecisions is a short rolling history of this workload's past
+	// rebalance outcomes, so the AI can avoid flip-flopping the same pod
+	// back and forth. Mirrors orchestrationv1alpha1.RebalanceDecision.
+	RecentDecisions []RebalanceHistoryEntry `json:"recentDecisions,omitempty"`
+}
+
+// RebalanceHistoryEntry summarizes one past terminal rebalance decision.
+type RebalanceHistoryEntry struct {
+	Outcome string      `json:"outcome"`
+	Action  string      `json:"action,omitempty"`
+	Reason  string      `json:"reason,omitempty"`
+	When    metav1.Time `json:"when,omitempty"`
+}
+
+// RebalanceDecisionResponse is the AI's answer to a rebalance evaluation —
+// broader than DecisionResponse's NodeScores, since the AI can recommend
+// actions beyond placement scoring (Move today; NoOp; future actions per
+// the design doc's enactor table: AdjustResources, AdjustReplicas, Defer,
+// Escalate).
+type RebalanceDecisionResponse struct {
+	// RequestID echoes the request ID for correlation.
+	RequestID string `json:"requestId"`
+
+	// Action is the AI's recommended action. An action this operator
+	// doesn't recognize is handled defensively by the caller, not by this
+	// type.
+	Action orchestrationv1alpha1.RebalanceAction `json:"action"`
+
+	// PodName identifies which pod from the request's
+	// RebalanceContext.CurrentPlacements the action applies to. Required
+	// when Action == Move — the AI is shown the full current placement
+	// (every pod of the application), so it must say which one it means;
+	// TargetNode alone is ambiguous whenever more than one pod could move
+	// to the same node. Empty for actions that aren't pod-specific (NoOp).
+	PodName string `json:"podName,omitempty"`
+
+	// TargetNode is populated when Action == Move — the node the AI
+	// recommends moving PodName to.
+	TargetNode string `json:"targetNode,omitempty"`
+
+	// Improvement is the AI's estimate of how much this action improves the
+	// placement, used by the improvement-threshold guardrail .
+	Improvement float64 `json:"improvement,omitempty"`
+
+	// Reason is a human-readable explanation, surfaced in status and events.
+	Reason string `json:"reason,omitempty"`
 }
 
 // // =============================================================================

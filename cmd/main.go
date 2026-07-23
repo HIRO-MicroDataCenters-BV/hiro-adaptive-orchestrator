@@ -384,6 +384,9 @@ func main() {
 		triggerEvaluator,
 		controller.ProfileByAppRefIndex,
 		0, // DefaultDetectionInterval
+		contextBuilder,
+		decisionClient,
+		0, // DefaultDecisionTimeout
 	)
 	// eaoGVK above is the List kind (used for List() calls); Watches()/
 	// RESTMapper need the singular item kind, derived here rather than

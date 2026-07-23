@@ -61,7 +61,7 @@ the writer (see below).
 |---|---|
 | [`state.go`](state.go) | The transition table. Pure, dependency-free — no I/O. |
 | [`writer.go`](writer.go) | `StateWriter` — the **only** component allowed to mutate `status.rebalancingStatus`. |
-| [`reconciler.go`](reconciler.go) | `Reconciler` — drives the `Triggered` transition (Detection stage). A real controller-runtime controller. |
+| [`reconciler.go`](reconciler.go) | `Reconciler` — drives the `Triggered` transition (Detection) and, for trigger matches with no mechanical bypass, the AI consultation (`Evaluating`) too. A real controller-runtime controller. |
 | [`triggers.go`](triggers.go) | `TriggerEvaluator` — checks the five CRD-declared trigger conditions. |
 | [`pressure.go`](pressure.go) | `NodePressureEvaluator` — CPU/Memory node pressure via metrics-server. Used by `TriggerEvaluator`. |
 | [`retry_enactor.go`](retry_enactor.go) | `retryPendingSchedule` — the mechanical enactor for `ActionRetryPendingSchedule` (see [Bypassing the AI for mechanical actions](#bypassing-the-ai-for-mechanical-actions)). |
@@ -145,8 +145,9 @@ EAO being unavailable, or a metrics-server call failing, is soft-failed per cond
 
 `EnergyThreshold`'s case 3 (pending pod, window reopened) is different from the other two
 cases in one important way: there's no judgment call to make. Cases 1/2 are genuine problem
-signals that need the AI to decide *what* to do about them (once Evaluating actually calls
-the AI — not built yet). Case 3's answer is already fully determined the moment it matches:
+signals that need the AI to decide *what* to do about them (see
+[Decision — how `Evaluating` calls the AI](#decision--how-evaluating-calls-the-ai) below).
+Case 3's answer is already fully determined the moment it matches:
 delete the pod, let it get scheduled again. Sending that through an AI round-trip would add
 a network call and a timeout-failure surface for a question that has no real answer to give.
 
@@ -181,6 +182,48 @@ One deliberate scope pull-forward: this terminal transition sets `cooldownUntil`
 `profile.Spec.Rebalancing.CooldownSeconds` even though general cooldown-duration computation
 for the rest of the engine isn't built yet — without it, a delete that doesn't actually fix
 the problem would retry every `DetectionInterval` in a tight loop.
+
+## Decision — how `Evaluating` calls the AI
+
+For every trigger match that has no mechanical bypass (i.e. `TriggerResult.BypassAction` is
+empty), `Reconciler.evaluateWithAI` (in `reconciler.go`) drives `Triggered → Evaluating` and
+consults the External AI Agent — the same agent the placement server already uses for
+initial-placement scoring, not a second HTTP path:
+
+1. `StateWriter.Transition` moves the profile `Triggered → Evaluating`, capturing the fresh
+   `decisionId` and the profile's `recentDecisions` history from the write result — no extra
+   `Get()` needed, avoiding the cache-staleness bug class described above.
+2. `DecisionContextBuilder.BuildRebalanceContext` (in `internal/placement-server`) assembles a
+   `DecisionRequest`: every pod of the application and its current node (`CurrentPlacements` —
+   the AI needs the whole layout, not just one pod, to judge imbalance and pick both which pod
+   to move and where), every `Ready` cluster node as a candidate, the profile's strategy/
+   awareness/rebalancing config, optional EAO energy data, the trigger reason, and recent
+   decision history.
+3. `DecisionClient.RequestRebalanceDecision` POSTs that request under a configurable timeout
+   (`Reconciler.DecisionTimeout`, default 5s) and decodes a `RebalanceDecisionResponse`:
+   `Action` (`Move` or `NoOp`, a named string type so Go call sites get compile-time-checked
+   comparisons even though the wire format is a plain JSON string), `PodName` (which pod from
+   `CurrentPlacements` the action applies to — required for `Move`, since `TargetNode` alone
+   can't say which pod is going there when more than one could), `TargetNode`, `Improvement`,
+   and `Reason`.
+4. A context-build error or a request timeout/error transitions the profile straight to
+   `Failed` via `failEvaluation`, with a reason describing which step failed. A successful
+   response is logged but **not dispatched any further yet** — the improvement-threshold
+   guardrail and the `Move`/`NoOp` dispatch (and, for `Move`, an actual enactor) aren't wired up
+   yet, so the cycle currently stops at `Evaluating` on success. This is a deliberately accepted
+   gap, not an oversight, and it reopens the same "stuck in a non-terminal state" risk described
+   below — just for the success path this time instead of the "no path forward" case that used
+   to apply here.
+
+One design consequence worth calling out: the AI sees the *entire* current placement every
+call but the response only ever describes one action. Multi-pod convergence (e.g. two pods
+need to move to actually balance the workload) is expected to happen over multiple Triggered
+cycles — the AI recommends its single highest-value move this cycle, cooldown elapses, and if
+the workload is still imbalanced the next cycle's request reflects the post-move layout and the
+AI can recommend the next one. `recentDecisions` accumulates the history across cycles. Nothing
+in the schema currently supports batching several decisions into one response, and the state
+machine (one active decision per profile at a time) isn't shaped for concurrent per-pod cycles
+either.
 
 ## Node pressure (CPU/Memory)
 
@@ -239,8 +282,9 @@ watch round-trip. The write from step *N* had already landed on the server, but 
 hadn't observed it yet by the time step *N+1* asked — so it read the state from *two steps
 back*, and rejected an otherwise-valid transition with `invalid transition "X" -> "Y"`. Using
 `mgr.GetAPIReader()` (a direct, uncached client) for the read side fixes this for every
-chained-transition sequence, not just this one — Story 27/28/30's real Evaluating/Decided/
-Enacting sequence will chain calls the same way.
+chained-transition sequence, not just this one — `evaluateWithAI`'s `Triggered → Evaluating`
+sequence, and the future `Decided → Enacting` sequence once an AI-recommended action actually
+gets dispatched, chain calls the same way.
 
 This class of bug can't be caught by the fake-client unit tests in this package — the fake
 client isn't cache-based, so writes are immediately visible to the next `Get()`, which is
@@ -251,17 +295,17 @@ the real manager cache.
 
 `Reconcile` skips detection entirely whenever `state` is non-terminal (`Triggered`,
 `Evaluating`, `Decided`, `Enacting`) — deliberately, so it doesn't re-trigger a cycle that's
-still in flight. But today, nothing in this package ever gets a profile back out of
-`Triggered` on its own: cases 1/2 of `EnergyThreshold` (and any future condition that needs a
-real AI consultation) have no path forward yet, since `Evaluating`'s AI-calling logic isn't
-built. Once a profile lands in `Triggered` for one of those, it's parked there permanently —
-every subsequent Pod/Node/EAO event and periodic tick gets silently swallowed by the
-in-flight guard, no matter what changes in the cluster afterward. The only way out today is a
-manual status patch to a terminal state (e.g. `kubectl patch ... --subresource=status -p
-'{"status":{"rebalancingStatus":{"state":"Failed"}}}'`), which itself immediately re-triggers
-a reconcile via the primary watch. This needs a real fix once Story 27/28 exist (either a
-"no path forward" case that itself transitions somewhere terminal instead of dead-ending, or
-a staleness/timeout mechanism) — noting it here so it isn't rediscovered from scratch.
+still in flight. `evaluateWithAI` closes most of this gap: a trigger match that needs a real AI
+consultation now has a path all the way to a terminal state whenever the AI is unreachable or
+errors (`Failed`), instead of dead-ending at `Triggered` forever. But the gap still exists for
+the success path: a *successful* AI response currently stops at `Evaluating` and goes no
+further, since the guardrail/dispatch logic that would carry it on to `Decided`/`Enacting` isn't
+built yet. Every subsequent Pod/Node/EAO event and periodic tick for that profile gets silently
+swallowed by the in-flight guard until dispatch exists, no matter what changes in the cluster
+afterward. The only way out today is a manual status patch to a terminal state (e.g. `kubectl
+patch ... --subresource=status -p '{"status":{"rebalancingStatus":{"state":"Failed"}}}'`), which
+itself immediately re-triggers a reconcile via the primary watch. Noting it here so it isn't
+rediscovered from scratch once dispatch is being built.
 
 ## Wiring into the system
 
@@ -277,9 +321,13 @@ metricsClient, _ := metricsclientset.NewForConfig(restConfig)
 pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, 0)
 triggerEvaluator := rebalance.NewTriggerEvaluator(mgr.GetClient(), eaoGVK, pressureEvaluator)
 
+// contextBuilder and decisionClient are the same instances the placement server
+// uses for initial-placement scoring — the rebalance engine's AI consultation is
+// a second use of the one configured External AI Agent, not a parallel HTTP path.
 rebalanceDetector := rebalance.NewReconciler(
     mgr.GetClient(), rebalanceWriter, triggerEvaluator,
     controller.ProfileByAppRefIndex, 0, // 0 -> DefaultDetectionInterval
+    contextBuilder, decisionClient, 0, // 0 -> DefaultDecisionTimeout
 )
 rebalanceDetector.SetupWithManager(mgr, eaoItemGVK)
 ```

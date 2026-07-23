@@ -44,14 +44,19 @@ const EventReasonRebalanceTransition = "RebalanceTransition"
 // optional — zero values are simply not written.
 type TransitionOptions struct {
 	// Action is the AI-returned action being processed (e.g. "Move", "NoOp").
-	Action string
+	Action orchestrationv1alpha1.RebalanceAction
 
 	// Details carries free-form, state-specific context (e.g. target node,
 	// improvement score, dry-run marker).
 	Details string
 
+	// Outcome is required whenever to == StateWatching — it is how the
+	// cycle that just ended is recorded in RecentDecisions. Ignored on
+	// every other transition.
+	Outcome orchestrationv1alpha1.RebalanceOutcome
+
 	// Cooldown, when non-zero, sets CooldownUntil = now + Cooldown. Only
-	// meaningful on terminal transitions.
+	// meaningful when to == StateWatching.
 	Cooldown time.Duration
 }
 
@@ -87,7 +92,11 @@ func NewStateWriter(c client.Client, reader client.Reader, recorder record.Event
 // Transition moves the OrchestrationProfile identified by key from its
 // current rebalancing state to `to`, validating the move against the state
 // machine, persisting it via the status subresource, and emitting a
-// Kubernetes Event.
+// Kubernetes Event. It returns the freshly-persisted RebalancingStatus so
+// callers chaining multiple transitions in the same Reconcile (e.g.
+// enactBypassAction, evaluateWithAI) can carry state forward without another
+// Get — avoiding the same cache-staleness bug class the uncached reader on
+// this writer already exists to prevent.
 //
 // Re-fetches the profile and retries on write conflicts, so callers don't
 // need their own retry loop — this also makes the writer idempotent across
@@ -100,10 +109,12 @@ func (w *StateWriter) Transition(
 	to orchestrationv1alpha1.RebalancingStateType,
 	reason string,
 	opts TransitionOptions,
-) error {
+) (orchestrationv1alpha1.RebalancingStatus, error) {
 	logger := logf.FromContext(ctx).WithName("rebalance-writer")
 
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	var result orchestrationv1alpha1.RebalancingStatus
+
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		profile := &orchestrationv1alpha1.OrchestrationProfile{}
 		if err := w.reader.Get(ctx, key, profile); err != nil {
 			return fmt.Errorf("rebalance writer: fetching profile %s: %w", key.Name, err)
@@ -137,13 +148,17 @@ func (w *StateWriter) Transition(
 			rs.Details = opts.Details
 		}
 
-		if IsTerminal(to) {
+		if to == StateWatching {
+			if opts.Outcome == "" {
+				return fmt.Errorf("rebalance writer: transition to Watching for profile %s requires an Outcome",
+					key.Name)
+			}
 			if opts.Cooldown > 0 {
 				rs.CooldownUntil = metav1.NewTime(now.Add(opts.Cooldown))
 			}
 			rs.RecentDecisions = prependDecision(rs.RecentDecisions, orchestrationv1alpha1.RebalanceDecision{
 				DecisionID:       rs.DecisionID,
-				State:            to,
+				Outcome:          opts.Outcome,
 				Action:           rs.Action,
 				Reason:           reason,
 				Details:          rs.Details,
@@ -160,25 +175,30 @@ func (w *StateWriter) Transition(
 			"profile", key.Name, "from", emptyAsNone(from), "to", to,
 			"reason", reason, "decisionId", rs.DecisionID,
 		)
-		w.emitEvent(profile, from, to, reason, rs.DecisionID)
+		w.emitEvent(profile, from, to, opts.Outcome, reason, rs.DecisionID)
+		result = profile.Status.RebalancingStatus
 		return nil
 	})
+
+	return result, err
 }
 
-// emitEvent records a Kubernetes Event describing the transition. Failed,
-// Rejected, and Deferred surface as Warning so they stand out in `kubectl
-// describe`; every other transition is Normal.
+// emitEvent records a Kubernetes Event describing the transition. A terminal
+// write (to == StateWatching) surfaces as Warning when the outcome is
+// Failed, Rejected, or Deferred, so it stands out in `kubectl describe`;
+// every other transition is Normal.
 func (w *StateWriter) emitEvent(
 	profile *orchestrationv1alpha1.OrchestrationProfile,
 	from, to orchestrationv1alpha1.RebalancingStateType,
+	outcome orchestrationv1alpha1.RebalanceOutcome,
 	reason, decisionID string,
 ) {
 	if w.recorder == nil {
 		return
 	}
 	eventType := corev1.EventTypeNormal
-	switch to {
-	case StateFailed, StateRejected, StateDeferred:
+	switch outcome {
+	case OutcomeFailed, OutcomeRejected, OutcomeDeferred:
 		eventType = corev1.EventTypeWarning
 	}
 	w.recorder.Eventf(profile, eventType, EventReasonRebalanceTransition,

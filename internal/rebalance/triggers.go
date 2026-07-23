@@ -223,54 +223,40 @@ func (e *TriggerEvaluator) evaluateEnergyThreshold(
 	pods []corev1.Pod,
 ) (bool, string, string) {
 	logger := logf.FromContext(ctx)
-	appRef := profile.Spec.ApplicationRef
 
-	eaoList := &unstructured.UnstructuredList{}
-	eaoList.SetGroupVersionKind(e.eaoGVK)
-	if err := e.client.List(ctx, eaoList); err != nil {
+	eao, err := utils.FindEAOForApp(ctx, e.client, e.eaoGVK, profile.Spec.ApplicationRef)
+	if err != nil {
 		// EnergyAwareOrchestration is an optional component — soft-fail like
 		// internal/placement-server's DecisionContextBuilder.fetchEAOProfile.
 		logger.V(1).Info("rebalance: EAO unavailable, skipping EnergyThreshold check", "err", err)
 		return false, "", ""
 	}
-
-	for i := range eaoList.Items {
-		eao := &eaoList.Items[i]
-
-		refName, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "name")
-		refKind, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "kind")
-		refNamespace, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "namespace")
-		if refNamespace == "" {
-			refNamespace = eao.GetNamespace()
-		}
-		if refName != appRef.Name || refNamespace != appRef.Namespace || refKind != appRef.Kind {
-			continue
-		}
-
-		if sufficient, found, _ := unstructured.NestedBool(eao.Object, "status", "energyMetrics", "sufficient"); found && !sufficient {
-			reason, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "reason")
-			if reason == "" {
-				reason = "energy supply reported insufficient"
-			}
-			return true, reason, ""
-		}
-
-		action, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "action")
-
-		if action == "Delayed" || action == "Waiting" {
-			reason, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "reason")
-			if reason == "" {
-				reason = fmt.Sprintf("energy decision action=%s", action)
-			}
-			return true, reason, ""
-		}
-
-		if (action == "DeployImmediately" || action == "Scheduled") && hasPendingPod(pods) {
-			return true, "energy window reached — retrying previously deferred pod", ActionRetryPendingSchedule
-		}
-
-		break // matched the EAO for this app — nothing more to check
+	if eao == nil {
+		return false, "", ""
 	}
+
+	if sufficient, found, _ := unstructured.NestedBool(eao.Object, "status", "energyMetrics", "sufficient"); found && !sufficient {
+		reason, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "reason")
+		if reason == "" {
+			reason = "energy supply reported insufficient"
+		}
+		return true, reason, ""
+	}
+
+	action, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "action")
+
+	if action == "Delayed" || action == "Waiting" {
+		reason, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "reason")
+		if reason == "" {
+			reason = fmt.Sprintf("energy decision action=%s", action)
+		}
+		return true, reason, ""
+	}
+
+	if (action == "DeployImmediately" || action == "Scheduled") && hasPendingPod(pods) {
+		return true, "energy window reached — retrying previously deferred pod", ActionRetryPendingSchedule
+	}
+
 	return false, "", ""
 }
 

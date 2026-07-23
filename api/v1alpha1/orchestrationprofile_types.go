@@ -89,15 +89,30 @@ type PlacementStatus struct {
 type RebalancingStateType string
 
 const (
+	RebalancingStateWatching   RebalancingStateType = "Watching"
 	RebalancingStateTriggered  RebalancingStateType = "Triggered"
 	RebalancingStateEvaluating RebalancingStateType = "Evaluating"
 	RebalancingStateDecided    RebalancingStateType = "Decided"
 	RebalancingStateEnacting   RebalancingStateType = "Enacting"
-	RebalancingStateEnacted    RebalancingStateType = "Enacted"
-	RebalancingStateNoOp       RebalancingStateType = "NoOp"
-	RebalancingStateRejected   RebalancingStateType = "Rejected"
-	RebalancingStateDeferred   RebalancingStateType = "Deferred"
-	RebalancingStateFailed     RebalancingStateType = "Failed"
+)
+
+type RebalanceOutcome string
+
+const (
+	RebalanceOutcomeEnacted  RebalanceOutcome = "Enacted"
+	RebalanceOutcomeNoOp     RebalanceOutcome = "NoOp"
+	RebalanceOutcomeRejected RebalanceOutcome = "Rejected"
+	RebalanceOutcomeDeferred RebalanceOutcome = "Deferred"
+	RebalanceOutcomeFailed   RebalanceOutcome = "Failed"
+)
+
+type RebalanceAction string
+
+const (
+	RebalanceActionMove   RebalanceAction = "Move"
+	RebalanceActionNoOp   RebalanceAction = "NoOp"
+	RebalanceActionReject RebalanceAction = "Reject"
+	RebalanceActionDefer  RebalanceAction = "Defer"
 )
 
 // RebalanceDecision is a single terminal-outcome record kept in the profile's
@@ -106,12 +121,14 @@ type RebalanceDecision struct {
 	// decisionId correlates this record with engine logs and Kubernetes Events.
 	DecisionID string `json:"decisionId"`
 
-	// state is the terminal state this decision ended in.
-	// +kubebuilder:validation:Enum=Triggered;Evaluating;Decided;Enacting;Enacted;NoOp;Rejected;Deferred;Failed
-	State RebalancingStateType `json:"state"`
+	// outcome is the terminal outcome of this decision cycle.
+	// +kubebuilder:validation:Enum=Enacted;NoOp;Rejected;Deferred;Failed
+	Outcome RebalanceOutcome `json:"outcome"`
 
 	// action is the AI-returned action that was processed (e.g. "Move", "NoOp").
-	Action string `json:"action,omitempty"`
+	// Dont use kubebuilder:validation:Enum here because the AI may return new actions in
+	// the future, and we don't want to break the CRD schema for that reason.
+	Action RebalanceAction `json:"action,omitempty"`
 
 	// reason explains why the decision ended in this state.
 	Reason string `json:"reason,omitempty"`
@@ -131,7 +148,7 @@ type RebalanceDecision struct {
 type RebalancingStatus struct {
 	// state is the current position of this workload's decision lifecycle
 	// state machine. Empty when no rebalance cycle has ever been triggered.
-	// +kubebuilder:validation:Enum=Triggered;Evaluating;Decided;Enacting;Enacted;NoOp;Rejected;Deferred;Failed
+	// +kubebuilder:validation:Enum=Watching;Triggered;Evaluating;Decided;Enacting
 	// +optional
 	State RebalancingStateType `json:"state,omitempty"`
 
@@ -146,7 +163,7 @@ type RebalancingStatus struct {
 	// action is the AI-returned action being processed for the current cycle
 	// (e.g. "Move", "NoOp"). Empty before the AI has responded.
 	// +optional
-	Action string `json:"action,omitempty"`
+	Action RebalanceAction `json:"action,omitempty"`
 
 	// details carries free-form, state-specific context for the current cycle
 	// (e.g. target node, improvement score, dry-run marker).

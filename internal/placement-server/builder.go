@@ -259,9 +259,17 @@ func buildAOProfileContext(
 // buildCurrentPlacement extracts the existing pod placements from the
 // profile's PlacementStatus. The AI agent uses this to make spread/
 // balance decisions for the new pod.
+//
+// pod is nil for rebalance requests (BuildRebalanceContext) — there's no
+// single "the pod" being placed; the full current layout goes in
+// RebalanceContext.CurrentPlacements instead, and this field is left at its
+// zero value.
 func buildCurrentPlacement(
 	pod *corev1.Pod,
 ) PodPlacement {
+	if pod == nil {
+		return PodPlacement{}
+	}
 	// TODO: extract current placement from pod annotations or status
 	return PodPlacement{
 		PodName:  pod.Name,
@@ -302,8 +310,11 @@ func (b *DecisionContextBuilder) fetchEAOProfile(
 }
 
 // fetchEAOForPod resolves the pod's root application via ResolveAppFromPod,
-// then lists all EnergyAwareOrchestration CRDs and returns the one whose
-// spec.applicationRef matches that application.
+// then finds the EnergyAwareOrchestration CRD whose spec.applicationRef
+// matches that application (utils.FindEAOForApp — shared with the rebalance
+// engine's trigger evaluator and rebalance context builder, which already
+// know their ApplicationReference directly and don't need this pod-based
+// resolution step).
 //
 // Returns nil (no error) when no matching EAO exists.
 func (b *DecisionContextBuilder) fetchEAOForPod(
@@ -312,7 +323,6 @@ func (b *DecisionContextBuilder) fetchEAOForPod(
 ) (*unstructured.Unstructured, error) {
 	logger := logf.FromContext(ctx)
 
-	// Step 1: walk OwnerReferences to find the top-level workload name, namespace, and kind.
 	appName, appNamespace, appKind := utils.ResolveAppFromPod(ctx, b.client, pod)
 	if appName == "" {
 		logger.V(1).Info("builder: no workload owner, skipping EAO lookup",
@@ -322,44 +332,25 @@ func (b *DecisionContextBuilder) fetchEAOForPod(
 		return nil, nil
 	}
 
-	// Step 2: list all EnergyAwareOrchestration resources across all namespaces.
-	eaoList := &unstructured.UnstructuredList{}
-	eaoList.SetGroupVersionKind(b.eaoGVK)
-	if err := b.client.List(ctx, eaoList); err != nil {
-		return nil, fmt.Errorf("listing EnergyAwareOrchestration resources: %w", err)
+	appRef := orchestrationv1alpha1.ApplicationReference{
+		Name: appName, Namespace: appNamespace, Kind: appKind,
+	}
+	eao, err := utils.FindEAOForApp(ctx, b.client, b.eaoGVK, appRef)
+	if err != nil {
+		return nil, err
+	}
+	if eao == nil {
+		logger.V(1).Info("builder: no EAO found for application",
+			"pod", pod.Name, "appName", appName, "appNamespace", appNamespace, "appKind", appKind,
+		)
+		return nil, nil
 	}
 
-	// Step 3: find the EAO whose spec.applicationRef matches the resolved app
-	// by name, namespace, and kind.
-	for i := range eaoList.Items {
-		eao := &eaoList.Items[i]
-
-		refName, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "name")
-		refKind, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "kind")
-		refNamespace, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "namespace")
-		if refNamespace == "" {
-			refNamespace = eao.GetNamespace()
-		}
-
-		if refName == appName && refNamespace == appNamespace && refKind == appKind {
-			logger.V(1).Info("builder: EAO found for pod",
-				"eao", eao.GetName(),
-				"eaoNamespace", eao.GetNamespace(),
-				"appName", appName,
-				"appNamespace", appNamespace,
-				"appKind", appKind,
-			)
-			return eao, nil
-		}
-	}
-
-	logger.V(1).Info("builder: no EAO found for application",
-		"pod", pod.Name,
-		"appName", appName,
-		"appNamespace", appNamespace,
-		"appKind", appKind,
+	logger.V(1).Info("builder: EAO found for pod",
+		"eao", eao.GetName(), "eaoNamespace", eao.GetNamespace(),
+		"appName", appName, "appNamespace", appNamespace, "appKind", appKind,
 	)
-	return nil, nil
+	return eao, nil
 }
 
 // mapEAOToProfileContext maps the relevant spec and status fields of an
@@ -403,6 +394,155 @@ func mapEAOToProfileContext(eao *unstructured.Unstructured) *EAOProfileContext {
 	}
 
 	return ctx
+}
+
+// =============================================================================
+// Rebalance context builder
+//
+// Triggered by: the rebalance engine's Reconciler, on entering Evaluating
+// (internal/rebalance) — not by the kube-scheduler.
+// Input:        an OrchestrationProfile whose workload is being
+//               reconsidered, plus the trigger reason and decision history.
+// Output:       DecisionRequest with RebalanceContext populated, Pod nil.
+//
+// Unlike Build (one unscheduled pod, scheduler-proposed candidates), this
+// assembles context for a whole already-placed workload: every pod's
+// current node (the AI needs the full layout to judge imbalance and pick
+// both which pod to move and where) and every Ready cluster node as a
+// candidate (there's no scheduling cycle proposing a filtered subset).
+// =============================================================================
+
+// BuildRebalanceContext assembles a DecisionRequest for the rebalance
+// engine's Evaluating stage. Reuses the same AOProfileContext/EAOProfileContext
+// assembly as Build so the AI sees the same profile shape either way — only
+// RebalanceContext and the current-placement snapshot differ.
+func (b *DecisionContextBuilder) BuildRebalanceContext(
+	ctx context.Context,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	decisionID string,
+	reason string,
+	recentDecisions []orchestrationv1alpha1.RebalanceDecision,
+) (*DecisionRequest, error) {
+	logger := logf.FromContext(ctx)
+
+	pods, err := utils.FindPodsForApplication(ctx, b.client, profile.Spec.ApplicationRef)
+	if err != nil {
+		return nil, fmt.Errorf("finding pods for rebalance context: %w", err)
+	}
+
+	nodes, err := b.listReadyNodes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing candidate nodes for rebalance context: %w", err)
+	}
+
+	aoProfile := buildAOProfileContext(profile, nil)
+
+	var eaoProfile *EAOProfileContext
+	if profile.Spec.Placement.Awareness.Energy {
+		eaoProfile, err = b.fetchEAOProfileForApp(ctx, profile.Spec.ApplicationRef)
+		if err != nil {
+			// Energy context is optional — log and continue, matching Build's posture.
+			logger.Info("builder: EAO unavailable for rebalance context, skipping",
+				"profile", profile.Name, "err", err)
+		}
+	}
+
+	req := &DecisionRequest{
+		RequestID:      decisionID,
+		Timestamp:      metav1.Now(),
+		CandidateNodes: nodes,
+		AOProfile:      aoProfile,
+		EAOProfile:     eaoProfile,
+		RebalanceContext: &RebalanceContext{
+			Reason:            reason,
+			DecisionID:        decisionID,
+			CurrentPlacements: buildCurrentPlacements(pods),
+			RecentDecisions:   convertRecentDecisions(recentDecisions),
+		},
+	}
+
+	logger.Info("builder: rebalance context assembled",
+		"profile", profile.Name,
+		"decisionId", decisionID,
+		"reason", reason,
+		"podCount", len(pods),
+		"candidateNodes", len(nodes),
+		"energyDataAttached", eaoProfile != nil,
+	)
+
+	return req, nil
+}
+
+// listReadyNodes lists every cluster node reporting NodeReady == True — the
+// candidate set for a rebalance Move, since there's no scheduling cycle
+// proposing a pre-filtered subset the way there is for initial placement.
+func (b *DecisionContextBuilder) listReadyNodes(ctx context.Context) ([]*corev1.Node, error) {
+	nodeList := &corev1.NodeList{}
+	if err := b.client.List(ctx, nodeList); err != nil {
+		return nil, fmt.Errorf("listing nodes: %w", err)
+	}
+
+	ready := make([]*corev1.Node, 0, len(nodeList.Items))
+	for i := range nodeList.Items {
+		node := &nodeList.Items[i]
+		for _, cond := range node.Status.Conditions {
+			if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
+				ready = append(ready, node)
+				break
+			}
+		}
+	}
+	return ready, nil
+}
+
+// fetchEAOProfileForApp is fetchEAOProfile's rebalance-side counterpart: the
+// caller already knows the ApplicationReference directly (from the profile
+// being rebalanced), so no pod-based resolution is needed.
+func (b *DecisionContextBuilder) fetchEAOProfileForApp(
+	ctx context.Context,
+	appRef orchestrationv1alpha1.ApplicationReference,
+) (*EAOProfileContext, error) {
+	eao, err := utils.FindEAOForApp(ctx, b.client, b.eaoGVK, appRef)
+	if err != nil {
+		return nil, err
+	}
+	if eao == nil {
+		return nil, nil
+	}
+	return mapEAOToProfileContext(eao), nil
+}
+
+// buildCurrentPlacements converts every pod of the application into a
+// PodPlacement — the full layout snapshot a rebalance decision needs,
+// unlike buildCurrentPlacement's single-pod use for initial placement.
+func buildCurrentPlacements(pods []corev1.Pod) []PodPlacement {
+	placements := make([]PodPlacement, 0, len(pods))
+	for i := range pods {
+		placements = append(placements, PodPlacement{
+			PodName:  pods[i].Name,
+			NodeName: pods[i].Spec.NodeName,
+			Phase:    string(pods[i].Status.Phase),
+		})
+	}
+	return placements
+}
+
+// convertRecentDecisions maps the profile's CRD-level decision history into
+// the wire-format shape sent to the AI agent.
+func convertRecentDecisions(decisions []orchestrationv1alpha1.RebalanceDecision) []RebalanceHistoryEntry {
+	if len(decisions) == 0 {
+		return nil
+	}
+	entries := make([]RebalanceHistoryEntry, 0, len(decisions))
+	for _, d := range decisions {
+		entries = append(entries, RebalanceHistoryEntry{
+			Outcome: string(d.Outcome),
+			Action:  string(d.Action),
+			Reason:  d.Reason,
+			When:    d.LastTransitionAt,
+		})
+	}
+	return entries
 }
 
 // =============================================================================
