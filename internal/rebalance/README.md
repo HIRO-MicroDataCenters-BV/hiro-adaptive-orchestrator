@@ -12,48 +12,48 @@ separate binary, Deployment, or Service for it.
 ## The decision lifecycle
 
 Every rebalance evaluation for a workload is an instance of a state machine, tracked in
-`OrchestrationProfile.status.rebalancingStatus`. It is born when a trigger fires and dies in
-one of several terminal states.
+`OrchestrationProfile.status.rebalancingStatus`. `state` only ever holds one of five active
+values — it never encodes *how* a cycle ended. The result of a finished cycle is recorded
+separately, as an `outcome` on the `recentDecisions` entry written in the same transition that
+returns `state` to `Watching`.
 
 ```
                         ┌──────────────┐
-                        │   Triggered  │
-                        └──────┬───────┘
-                               │
-                               ▼
-                        ┌──────────────┐
-                   ┌────│  Evaluating  │────┐
-             NoOp  │    └──────┬───────┘    │  Rejected / Failed
-                   │           │            │
-                   │           ▼            │
-                   │    ┌──────────────┐    │
-                   │    │   Decided    │    │
-                   │    └──────┬───────┘    │
-                   │           │            │
-                   │           ▼            │
-                   │    ┌──────────────┐    │
-                   │    │   Enacting   │─┐  │
-                   │    └──────┬───────┘ │  │
-                   │           │         │  │
-                   ▼           ▼         ▼  ▼
-                 NoOp       Enacted   Deferred / Failed
-                   │           │         │      │
-                   └───────────┴─────────┴──────┘
-                               │
-                        (cooldown elapses)
-                               │
-                               ▼
-                          Triggered (next cycle)
+                        │   Watching   │◀────────────────────────┐
+                        └──────┬───────┘                         │
+                               │ trigger fires                   │
+                               ▼                                 │
+                        ┌──────────────┐                         │
+                        │   Triggered  │                         │
+                        └──────┬───────┘                         │
+                               │ AI call                         │
+                               ▼                                 │
+                        ┌──────────────┐                         │
+                        │  Evaluating  │──── NoOp / Rejected ────┤
+                        └──────┬───────┘        / Failed         │
+                               │ Move accepted                   │
+                               ▼                                 │
+                        ┌──────────────┐                         │
+                        │   Decided    │                         │
+                        └──────┬───────┘                         │
+                               │                                 │
+                               ▼                                 │
+                        ┌──────────────┐                         │
+                        │   Enacting   │─── Enacted / Deferred ──┘
+                        └──────────────┘        / Failed
 ```
 
-Active states: `Triggered`, `Evaluating`, `Decided`, `Enacting`.
-Terminal states: `Enacted`, `NoOp`, `Rejected`, `Deferred`, `Failed`.
+Active states (`state`): `Watching`, `Triggered`, `Evaluating`, `Decided`, `Enacting`.
+Outcomes (`recentDecisions[].outcome`, never a `state` value): `Enacted`, `NoOp`, `Rejected`,
+`Deferred`, `Failed`.
 
 The transition table lives in [`state.go`](state.go) (`validTransitions`,
-`IsValidTransition`, `IsTerminal`). From any terminal state (or the unset initial state),
-the only legal move is back into `Triggered` — starting a fresh cycle. Every other edge in
-the diagram above is the only path the state machine allows; anything else is rejected by
-the writer (see below).
+`IsValidTransition`). From `Watching` (or the unset initial state — the two are equivalent),
+the only legal move is into `Triggered` — starting a fresh cycle. Every other edge in the
+diagram above is the only path the state machine allows; anything else is rejected by the
+writer (see below). `Evaluating` and `Enacting` are the only states that can transition
+straight back to `Watching` — every such write must carry an outcome (`TransitionOptions.Outcome`),
+enforced by `StateWriter.Transition` itself.
 
 ## Package layout
 
@@ -172,11 +172,11 @@ implications the way evicting a running pod would (unlike the future Move enacto
 will need the PDB-aware Eviction API for exactly that reason).
 
 `Reconciler.enactBypassAction` (in `reconciler.go`) drives this end to end in a single
-`Reconcile` call: `Triggered → Evaluating → Decided → Enacting → Enacted`/`Failed`, all
-through `StateWriter` (so it's fully visible in status/Events/`recentDecisions`) — `Evaluating`
-just records "no AI needed" instead of making an HTTP call, and `Enacting` calls
-`retryPendingSchedule`. No new edges in the transition table: this still only ever reaches
-`Enacted` via `Decided → Enacting`, same as every other action will.
+`Reconcile` call: `Triggered → Evaluating → Decided → Enacting → Watching` (outcome `Enacted`
+or `Failed`), all through `StateWriter` (so it's fully visible in status/Events/
+`recentDecisions`) — `Evaluating` just records "no AI needed" instead of making an HTTP call,
+and `Enacting` calls `retryPendingSchedule`. No new edges in the transition table: this still
+only ever reaches `Watching` via `Decided → Enacting`, same as every other action will.
 
 One deliberate scope pull-forward: this terminal transition sets `cooldownUntil` from
 `profile.Spec.Rebalancing.CooldownSeconds` even though general cooldown-duration computation
@@ -201,19 +201,20 @@ initial-placement scoring, not a second HTTP path:
    decision history.
 3. `DecisionClient.RequestRebalanceDecision` POSTs that request under a configurable timeout
    (`Reconciler.DecisionTimeout`, default 5s) and decodes a `RebalanceDecisionResponse`:
-   `Action` (`Move` or `NoOp`, a named string type so Go call sites get compile-time-checked
-   comparisons even though the wire format is a plain JSON string), `PodName` (which pod from
+   `Action` (`orchestrationv1alpha1.RebalanceAction` — `Move`, `NoOp`, and other values defined
+   there for later stories; a named type so Go call sites get compile-time-checked comparisons
+   even though the wire format is a plain JSON string), `PodName` (which pod from
    `CurrentPlacements` the action applies to — required for `Move`, since `TargetNode` alone
    can't say which pod is going there when more than one could), `TargetNode`, `Improvement`,
    and `Reason`.
-4. A context-build error or a request timeout/error transitions the profile straight to
-   `Failed` via `failEvaluation`, with a reason describing which step failed. A successful
-   response is logged but **not dispatched any further yet** — the improvement-threshold
-   guardrail and the `Move`/`NoOp` dispatch (and, for `Move`, an actual enactor) aren't wired up
-   yet, so the cycle currently stops at `Evaluating` on success. This is a deliberately accepted
-   gap, not an oversight, and it reopens the same "stuck in a non-terminal state" risk described
-   below — just for the success path this time instead of the "no path forward" case that used
-   to apply here.
+4. A context-build error or a request timeout/error returns the profile to `Watching` with
+   outcome `Failed` via `failEvaluation`, with a reason describing which step failed. A
+   successful response is logged but **not dispatched any further yet** — the
+   improvement-threshold guardrail and the `Move`/`NoOp` dispatch (and, for `Move`, an actual
+   enactor) aren't wired up yet, so the cycle currently stops at `Evaluating` on success. This
+   is a deliberately accepted gap, not an oversight, and it reopens the same "stuck in a
+   non-Watching state" risk described below — just for the success path this time instead of
+   the "no path forward" case that used to apply here.
 
 One design consequence worth calling out: the AI sees the *entire* current placement every
 call but the response only ever describes one action. Multi-pod convergence (e.g. two pods
@@ -260,21 +261,24 @@ build a UI or alerting on top of later.
    transition is rejected with an error, not silently coerced.
 2. On entering `Triggered`: assigns a fresh `decisionId` (UUID) and resets the previous
    cycle's `action`/`details`.
-3. On any terminal state: sets `cooldownUntil` (if a cooldown was passed in) and prepends a
-   record to `recentDecisions`, trimmed to `MaxRecentDecisions` (10).
+3. On transitioning to `Watching`: requires `TransitionOptions.Outcome` (rejects the call
+   otherwise), sets `cooldownUntil` (if a cooldown was passed in), and prepends a record to
+   `recentDecisions` carrying that outcome, trimmed to `MaxRecentDecisions` (10).
 4. Persists via `Status().Update`, wrapped in `retry.RetryOnConflict` — callers never need
    their own conflict-retry loop, and re-applying the same transition after a crash is safe
    (it either no-ops because state already moved on, or succeeds idempotently).
 5. Emits a Kubernetes Event (`RebalanceTransition` reason) on the `OrchestrationProfile`
-   object — `Failed`/`Rejected`/`Deferred` as `Warning`, everything else as `Normal`. These
-   show up in `kubectl describe orchestrationprofile <name>` interleaved with the existing
-   `PlacementActive`/`PlacementDegraded`/etc. events from the main controller, distinguished
-   by the `FROM` column (`rebalance-engine` vs `orchestrationprofile-controller`).
+   object — a transition to `Watching` with outcome `Failed`/`Rejected`/`Deferred` is a
+   `Warning`, everything else is `Normal`. These show up in `kubectl describe
+   orchestrationprofile <name>` interleaved with the existing `PlacementActive`/
+   `PlacementDegraded`/etc. events from the main controller, distinguished by the `FROM`
+   column (`rebalance-engine` vs `orchestrationprofile-controller`).
 
 ### Why the reader must be uncached
 
 Found the hard way: `enactBypassAction` calls `Transition` five times back-to-back within one
-`Reconcile` (`Triggered → Evaluating → Decided → Enacting → Enacted`/`Failed`). Each call
+`Reconcile` (`Triggered → Evaluating → Decided → Enacting → Watching`, outcome `Enacted` or
+`Failed`). Each call
 independently re-fetches the profile to determine the current state before validating the
 move. `Status().Update` always writes straight to the API server — but `mgr.GetClient()`'s
 `Get()` reads from the **local informer cache**, which only catches up after an asynchronous
@@ -291,20 +295,20 @@ client isn't cache-based, so writes are immediately visible to the next `Get()`,
 exactly the behavior that masked this in testing. Catching it required a real cluster with
 the real manager cache.
 
-### A profile can get permanently stuck in a non-terminal state
+### A profile can get permanently stuck in a non-Watching state
 
-`Reconcile` skips detection entirely whenever `state` is non-terminal (`Triggered`,
-`Evaluating`, `Decided`, `Enacting`) — deliberately, so it doesn't re-trigger a cycle that's
-still in flight. `evaluateWithAI` closes most of this gap: a trigger match that needs a real AI
-consultation now has a path all the way to a terminal state whenever the AI is unreachable or
-errors (`Failed`), instead of dead-ending at `Triggered` forever. But the gap still exists for
-the success path: a *successful* AI response currently stops at `Evaluating` and goes no
-further, since the guardrail/dispatch logic that would carry it on to `Decided`/`Enacting` isn't
-built yet. Every subsequent Pod/Node/EAO event and periodic tick for that profile gets silently
-swallowed by the in-flight guard until dispatch exists, no matter what changes in the cluster
-afterward. The only way out today is a manual status patch to a terminal state (e.g. `kubectl
-patch ... --subresource=status -p '{"status":{"rebalancingStatus":{"state":"Failed"}}}'`), which
-itself immediately re-triggers a reconcile via the primary watch. Noting it here so it isn't
+`Reconcile` skips detection entirely whenever `state != Watching` (`Triggered`, `Evaluating`,
+`Decided`, `Enacting`) — deliberately, so it doesn't re-trigger a cycle that's still in flight.
+`evaluateWithAI` closes most of this gap: a trigger match that needs a real AI consultation now
+has a path all the way back to `Watching` (outcome `Failed`) whenever the AI is unreachable or
+errors, instead of dead-ending at `Triggered` forever. But the gap still exists for the success
+path: a *successful* AI response currently stops at `Evaluating` and goes no further, since the
+guardrail/dispatch logic that would carry it on to `Decided`/`Enacting` isn't built yet. Every
+subsequent Pod/Node/EAO event and periodic tick for that profile gets silently swallowed by the
+in-flight guard until dispatch exists, no matter what changes in the cluster afterward. The
+only way out today is a manual status patch back to `Watching` (e.g. `kubectl patch ...
+--subresource=status -p '{"status":{"rebalancingStatus":{"state":"Watching"}}}'`), which itself
+immediately re-triggers a reconcile via the primary watch. Noting it here so it isn't
 rediscovered from scratch once dispatch is being built.
 
 ## Wiring into the system
@@ -367,9 +371,15 @@ Regenerate `config/rbac/role.yaml` with `make manifests` after changing these ma
 ### CRD schema
 
 `RebalancingStatus` (in `api/v1alpha1/orchestrationprofile_types.go`) carries: `state`
-(OpenAPI-enum-validated against the 9 states), `reason`, `decisionId`, `action`, `details`,
-`startedAt`, `lastTransitionAt`, `cooldownUntil`, and `recentDecisions` (rolling history,
-each entry shaped like `RebalanceDecision`).
+(OpenAPI-enum-validated against the 5 active states), `reason`, `decisionId`, `action`,
+`details`, `startedAt`, `lastTransitionAt`, `cooldownUntil`, and `recentDecisions` (rolling
+history, each entry shaped like `RebalanceDecision` — `outcome` is its own OpenAPI enum,
+separate from and never overlapping with `state`'s).
+
+An operator upgrading from the older 9-value `state` enum needs
+`cmd/migrate-rebalance-status` run once against the cluster first — see that command's own
+doc comment for the exact order (apply the new CRD, then run the migration, then roll out the
+new operator build).
 
 ### Deployment
 
