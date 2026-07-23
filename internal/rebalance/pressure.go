@@ -38,9 +38,9 @@ const DefaultNodePressureThreshold = 0.90
 //
 // CPU and Memory are evaluated independently via EvaluateCPUPressure and
 // EvaluateMemoryPressure — each is self-contained (fetches what it needs
-// and returns a result), so Story 26's trigger dispatch can call whichever
-// one applies to the declared condition without any shared-fetch
-// bookkeeping between them.
+// and returns a result), so the trigger dispatch can call whichever one
+// applies to the declared condition without any shared-fetch bookkeeping
+// between them.
 //
 // metrics-server is an optional cluster component. Both methods return a
 // descriptive error when it's unavailable so callers can treat CPU/Memory

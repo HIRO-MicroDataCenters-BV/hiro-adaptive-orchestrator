@@ -33,8 +33,9 @@ import (
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 )
 
-// MaxRecentDecisions bounds the rolling history kept on profile status.
-const MaxRecentDecisions = 10
+// DefaultMaxRecentDecisions bounds the rolling history kept on profile
+// status when NewStateWriter isn't given an override.
+const DefaultMaxRecentDecisions = 10
 
 // EventReasonRebalanceTransition is the Kubernetes Event reason emitted for
 // every rebalance state transition.
@@ -68,9 +69,10 @@ type TransitionOptions struct {
 //
 // StateWriter is safe for concurrent use.
 type StateWriter struct {
-	client   client.Client
-	reader   client.Reader
-	recorder record.EventRecorder
+	client             client.Client
+	reader             client.Reader
+	recorder           record.EventRecorder
+	maxRecentDecisions int
 }
 
 // NewStateWriter creates a StateWriter.
@@ -85,8 +87,13 @@ type StateWriter struct {
 // landed on the server — and reject a transition that's actually valid.
 // Status().Update always goes straight to the API server regardless, so
 // only the read side needs the uncached reader.
-func NewStateWriter(c client.Client, reader client.Reader, recorder record.EventRecorder) *StateWriter {
-	return &StateWriter{client: c, reader: reader, recorder: recorder}
+//
+// maxRecentDecisions <= 0 uses DefaultMaxRecentDecisions.
+func NewStateWriter(c client.Client, reader client.Reader, recorder record.EventRecorder, maxRecentDecisions int) *StateWriter {
+	if maxRecentDecisions <= 0 {
+		maxRecentDecisions = DefaultMaxRecentDecisions
+	}
+	return &StateWriter{client: c, reader: reader, recorder: recorder, maxRecentDecisions: maxRecentDecisions}
 }
 
 // Transition moves the OrchestrationProfile identified by key from its
@@ -156,7 +163,7 @@ func (w *StateWriter) Transition(
 			if opts.Cooldown > 0 {
 				rs.CooldownUntil = metav1.NewTime(now.Add(opts.Cooldown))
 			}
-			rs.RecentDecisions = prependDecision(rs.RecentDecisions, orchestrationv1alpha1.RebalanceDecision{
+			rs.RecentDecisions = w.prependDecision(rs.RecentDecisions, orchestrationv1alpha1.RebalanceDecision{
 				DecisionID:       rs.DecisionID,
 				Outcome:          opts.Outcome,
 				Action:           rs.Action,
@@ -207,14 +214,14 @@ func (w *StateWriter) emitEvent(
 }
 
 // prependDecision inserts a new decision at the front of the rolling window
-// and trims it to MaxRecentDecisions.
-func prependDecision(
+// and trims it to w.maxRecentDecisions.
+func (w *StateWriter) prependDecision(
 	existing []orchestrationv1alpha1.RebalanceDecision,
 	next orchestrationv1alpha1.RebalanceDecision,
 ) []orchestrationv1alpha1.RebalanceDecision {
 	updated := append([]orchestrationv1alpha1.RebalanceDecision{next}, existing...)
-	if len(updated) > MaxRecentDecisions {
-		updated = updated[:MaxRecentDecisions]
+	if len(updated) > w.maxRecentDecisions {
+		updated = updated[:w.maxRecentDecisions]
 	}
 	return updated
 }

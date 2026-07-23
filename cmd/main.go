@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +59,51 @@ func init() {
 
 	utilruntime.Must(orchestrationv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+}
+
+// parseDurationEnv returns 0 (letting the caller apply its own default) when
+// name is unset, or the parsed duration otherwise. Exits the process on an
+// invalid value — a misconfigured duration should fail fast at startup, not
+// silently fall back to a default the deployer didn't ask for.
+func parseDurationEnv(name string) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		setupLog.Error(err, "invalid duration environment variable", "name", name, "value", v)
+		os.Exit(1)
+	}
+	return d
+}
+
+// parseFloatEnv is parseDurationEnv's float64 counterpart.
+func parseFloatEnv(name string) float64 {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		setupLog.Error(err, "invalid float environment variable", "name", name, "value", v)
+		os.Exit(1)
+	}
+	return f
+}
+
+// parseIntEnv is parseDurationEnv's int counterpart.
+func parseIntEnv(name string) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		setupLog.Error(err, "invalid integer environment variable", "name", name, "value", v)
+		os.Exit(1)
+	}
+	return n
 }
 
 // nolint:gocyclo
@@ -348,17 +394,51 @@ func main() {
 	// Rebalance Engine
 	//
 	// Runtime loop that acts on the AI's guidance after initial placement:
-	// Detection (Triggered) → Decision (Evaluating → Decided/NoOp/Rejected/
-	// Failed) → Enaction (Enacting → Enacted/Deferred/Failed). Registered as
-	// a manager.Runnable so its lifecycle matches every other component here.
+	// Watching -> Triggered -> Evaluating -> Decided -> Enacting, always
+	// returning to Watching with the cycle's outcome (Enacted/NoOp/Rejected/
+	// Deferred/Failed) recorded on recentDecisions. Registered as a
+	// manager.Runnable so its lifecycle matches every other component here.
 	//
 	// StateWriter is the only component permitted to mutate
 	// status.rebalancingStatus — see internal/rebalance/writer.go.
+	//
+	// Environment variables (all optional; unset/0 uses the package default):
+	//   REBALANCE_MAX_RECENT_DECISIONS     — decision-history length kept per profile
+	//   REBALANCE_DETECTION_INTERVAL       — periodic detection tick, e.g. "30s"
+	//   REBALANCE_DECISION_TIMEOUT         — AI consultation timeout, e.g. "5s"
+	//   REBALANCE_NODE_PRESSURE_THRESHOLD  — CPU/Memory pressure fraction, e.g. "0.90"
 	// -------------------------------------------------------------------------
+	rebalanceMaxRecentDecisions := parseIntEnv("REBALANCE_MAX_RECENT_DECISIONS")
+	if rebalanceMaxRecentDecisions <= 0 {
+		rebalanceMaxRecentDecisions = rebalance.DefaultMaxRecentDecisions
+	}
+	rebalanceDetectionInterval := parseDurationEnv("REBALANCE_DETECTION_INTERVAL")
+	if rebalanceDetectionInterval <= 0 {
+		rebalanceDetectionInterval = rebalance.DefaultDetectionInterval
+	}
+	rebalanceDecisionTimeout := parseDurationEnv("REBALANCE_DECISION_TIMEOUT")
+	if rebalanceDecisionTimeout <= 0 {
+		rebalanceDecisionTimeout = rebalance.DefaultDecisionTimeout
+	}
+	rebalanceNodePressureThreshold := parseFloatEnv("REBALANCE_NODE_PRESSURE_THRESHOLD")
+	if rebalanceNodePressureThreshold <= 0 {
+		rebalanceNodePressureThreshold = rebalance.DefaultNodePressureThreshold
+	}
+	// Resolved above (not left at the parseXEnv zero-sentinel) so this log
+	// line — and everything downstream — reflects what's actually in
+	// effect, not "0" for anything the deployer left unset.
+	setupLog.Info("rebalance engine configured",
+		"maxRecentDecisions", rebalanceMaxRecentDecisions,
+		"detectionInterval", rebalanceDetectionInterval,
+		"decisionTimeout", rebalanceDecisionTimeout,
+		"nodePressureThreshold", rebalanceNodePressureThreshold,
+	)
+
 	rebalanceWriter := rebalance.NewStateWriter(
 		mgr.GetClient(),
 		mgr.GetAPIReader(), // uncached — see NewStateWriter's doc comment on why
 		mgr.GetEventRecorderFor("rebalance-engine"), //nolint:staticcheck
+		rebalanceMaxRecentDecisions,
 	)
 	rebalanceEngine := rebalance.NewEngine(mgr.GetClient(), rebalanceWriter)
 	if err := mgr.Add(rebalanceEngine); err != nil {
@@ -375,7 +455,7 @@ func main() {
 		setupLog.Error(err, "unable to create metrics-server client")
 		os.Exit(1)
 	}
-	pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, 0)
+	pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, rebalanceNodePressureThreshold)
 	triggerEvaluator := rebalance.NewTriggerEvaluator(mgr.GetClient(), eaoGVK, pressureEvaluator)
 
 	rebalanceDetector := rebalance.NewReconciler(
@@ -383,10 +463,10 @@ func main() {
 		rebalanceWriter,
 		triggerEvaluator,
 		controller.ProfileByAppRefIndex,
-		0, // DefaultDetectionInterval
+		rebalanceDetectionInterval,
 		contextBuilder,
 		decisionClient,
-		0, // DefaultDecisionTimeout
+		rebalanceDecisionTimeout,
 	)
 	// eaoGVK above is the List kind (used for List() calls); Watches()/
 	// RESTMapper need the singular item kind, derived here rather than

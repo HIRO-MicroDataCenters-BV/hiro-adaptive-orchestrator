@@ -56,6 +56,12 @@
 #   EAO_VERSION               CRD API version             (default: v1)
 #   EAO_KIND                  CRD Kind                    (default: EnergyAwareOrchestration)
 #
+# ─── Rebalance Engine ────────────────────────────────────────────────────────
+#   REBALANCE_MAX_RECENT_DECISIONS      decision-history length per profile (default: 10)
+#   REBALANCE_DETECTION_INTERVAL        periodic detection tick, Go duration (default: 30s)
+#   REBALANCE_DECISION_TIMEOUT          AI-consultation timeout, Go duration (default: 5s)
+#   REBALANCE_NODE_PRESSURE_THRESHOLD   CPU/Memory pressure fraction         (default: 0.90)
+#
 # Usage (standalone):
 #   export GITHUB_PAT_TOKEN=<token>
 #   hack/deploy_operator.sh [kubeconfig-path]
@@ -119,6 +125,13 @@ export EAO_GROUP="${EAO_GROUP:-eas.hiro.io}"
 export EAO_VERSION="${EAO_VERSION:-v1}"
 export EAO_KIND="${EAO_KIND:-EnergyAwareOrchestration}"
 
+# Rebalance Engine — all optional, mirroring the operator's own package
+# defaults (internal/rebalance). See internal/rebalance/README.md#configuration.
+export REBALANCE_MAX_RECENT_DECISIONS="${REBALANCE_MAX_RECENT_DECISIONS:-10}"
+export REBALANCE_DETECTION_INTERVAL="${REBALANCE_DETECTION_INTERVAL:-30s}"
+export REBALANCE_DECISION_TIMEOUT="${REBALANCE_DECISION_TIMEOUT:-5s}"
+export REBALANCE_NODE_PRESSURE_THRESHOLD="${REBALANCE_NODE_PRESSURE_THRESHOLD:-0.90}"
+
 # PlacementServer paths (must match what the operator reads from env)
 export PLACEMENT_SERVER_PORT=${PLACEMENT_SERVER_PORT:-:8090}
 export PLACEMENT_SCORE_PATH=${PLACEMENT_SCORE_PATH:-/api/v1/placement/score}
@@ -155,6 +168,7 @@ print_config() {
   echo "Kubeconfig         : $KUBECONFIG"
   echo "Scheduler Plugin   : $DEPLOY_SCHEDULER_PLUGIN  (overlay: $([ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ] && echo config/default-with-webhook || echo config/default))"
   echo "EAO CRD            : $EAO_GROUP/$EAO_VERSION, Kind=$EAO_KIND"
+  echo "Rebalance Engine   : MaxRecentDecisions=$REBALANCE_MAX_RECENT_DECISIONS  DetectionInterval=$REBALANCE_DETECTION_INTERVAL  DecisionTimeout=$REBALANCE_DECISION_TIMEOUT  NodePressureThreshold=$REBALANCE_NODE_PRESSURE_THRESHOLD"
   echo "PlacementServer    : Service=$PLACEMENT_SERVICE_NAME  Port=$PLACEMENT_SERVER_PORT  Path=$PLACEMENT_SCORE_PATH  Health=$PLACEMENT_SERVER_HEALTH_PATH"
   echo "Extender Filter    : $EXTENDER_FILTER_PATH"
   echo "Extender Prioritize: $EXTENDER_PRIORITIZE_PATH"
@@ -251,7 +265,11 @@ inject_operator_env_vars() {
     EXTENDER_PRIORITIZE_PATH="$EXTENDER_PRIORITIZE_PATH" \
     EAO_GROUP="$EAO_GROUP" \
     EAO_VERSION="$EAO_VERSION" \
-    EAO_KIND="$EAO_KIND"
+    EAO_KIND="$EAO_KIND" \
+    REBALANCE_MAX_RECENT_DECISIONS="$REBALANCE_MAX_RECENT_DECISIONS" \
+    REBALANCE_DETECTION_INTERVAL="$REBALANCE_DETECTION_INTERVAL" \
+    REBALANCE_DECISION_TIMEOUT="$REBALANCE_DECISION_TIMEOUT" \
+    REBALANCE_NODE_PRESSURE_THRESHOLD="$REBALANCE_NODE_PRESSURE_THRESHOLD"
 }
 
 restart_and_wait_for_operator() {

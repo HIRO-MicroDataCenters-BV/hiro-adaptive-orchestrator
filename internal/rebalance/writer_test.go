@@ -45,7 +45,7 @@ func newTestWriter(t *testing.T, profile *orchestrationv1alpha1.OrchestrationPro
 	// draining the channel, and record.FakeRecorder.Eventf blocks (not
 	// drops) once the buffer fills.
 	recorder := record.NewFakeRecorder(256)
-	return NewStateWriter(c, c, recorder), recorder
+	return NewStateWriter(c, c, recorder, 10), recorder
 }
 
 func testProfile(name string) *orchestrationv1alpha1.OrchestrationProfile {
@@ -153,7 +153,7 @@ func TestStateWriter_Transition_RecentDecisionsTrimmed(t *testing.T) {
 	ctx := context.Background()
 	key := types.NamespacedName{Name: "profile-d"}
 
-	for i := range MaxRecentDecisions + 3 {
+	for i := 0; i < writer.maxRecentDecisions+3; i++ {
 		if _, err := writer.Transition(ctx, key, StateTriggered, "cycle", TransitionOptions{}); err != nil {
 			t.Fatalf("cycle %d Triggered: %v", i, err)
 		}
@@ -170,7 +170,7 @@ func TestStateWriter_Transition_RecentDecisionsTrimmed(t *testing.T) {
 	if err := writer.client.Get(ctx, key, got); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if len(got.Status.RebalancingStatus.RecentDecisions) != MaxRecentDecisions {
-		t.Errorf("recentDecisions len = %d, want %d", len(got.Status.RebalancingStatus.RecentDecisions), MaxRecentDecisions)
+	if len(got.Status.RebalancingStatus.RecentDecisions) != writer.maxRecentDecisions {
+		t.Errorf("recentDecisions len = %d, want %d", len(got.Status.RebalancingStatus.RecentDecisions), writer.maxRecentDecisions)
 	}
 }

@@ -39,7 +39,7 @@ func TestEngine_StartStopsCleanlyOnContextCancel(t *testing.T) {
 		t.Fatalf("adding scheme: %v", err)
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	writer := NewStateWriter(c, c, nil)
+	writer := NewStateWriter(c, c, nil, 0)
 	engine := NewEngine(c, writer)
 
 	ctx, cancel := context.WithCancel(context.Background())

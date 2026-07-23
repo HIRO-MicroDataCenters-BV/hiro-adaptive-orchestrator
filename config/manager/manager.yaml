@@ -88,6 +88,14 @@ spec:
           value: "/extender/filter"
         - name: EXTENDER_PRIORITIZE_PATH
           value: "/extender/prioritize"
+        - name: REBALANCE_MAX_RECENT_DECISIONS
+          value: "10"
+        - name: REBALANCE_DETECTION_INTERVAL
+          value: "30s"
+        - name: REBALANCE_DECISION_TIMEOUT
+          value: "5s"
+        - name: REBALANCE_NODE_PRESSURE_THRESHOLD
+          value: "0.90"
         - name: ENABLE_WEBHOOKS
           value: "false"
         - name: HIRO_SCHEDULER_NAME

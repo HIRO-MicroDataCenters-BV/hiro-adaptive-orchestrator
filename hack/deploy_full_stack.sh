@@ -53,6 +53,12 @@
 #                              Needed on kind/minikube/k3d; set false on
 #                              real clusters with valid kubelet certs.
 #
+# ─── Rebalance Engine ─────────────────────────────────────────────────────────
+#   REBALANCE_MAX_RECENT_DECISIONS      decision-history length per profile (default: 10)
+#   REBALANCE_DETECTION_INTERVAL        periodic detection tick, Go duration (default: 30s)
+#   REBALANCE_DECISION_TIMEOUT          AI-consultation timeout, Go duration (default: 5s)
+#   REBALANCE_NODE_PRESSURE_THRESHOLD   CPU/Memory pressure fraction         (default: 0.90)
+#
 # ─── Scheduler ───────────────────────────────────────────────────────────────
 #   SCHED_K8S_VERSION         k8s version to build for    (default: v1.35.0)
 #   SCHED_VERSION             scheduler release version   (default: v0.1.0)
@@ -189,6 +195,16 @@ export METRICS_SERVER_VERSION=${METRICS_SERVER_VERSION:-latest}
 export METRICS_SERVER_INSECURE_TLS=${METRICS_SERVER_INSECURE_TLS:-true}
 
 # ---------------------------------------------------------------------------
+# Rebalance Engine — all optional, mirroring the operator's own package
+# defaults (internal/rebalance). See internal/rebalance/README.md#configuration.
+# ---------------------------------------------------------------------------
+
+export REBALANCE_MAX_RECENT_DECISIONS=${REBALANCE_MAX_RECENT_DECISIONS:-10}
+export REBALANCE_DETECTION_INTERVAL=${REBALANCE_DETECTION_INTERVAL:-30s}
+export REBALANCE_DECISION_TIMEOUT=${REBALANCE_DECISION_TIMEOUT:-5s}
+export REBALANCE_NODE_PRESSURE_THRESHOLD=${REBALANCE_NODE_PRESSURE_THRESHOLD:-0.90}
+
+# ---------------------------------------------------------------------------
 # Deploy options — consumed by this script only
 # ---------------------------------------------------------------------------
 
@@ -277,6 +293,12 @@ print_config() {
   echo "  ── metrics-server ────────────────────────────────────────"
   echo "    Install                : $INSTALL_METRICS_SERVER  (version: $METRICS_SERVER_VERSION)"
   echo "    Insecure kubelet TLS   : $METRICS_SERVER_INSECURE_TLS"
+  echo ""
+  echo "  ── Rebalance Engine ──────────────────────────────────────"
+  echo "    Max Recent Decisions   : $REBALANCE_MAX_RECENT_DECISIONS"
+  echo "    Detection Interval     : $REBALANCE_DETECTION_INTERVAL"
+  echo "    Decision Timeout       : $REBALANCE_DECISION_TIMEOUT"
+  echo "    Node Pressure Threshold: $REBALANCE_NODE_PRESSURE_THRESHOLD"
   echo ""
   echo "  ── Scheduler ─────────────────────────────────────────────"
   echo "    K8s Target Version     : $SCHED_K8S_VERSION"

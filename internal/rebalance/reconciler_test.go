@@ -95,7 +95,7 @@ func newTestReconcilerWithAgent(t *testing.T, agentURL string, objs ...client.Ob
 		).
 		Build()
 
-	writer := NewStateWriter(c, c, record.NewFakeRecorder(256))
+	writer := NewStateWriter(c, c, record.NewFakeRecorder(256), 0)
 	metricsClient := metricsfake.NewSimpleClientset() //nolint:staticcheck // see pressure_test.go
 	pressure := NewNodePressureEvaluator(c, metricsClient, 0.90)
 	evaluator := NewTriggerEvaluator(c, testEAOGVK, pressure)

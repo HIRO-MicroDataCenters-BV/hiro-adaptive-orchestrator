@@ -317,12 +317,24 @@ Everything below runs inside the **same operator process** — one binary, one D
 pod. Wired in `cmd/main.go`:
 
 ```go
-rebalanceWriter := rebalance.NewStateWriter(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetEventRecorderFor("rebalance-engine"))
+// Each of these is parsed from an environment variable and resolved to the
+// package default (rebalance.DefaultX) right here in main.go if unset or
+// <= 0 — so every log line and downstream constructor call sees the value
+// actually in effect, never the raw "0 means unset" sentinel.
+rebalanceMaxRecentDecisions := parseIntEnv("REBALANCE_MAX_RECENT_DECISIONS")      // -> rebalance.DefaultMaxRecentDecisions
+rebalanceDetectionInterval := parseDurationEnv("REBALANCE_DETECTION_INTERVAL")    // -> rebalance.DefaultDetectionInterval
+rebalanceDecisionTimeout := parseDurationEnv("REBALANCE_DECISION_TIMEOUT")        // -> rebalance.DefaultDecisionTimeout
+rebalanceNodePressureThreshold := parseFloatEnv("REBALANCE_NODE_PRESSURE_THRESHOLD") // -> rebalance.DefaultNodePressureThreshold
+
+rebalanceWriter := rebalance.NewStateWriter(
+    mgr.GetClient(), mgr.GetAPIReader(), mgr.GetEventRecorderFor("rebalance-engine"),
+    rebalanceMaxRecentDecisions,
+)
 rebalanceEngine := rebalance.NewEngine(mgr.GetClient(), rebalanceWriter)
 mgr.Add(rebalanceEngine)
 
 metricsClient, _ := metricsclientset.NewForConfig(restConfig)
-pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, 0)
+pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, rebalanceNodePressureThreshold)
 triggerEvaluator := rebalance.NewTriggerEvaluator(mgr.GetClient(), eaoGVK, pressureEvaluator)
 
 // contextBuilder and decisionClient are the same instances the placement server
@@ -330,11 +342,30 @@ triggerEvaluator := rebalance.NewTriggerEvaluator(mgr.GetClient(), eaoGVK, press
 // a second use of the one configured External AI Agent, not a parallel HTTP path.
 rebalanceDetector := rebalance.NewReconciler(
     mgr.GetClient(), rebalanceWriter, triggerEvaluator,
-    controller.ProfileByAppRefIndex, 0, // 0 -> DefaultDetectionInterval
-    contextBuilder, decisionClient, 0, // 0 -> DefaultDecisionTimeout
+    controller.ProfileByAppRefIndex, rebalanceDetectionInterval,
+    contextBuilder, decisionClient, rebalanceDecisionTimeout,
 )
 rebalanceDetector.SetupWithManager(mgr, eaoItemGVK)
 ```
+
+### Configuration
+
+Every numeric default in this package is overridable at deploy time — none of it needs a code
+change or rebuild to tune for a given cluster:
+
+| Environment variable | Overrides | Default |
+|---|---|---|
+| `REBALANCE_MAX_RECENT_DECISIONS` | `StateWriter`'s rolling decision-history length | `DefaultMaxRecentDecisions` (10) |
+| `REBALANCE_DETECTION_INTERVAL` | `Reconciler`'s periodic detection tick (Go duration, e.g. `30s`) | `DefaultDetectionInterval` (30s) |
+| `REBALANCE_DECISION_TIMEOUT` | `Reconciler`'s AI-consultation timeout (Go duration, e.g. `5s`) | `DefaultDecisionTimeout` (5s) |
+| `REBALANCE_NODE_PRESSURE_THRESHOLD` | `NodePressureEvaluator`'s CPU/Memory pressure fraction (e.g. `0.90`) | `DefaultNodePressureThreshold` (0.90) |
+
+Each default lives once, as a constant next to the type it configures — `main.go` doesn't
+duplicate the numbers, it just resolves "unset" to that constant before constructing anything,
+so the startup log always shows the value actually in effect rather than a misleading `0`. An
+unparseable value (bad duration/float/int) fails the operator at startup rather than silently
+falling back, since a typo here should be caught at deploy time, not discovered later as
+unexplained behavior.
 
 - `controller.ProfileByAppRefIndex` — the same field index the `OrchestrationProfile`
   controller already registers (`internal/controller/op_index.go`), reused rather than
