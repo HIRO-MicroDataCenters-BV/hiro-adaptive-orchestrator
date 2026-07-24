@@ -524,9 +524,11 @@ deploy_oprator_with_samples() {
 # ---------------------------------------------------------------------------
 # Phase 5 — Mock Decision Agent (when USE_MOCK_AGENT=true)
 #
-# The mock agent is a lightweight Python HTTP server that scores every
-# candidate node at 50.  It is deployed in the same namespace as the operator
-# so the short DNS name "mock-decision-agent" resolves from the operator pod.
+# The mock agent is a lightweight Python HTTP server that scores candidate
+# nodes randomly for initial placement, and recommends Move/NoOp randomly for
+# rebalance evaluations (see hack/mock_decision_agent.yaml for exact
+# behaviour). It is deployed in the same namespace as the operator so the
+# short DNS name "mock-decision-agent" resolves from the operator pod.
 #
 # This phase lives in deploy_full_stack.sh (not deploy_operator.sh) so that
 # standalone operator deployments are not coupled to the mock agent lifecycle.

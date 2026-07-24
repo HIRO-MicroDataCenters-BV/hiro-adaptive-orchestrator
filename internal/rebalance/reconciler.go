@@ -304,6 +304,11 @@ func (r *Reconciler) evaluateWithAI(
 // AI consultation itself could not be completed (context assembly or the
 // HTTP round trip), as opposed to the AI successfully responding with an
 // unfavorable decision.
+//
+// Applies the profile's own cooldown here too — otherwise an unreachable or
+// slow AI agent gets re-consulted on every single DetectionInterval tick with
+// no backoff at all, hammering it in a tight loop instead of waiting like
+// every other terminal outcome does.
 func (r *Reconciler) failEvaluation(
 	ctx context.Context,
 	key types.NamespacedName,
@@ -311,8 +316,9 @@ func (r *Reconciler) failEvaluation(
 	reason string,
 ) {
 	logger := logf.FromContext(ctx)
+	cooldown := time.Duration(profile.Spec.Rebalancing.CooldownSeconds) * time.Second
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-		TransitionOptions{Outcome: OutcomeFailed}); err != nil {
+		TransitionOptions{Outcome: OutcomeFailed, Cooldown: cooldown}); err != nil {
 		logger.Error(err, "rebalance: AI-path transition to Watching (Failed) failed", "profile", profile.Name)
 	}
 }

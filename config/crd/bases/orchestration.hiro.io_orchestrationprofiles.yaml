@@ -224,7 +224,6 @@ spec:
                           type: string
                       required:
                       - decisionId
-                      - outcome
                       type: object
                     type: array
                   startedAt:

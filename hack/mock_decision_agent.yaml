@@ -6,9 +6,20 @@
 #
 # Set: DECISION_AGENT_URL=http://mock-decision-agent:8080
 #
+# Both initial placement and rebalance evaluation hit the same
+# DECISION_AGENT_PATH (see internal/placement-server/client.go's
+# RequestDecision / RequestRebalanceDecision) — this mock tells the two
+# apart by checking whether the request body carries a "rebalanceContext",
+# same as the real agent is expected to.
+#
 # Behaviour:
-#   POST /api/v1/placement/score  → parses DecisionRequest, scores every
-#                                       candidate node at 50, returns DecisionResponse
+#   POST <DECISION_AGENT_PATH>  (no rebalanceContext) → parses DecisionRequest,
+#                                   scores every candidate node randomly in
+#                                   [0, 100], returns DecisionResponse
+#   POST <DECISION_AGENT_PATH>  (rebalanceContext set) → parses the
+#                                   RebalanceContext, randomly recommends
+#                                   Move (a running pod to a candidate node)
+#                                   or NoOp, returns RebalanceDecisionResponse
 #   GET  /healthz                    → 200 ok
 #
 # Deploy:  kubectl apply -f hack/mock_decision_agent.yaml
@@ -28,6 +39,20 @@ data:
     PLACEMENT_PATH = "/api/v1/placement/score"
     HEALTH_PATH    = "/healthz"
 
+    # Placement scoring range — every candidate node gets a random score in
+    # [PLACEMENT_SCORE_MIN, PLACEMENT_SCORE_MAX].
+    PLACEMENT_SCORE_MIN = 0.0
+    PLACEMENT_SCORE_MAX = 100.0
+
+    # Rebalance (Move vs NoOp) knobs.
+    # MOVE_PROBABILITY is deliberately low for now: Story 29 (decision store)
+    # and Story 30 (Move enactor) aren't built yet, so a Move recommendation
+    # currently has nothing to consume it past Decided. Keep NoOp dominant
+    # until those land, then raise this back up.
+    MOVE_PROBABILITY   = 0.1
+    IMPROVEMENT_MIN    = 10.0
+    IMPROVEMENT_MAX    = 100.0
+
     class Handler(BaseHTTPRequestHandler):
 
         def do_POST(self):
@@ -40,35 +65,87 @@ data:
                 req = {}
 
             request_id = req.get("requestId", "mock-id")
+            is_rebalance = req.get("rebalanceContext") is not None
+            kind = "rebalance" if is_rebalance else "initial-placement"
 
+            self.log_message(
+                "POST %s  kind=%s  requestId=%s  request=%s",
+                self.path, kind, request_id, json.dumps(req),
+            )
+
+            if is_rebalance:
+                resp = self._rebalance_response(request_id, req)
+            else:
+                resp = self._placement_response(request_id, req)
+
+            body = json.dumps(resp).encode()
+            self._reply(200, "application/json", body)
+            self.log_message(
+                "POST %s  kind=%s  requestId=%s  response=%s",
+                self.path, kind, request_id, json.dumps(resp),
+            )
+
+        def _placement_response(self, request_id, req):
             # CandidateNodes is a list of full Kubernetes Node objects.
             # Extract the name from metadata.name.
             candidate_nodes = req.get("candidateNodes", [])
             node_scores = [
                 {
                     "nodeName": node.get("metadata", {}).get("name", f"node-{i}"),
-                    "score": round(random.uniform(0.0, 100.0), 2),
+                    "score": round(random.uniform(PLACEMENT_SCORE_MIN, PLACEMENT_SCORE_MAX), 2),
                 }
                 for i, node in enumerate(candidate_nodes)
             ]
 
             # Fallback when the request carries no nodes (shouldn't happen in production, but just in case)
             if not node_scores:
-                node_scores = [{"nodeName": "fallback-node", "score": round(random.uniform(0.0, 100.0), 2)}]
+                node_scores = [{
+                    "nodeName": "fallback-node",
+                    "score": round(random.uniform(PLACEMENT_SCORE_MIN, PLACEMENT_SCORE_MAX), 2),
+                }]
 
-            resp = {
+            return {
                 "requestId": request_id,
                 "nodeScores": node_scores,
-                "reason": "mock: candidate nodes scored randomly in [0.0, 100.0]",
+                "reason": f"mock: candidate nodes scored randomly in [{PLACEMENT_SCORE_MIN}, {PLACEMENT_SCORE_MAX}]",
             }
 
-            body = json.dumps(resp).encode()
-            self._reply(200, "application/json", body)
-            self.log_message(
-                "POST %s → 200  requestId=%s  nodes=%s",
-                self.path, request_id,
-                [s["nodeName"] for s in node_scores],
-            )
+        def _rebalance_response(self, request_id, req):
+            rebalance_context = req.get("rebalanceContext") or {}
+            current_placements = rebalance_context.get("currentPlacements", [])
+            candidate_nodes = req.get("candidateNodes", [])
+            candidate_names = [n.get("metadata", {}).get("name") for n in candidate_nodes]
+            candidate_names = [n for n in candidate_names if n]
+
+            movable = [p for p in current_placements if p.get("phase") == "Running"]
+
+            # Only recommend Move when there's a running pod and a candidate
+            # node it isn't already on — otherwise fall back to NoOp, same as
+            # a real agent would when there's nothing useful to do.
+            move_targets = None
+            if movable and candidate_names:
+                pod = random.choice(movable)
+                others = [n for n in candidate_names if n != pod.get("nodeName")]
+                if others:
+                    move_targets = (pod, random.choice(others))
+
+            if move_targets and random.random() < MOVE_PROBABILITY:
+                pod, target = move_targets
+                return {
+                    "requestId": request_id,
+                    "action": "Move",
+                    "podName": pod.get("podName", ""),
+                    "targetNode": target,
+                    "improvement": round(random.uniform(IMPROVEMENT_MIN, IMPROVEMENT_MAX), 2),
+                    "reason": f"mock: moving {pod.get('podName', '')} to {target} improves balance",
+                }
+
+            return {
+                "requestId": request_id,
+                "action": "NoOp",
+                "improvement": 0,
+                "reason": "mock: current placement already balanced",
+            }
 
         def do_GET(self):
             self._reply(200, "text/plain", b"ok")

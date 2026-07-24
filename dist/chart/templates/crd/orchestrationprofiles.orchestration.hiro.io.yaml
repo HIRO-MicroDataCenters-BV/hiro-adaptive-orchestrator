@@ -179,7 +179,10 @@ spec:
                                                 rolling decision history.
                                             properties:
                                                 action:
-                                                    description: action is the AI-returned action that was processed (e.g. "Move", "NoOp").
+                                                    description: |-
+                                                        action is the AI-returned action that was processed (e.g. "Move", "NoOp").
+                                                        Dont use kubebuilder:validation:Enum here because the AI may return new actions in
+                                                        the future, and we don't want to break the CRD schema for that reason.
                                                     type: string
                                                 decisionId:
                                                     description: decisionId correlates this record with engine logs and Kubernetes Events.
@@ -193,6 +196,15 @@ spec:
                                                     description: lastTransitionAt is when this decision reached its terminal state.
                                                     format: date-time
                                                     type: string
+                                                outcome:
+                                                    description: outcome is the terminal outcome of this decision cycle.
+                                                    enum:
+                                                        - Enacted
+                                                        - NoOp
+                                                        - Rejected
+                                                        - Deferred
+                                                        - Failed
+                                                    type: string
                                                 reason:
                                                     description: reason explains why the decision ended in this state.
                                                     type: string
@@ -200,22 +212,8 @@ spec:
                                                     description: startedAt is when this decision's cycle entered Triggered.
                                                     format: date-time
                                                     type: string
-                                                state:
-                                                    description: state is the terminal state this decision ended in.
-                                                    enum:
-                                                        - Triggered
-                                                        - Evaluating
-                                                        - Decided
-                                                        - Enacting
-                                                        - Enacted
-                                                        - NoOp
-                                                        - Rejected
-                                                        - Deferred
-                                                        - Failed
-                                                    type: string
                                             required:
                                                 - decisionId
-                                                - state
                                             type: object
                                         type: array
                                     startedAt:
@@ -227,15 +225,11 @@ spec:
                                             state is the current position of this workload's decision lifecycle
                                             state machine. Empty when no rebalance cycle has ever been triggered.
                                         enum:
+                                            - Watching
                                             - Triggered
                                             - Evaluating
                                             - Decided
                                             - Enacting
-                                            - Enacted
-                                            - NoOp
-                                            - Rejected
-                                            - Deferred
-                                            - Failed
                                         type: string
                                 type: object
                             status:

@@ -123,7 +123,7 @@ type RebalanceDecision struct {
 
 	// outcome is the terminal outcome of this decision cycle.
 	// +kubebuilder:validation:Enum=Enacted;NoOp;Rejected;Deferred;Failed
-	Outcome RebalanceOutcome `json:"outcome"`
+	Outcome RebalanceOutcome `json:"outcome,omitempty"`
 
 	// action is the AI-returned action that was processed (e.g. "Move", "NoOp").
 	// Dont use kubebuilder:validation:Enum here because the AI may return new actions in

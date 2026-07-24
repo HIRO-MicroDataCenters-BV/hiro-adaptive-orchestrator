@@ -192,8 +192,10 @@ spec:
                         rolling decision history.
                       properties:
                         action:
-                          description: action is the AI-returned action that was processed
-                            (e.g. "Move", "NoOp").
+                          description: |-
+                            action is the AI-returned action that was processed (e.g. "Move", "NoOp").
+                            Dont use kubebuilder:validation:Enum here because the AI may return new actions in
+                            the future, and we don't want to break the CRD schema for that reason.
                           type: string
                         decisionId:
                           description: decisionId correlates this record with engine
@@ -209,6 +211,16 @@ spec:
                             its terminal state.
                           format: date-time
                           type: string
+                        outcome:
+                          description: outcome is the terminal outcome of this decision
+                            cycle.
+                          enum:
+                          - Enacted
+                          - NoOp
+                          - Rejected
+                          - Deferred
+                          - Failed
+                          type: string
                         reason:
                           description: reason explains why the decision ended in this
                             state.
@@ -218,23 +230,8 @@ spec:
                             Triggered.
                           format: date-time
                           type: string
-                        state:
-                          description: state is the terminal state this decision ended
-                            in.
-                          enum:
-                          - Triggered
-                          - Evaluating
-                          - Decided
-                          - Enacting
-                          - Enacted
-                          - NoOp
-                          - Rejected
-                          - Deferred
-                          - Failed
-                          type: string
                       required:
                       - decisionId
-                      - state
                       type: object
                     type: array
                   startedAt:
@@ -246,15 +243,11 @@ spec:
                       state is the current position of this workload's decision lifecycle
                       state machine. Empty when no rebalance cycle has ever been triggered.
                     enum:
+                    - Watching
                     - Triggered
                     - Evaluating
                     - Decided
                     - Enacting
-                    - Enacted
-                    - NoOp
-                    - Rejected
-                    - Deferred
-                    - Failed
                     type: string
                 type: object
               status:
@@ -645,6 +638,14 @@ spec:
           value: /extender/filter
         - name: EXTENDER_PRIORITIZE_PATH
           value: /extender/prioritize
+        - name: REBALANCE_MAX_RECENT_DECISIONS
+          value: "10"
+        - name: REBALANCE_DETECTION_INTERVAL
+          value: 30s
+        - name: REBALANCE_DECISION_TIMEOUT
+          value: 5s
+        - name: REBALANCE_NODE_PRESSURE_THRESHOLD
+          value: "0.90"
         - name: ENABLE_WEBHOOKS
           value: "false"
         - name: HIRO_SCHEDULER_NAME
