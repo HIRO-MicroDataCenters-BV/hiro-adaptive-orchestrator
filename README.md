@@ -2,6 +2,28 @@
 
 A Kubernetes operator that provides intelligent, AI-driven pod placement and adaptive workload orchestration. It introduces the `OrchestrationProfile` custom resource to bind placement strategies to workloads, and integrates with the Kubernetes scheduler to score nodes using an external AI decision agent.
 
+### At a glance
+
+```mermaid
+graph LR
+    Profiles[("OrchestrationProfile /<br/>EnergyAwareOrchestration")]
+    Triggers(("Pod/Node events<br/>+ periodic tick"))
+    Sched["Scheduler"]
+    PS["PlacementServer"]
+    RE["Rebalance Engine"]
+    AI["AI Agent"]
+
+    Profiles -->|"① profile + EAO data"| PS
+    Sched -->|"① PreScore"| PS
+    PS <-->|"② request / ③ NodeScores"| AI
+    PS -->|"④ score"| Sched
+
+    Profiles -->|"① profile + EAO data"| RE
+    Triggers -->|"① trigger fires"| RE
+    RE <-->|"② context / ③ action"| AI
+    RE -->|"④ enact, then repeat"| RE
+```
+
 ---
 
 ## Table of Contents
@@ -57,7 +79,7 @@ The system consists of two independently deployed binaries plus an optional mock
 |-----------|--------------|-------------|
 | **Operator** | `cmd/main.go` | Reconciliation controller + PlacementServer HTTP service (`:8090`) serving 4 routes — plugin path, extender filter, extender prioritize, healthz |
 | **Scheduler Plugin** | `scheduler-plugin/cmd/main.go` | Custom `kube-scheduler` binary with `HIROScore` plugin registered |
-| **Mock Decision Agent** | `hack/mock_decision_agent.yaml` | Lightweight Python HTTP server for local/CI testing; scores all nodes at 50 |
+| **Mock Decision Agent** | `hack/mock_decision_agent.yaml` | Lightweight Python HTTP server for local/CI testing; scores placement candidates randomly and responds to rebalance evaluations (Move/NoOp) |
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -347,6 +369,17 @@ Each sub-script also works **standalone** — it carries its own `:-` defaults f
 
 ## Features
 
+```mermaid
+graph TB
+    HIRO["HIRO Adaptive<br/>Orchestrator"]
+    HIRO --> Placement["Placement strategies<br/>Balanced / Packed / Spread"]
+    HIRO --> Awareness["Resource awareness<br/>CPU / Memory / GPU / Energy"]
+    HIRO --> Rebalance2["Dynamic rebalancing<br/>trigger-based state machine"]
+    HIRO --> Sched3["Scheduler integration<br/>Plugin or Extender"]
+    HIRO --> Obs["Observability<br/>status + Kubernetes Events"]
+    HIRO --> Prod["Production-ready<br/>HA, HTTPS metrics, restricted PSS"]
+```
+
 - **Placement strategies** — `Balanced`, `Packed`, `Spread`
 - **Multi-dimensional resource awareness** — CPU, Memory, GPU, Energy
 - **Energy-aware orchestration** — optional integration with an `EnergyAwareOrchestration` CRD
@@ -362,6 +395,15 @@ Each sub-script also works **standalone** — it carries its own `:-` defaults f
 ---
 
 ## Prerequisites
+
+```mermaid
+flowchart LR
+    Tools["Go, Docker, kubectl,<br/>Kustomize, kubebuilder"] --> Cluster["Reachable k8s cluster<br/>v1.29+, ~/.kube/config"]
+    Cluster --> Webhook{"Using scheduler<br/>plugin + webhook?"}
+    Webhook -- yes --> CertMgr["cert-manager<br/>(auto-installed by Phase 2)"]
+    Webhook -- no --> Agent
+    CertMgr --> Agent["Decision Agent reachable<br/>(mock by default)"]
+```
 
 | Tool | Minimum version | Purpose |
 |------|----------------|---------|
@@ -383,6 +425,18 @@ An **external Decision Agent** reachable at a URL you control is required for th
 ---
 
 ## Quick Start
+
+```mermaid
+flowchart TD
+    Start(["I want to..."]) --> Q1{"try it locally,<br/>no scheduler changes?"}
+    Q1 -- yes --> C1["hack/deploy_full_stack.sh"]
+    Q1 -- no --> Q2{"patch the default<br/>kube-scheduler?"}
+    Q2 -- yes --> C2["DEPLOY_EXTENDER=true<br/>hack/deploy_full_stack.sh"]
+    Q2 -- no --> Q3{"run a dedicated<br/>scheduler + webhook?"}
+    Q3 -- yes --> C3["DEPLOY_SCHEDULER_PLUGIN=true<br/>hack/deploy_full_stack.sh"]
+    Q3 -- no --> Q4{"use a real AI agent,<br/>not the mock?"}
+    Q4 -- yes --> C4["USE_MOCK_AGENT=false ...<br/>hack/deploy_full_stack.sh"]
+```
 
 ```bash
 export GITHUB_PAT_TOKEN=<your-ghcr-token>
@@ -409,6 +463,18 @@ NAMESPACE=my-ns NAME_PREFIX=my-org- DEPLOY_EXTENDER=true hack/deploy_full_stack.
 ---
 
 ## Deployment
+
+```mermaid
+flowchart LR
+    D(["How do you want<br/>to deploy?"]) --> A["Scripted<br/>hack/deploy_*.sh"]
+    D --> B["Manual Kustomize<br/>make deploy"]
+    D --> C["Helm<br/>make helm-deploy"]
+    D --> E["YAML bundle<br/>dist/install.yaml"]
+    A --> A1["Recommended — handles<br/>cert-manager, webhook,<br/>mock agent, env injection"]
+    B --> B1["Full manual control,<br/>no scripted phases"]
+    C --> C1["GitOps-friendly,<br/>chart auto-generated from config/"]
+    E --> E1["Single-file apply,<br/>e.g. air-gapped installs"]
+```
 
 All deploy scripts share the same parameter model: every variable has a default and can be overridden via environment. See [All Parameters](#all-parameters) for the full reference.
 
@@ -446,6 +512,19 @@ export GITHUB_PAT_TOKEN=<token>
 hack/deploy_operator.sh [kubeconfig-path]
 ```
 
+```mermaid
+flowchart TD
+    S1["1. Lint, generate,<br/>install CRDs, build"] --> S2["2. Build + push image"]
+    S2 --> S3["3. Configure Kustomize"]
+    S3 --> S4["4. Patch Service name"]
+    S4 --> S5["5. make deploy /<br/>deploy-scheduler"]
+    S5 --> S6["6. Create GHCR pull secret"]
+    S6 --> S7["7. Patch ServiceAccount"]
+    S7 --> S8["8. Inject env vars"]
+    S8 --> S9["9. Wait for rollout"]
+    S9 --> S10["10. Apply sample profiles"]
+```
+
 Steps performed:
 1. Lint, generate code, install CRDs, build binary
 2. Build and push operator Docker image to GHCR
@@ -475,6 +554,16 @@ The operator must already be running before deploying the scheduler.
 ```bash
 export GITHUB_PAT_TOKEN=<token>
 hack/deploy_scheduler.sh [kubeconfig-path]
+```
+
+```mermaid
+flowchart TD
+    T1["1. Build scheduler image"] --> T2["2. Push to GHCR"]
+    T2 --> T3["3. Configure Kustomize"]
+    T3 --> T4["4. Patch KubeSchedulerConfiguration"]
+    T4 --> T5["5. Apply manifests"]
+    T5 --> T6["6. Create + attach pull secret"]
+    T6 --> T7["7. Rollout restart + wait"]
 ```
 
 Steps performed:
@@ -554,6 +643,17 @@ kubectl apply -f dist/install.yaml
 ---
 
 ## Configuration Reference
+
+```mermaid
+flowchart LR
+    Identity["Identity<br/>NAMESPACE, NAME_PREFIX"] --> All
+    Placement2["PlacementServer<br/>PORT, PATH, TIMEOUT"] --> All
+    Agent2["Decision Agent<br/>URL, PATH, USE_MOCK_AGENT"] --> All
+    EAOv["EAO CRD<br/>GROUP, VERSION, KIND"] --> All
+    Sched4["Scheduler / Webhook<br/>DEPLOY_SCHEDULER_PLUGIN, ..."] --> All
+    All(["exported by<br/>deploy_full_stack.sh"]) --> Ops["cmd/main.go<br/>os.Getenv"]
+    Ops --> Constructed["PlacementServer,<br/>DecisionClient, etc."]
+```
 
 ### All Parameters
 
@@ -741,6 +841,12 @@ kubectl describe orchestrationprofile <name>
 
 ## Scheduler Integration Approaches
 
+```mermaid
+flowchart TD
+    Q(["Can you run a custom<br/>scheduler pod on this cluster?"]) -- yes --> Plugin["Plugin approach<br/>per-pod opt-in, HA-ready"]
+    Q -- "no — managed control plane<br/>(GKE Autopilot, EKS Fargate, ...)" --> Extender["Extender approach<br/>cluster-wide, patches kube-scheduler"]
+```
+
 ### Plugin Approach (recommended)
 
 Deploys `hiro-scheduler` as a standalone scheduler pod. Pods opt in by setting `spec.schedulerName: hiro-scheduler` (manually or automatically via the mutating webhook). The default `kube-scheduler` continues to handle all other pods.
@@ -873,11 +979,22 @@ See [config/extender/scheduler-config.yaml](config/extender/scheduler-config.yam
 
 ## Mock Decision Agent
 
-For local and CI testing a mock agent is included at `hack/mock_decision_agent.yaml`. It responds to every placement request with all candidate nodes scored equally at `50`.
+```mermaid
+sequenceDiagram
+    participant Sched as Scheduler (plugin/extender)
+    participant Mock as mock-decision-agent
+    Sched->>Mock: POST decision path (no rebalanceContext)
+    Mock-->>Sched: nodeScores — each candidate random in [0, 100]
+    Sched->>Mock: POST same path (rebalanceContext set)
+    Mock-->>Sched: action Move (~10%) or NoOp, per hack/mock_decision_agent.yaml
+```
+
+For local and CI testing a mock agent is included at `hack/mock_decision_agent.yaml`. It handles two kinds of requests on the same path, distinguished by whether the body carries a `rebalanceContext` (see [internal/rebalance/README.md](internal/rebalance/README.md#dispatch--acting-on-the-ais-decision)): initial placement gets every candidate node scored randomly in `[0, 100]`; a rebalance evaluation gets a randomly chosen `Move` or `NoOp` recommendation.
 
 ```
-POST /api/v1/placement/decision  →  nodeScores: [{nodeName, score: 50.0}, ...]
-GET  /healthz                    →  200 ok
+POST /api/v1/placement/decision  (no rebalanceContext) →  nodeScores: [{nodeName, score}, ...]
+POST /api/v1/placement/decision  (rebalanceContext set) →  action: Move | NoOp
+GET  /healthz                                           →  200 ok
 ```
 
 The mock agent runs as a Python 3 `http.server` in a `python:3.11-slim` container. It is deployed into the same namespace as the operator so the short DNS name `mock-decision-agent` resolves from the operator pod.
@@ -908,6 +1025,13 @@ USE_MOCK_AGENT=false DECISION_AGENT_URL=http://ai.example.com:8080 hack/deploy_f
 ---
 
 ## Testing
+
+```mermaid
+flowchart LR
+    Unit["make test<br/>Ginkgo/Gomega + envtest"] --> Fast["fast, no real cluster"]
+    E2E["make test-e2e<br/>Kind cluster"] --> Real["real cluster,<br/>created + torn down"]
+    Lint["make lint / lint-fix"] --> Style["style + static analysis"]
+```
 
 ### Unit & Integration Tests
 
@@ -1065,6 +1189,12 @@ test/e2e/                              # End-to-end tests (Kind)
 
 ## Upgrading Go or Kubernetes Version
 
+```mermaid
+flowchart LR
+    Go["Go version bump"] --> G1["go.mod"] --> G2["Makefile<br/>GOLANGCI_LINT_VERSION"] --> G3[".custom-gcl.yml"] --> G4["make lint"]
+    K8s["K8s version bump<br/>(scheduler plugin)"] --> K1["pin-k8s-version"] --> K2["go mod tidy"] --> K3["docker-build-scheduler"] --> K4["deploy_scheduler.sh"]
+```
+
 ### Go Version
 
 Three files must be kept in sync (not updated automatically by kubebuilder):
@@ -1132,6 +1262,15 @@ kubebuilder edit --plugins=helm/v2-alpha
 ---
 
 ## Contributing
+
+```mermaid
+flowchart LR
+    Fork["Fork + branch"] --> Edit["Edit types / code"]
+    Edit --> Gen["make manifests generate"]
+    Gen --> Check["make lint-fix test"]
+    Check --> PR["Open pull request"]
+    PR --> CI["CI: e2e on Kind"]
+```
 
 1. Fork the repository and create a feature branch.
 2. Run `make manifests generate` after editing types.
