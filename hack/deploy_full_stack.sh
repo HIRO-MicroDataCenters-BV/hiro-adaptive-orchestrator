@@ -58,6 +58,9 @@
 #   REBALANCE_DETECTION_INTERVAL        periodic detection tick, Go duration (default: 30s)
 #   REBALANCE_DECISION_TIMEOUT          AI-consultation timeout, Go duration (default: 5s)
 #   REBALANCE_NODE_PRESSURE_THRESHOLD   CPU/Memory pressure fraction         (default: 0.90)
+#   REBALANCE_IMPROVEMENT_THRESHOLD     min Move improvement score to enact  (default: 20)
+#   REBALANCE_DECISION_STORE_TTL        how long a Move decision biases scoring, Go duration (default: 60s)
+#   REBALANCE_MOVE_ACTION_TIMEOUT       max wait for a Move's replacement pod, Go duration (default: 60s)
 #
 # ─── Scheduler ───────────────────────────────────────────────────────────────
 #   SCHED_K8S_VERSION         k8s version to build for    (default: v1.35.0)
@@ -203,6 +206,9 @@ export REBALANCE_MAX_RECENT_DECISIONS=${REBALANCE_MAX_RECENT_DECISIONS:-10}
 export REBALANCE_DETECTION_INTERVAL=${REBALANCE_DETECTION_INTERVAL:-30s}
 export REBALANCE_DECISION_TIMEOUT=${REBALANCE_DECISION_TIMEOUT:-5s}
 export REBALANCE_NODE_PRESSURE_THRESHOLD=${REBALANCE_NODE_PRESSURE_THRESHOLD:-0.90}
+export REBALANCE_IMPROVEMENT_THRESHOLD=${REBALANCE_IMPROVEMENT_THRESHOLD:-20}
+export REBALANCE_DECISION_STORE_TTL=${REBALANCE_DECISION_STORE_TTL:-60s}
+export REBALANCE_MOVE_ACTION_TIMEOUT=${REBALANCE_MOVE_ACTION_TIMEOUT:-60s}
 
 # ---------------------------------------------------------------------------
 # Deploy options — consumed by this script only
@@ -299,6 +305,9 @@ print_config() {
   echo "    Detection Interval     : $REBALANCE_DETECTION_INTERVAL"
   echo "    Decision Timeout       : $REBALANCE_DECISION_TIMEOUT"
   echo "    Node Pressure Threshold: $REBALANCE_NODE_PRESSURE_THRESHOLD"
+  echo "    Improvement Threshold  : $REBALANCE_IMPROVEMENT_THRESHOLD"
+  echo "    Decision Store TTL     : $REBALANCE_DECISION_STORE_TTL"
+  echo "    Move Action Timeout    : $REBALANCE_MOVE_ACTION_TIMEOUT"
   echo ""
   echo "  ── Scheduler ─────────────────────────────────────────────"
   echo "    K8s Target Version     : $SCHED_K8S_VERSION"

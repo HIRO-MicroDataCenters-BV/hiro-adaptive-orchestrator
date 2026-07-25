@@ -407,6 +407,9 @@ func main() {
 	//   REBALANCE_DETECTION_INTERVAL       — periodic detection tick, e.g. "30s"
 	//   REBALANCE_DECISION_TIMEOUT         — AI consultation timeout, e.g. "5s"
 	//   REBALANCE_NODE_PRESSURE_THRESHOLD  — CPU/Memory pressure fraction, e.g. "0.90"
+	//   REBALANCE_IMPROVEMENT_THRESHOLD    — minimum Move improvement score to enact, e.g. "20"
+	//   REBALANCE_DECISION_STORE_TTL       — how long a Move decision biases scoring, e.g. "60s"
+	//   REBALANCE_MOVE_ACTION_TIMEOUT      — max wait for a Move's replacement pod, e.g. "60s"
 	// -------------------------------------------------------------------------
 	rebalanceMaxRecentDecisions := parseIntEnv("REBALANCE_MAX_RECENT_DECISIONS")
 	if rebalanceMaxRecentDecisions <= 0 {
@@ -424,6 +427,18 @@ func main() {
 	if rebalanceNodePressureThreshold <= 0 {
 		rebalanceNodePressureThreshold = rebalance.DefaultNodePressureThreshold
 	}
+	rebalanceImprovementThreshold := parseFloatEnv("REBALANCE_IMPROVEMENT_THRESHOLD")
+	if rebalanceImprovementThreshold <= 0 {
+		rebalanceImprovementThreshold = rebalance.DefaultImprovementThreshold
+	}
+	rebalanceDecisionStoreTTL := parseDurationEnv("REBALANCE_DECISION_STORE_TTL")
+	if rebalanceDecisionStoreTTL <= 0 {
+		rebalanceDecisionStoreTTL = placementserver.DefaultDecisionStoreTTL
+	}
+	rebalanceMoveActionTimeout := parseDurationEnv("REBALANCE_MOVE_ACTION_TIMEOUT")
+	if rebalanceMoveActionTimeout <= 0 {
+		rebalanceMoveActionTimeout = rebalance.DefaultMoveActionTimeout
+	}
 	// Resolved above (not left at the parseXEnv zero-sentinel) so this log
 	// line — and everything downstream — reflects what's actually in
 	// effect, not "0" for anything the deployer left unset.
@@ -432,7 +447,15 @@ func main() {
 		"detectionInterval", rebalanceDetectionInterval,
 		"decisionTimeout", rebalanceDecisionTimeout,
 		"nodePressureThreshold", rebalanceNodePressureThreshold,
+		"improvementThreshold", rebalanceImprovementThreshold,
+		"decisionStoreTTL", rebalanceDecisionStoreTTL,
+		"moveActionTimeout", rebalanceMoveActionTimeout,
 	)
+
+	// decisionStore is shared between the PlacementServer (reads it in
+	// score, in-process) and the rebalance engine's Move enactor (writes to
+	// it before eviction) — both live in this same operator binary.
+	decisionStore := placementserver.NewDecisionStore(rebalanceDecisionStoreTTL)
 
 	rebalanceWriter := rebalance.NewStateWriter(
 		mgr.GetClient(),
@@ -467,6 +490,9 @@ func main() {
 		contextBuilder,
 		decisionClient,
 		rebalanceDecisionTimeout,
+		rebalanceImprovementThreshold,
+		decisionStore,
+		rebalanceMoveActionTimeout,
 	)
 	// eaoGVK above is the List kind (used for List() calls); Watches()/
 	// RESTMapper need the singular item kind, derived here rather than
@@ -483,6 +509,7 @@ func main() {
 	placementServer := placementserver.NewPlacementServer(
 		contextBuilder,
 		decisionClient,
+		decisionStore,
 		placementServerPort,
 		placementScorePath,
 		placementFilterPath,

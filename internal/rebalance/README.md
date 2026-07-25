@@ -65,7 +65,13 @@ enforced by `StateWriter.Transition` itself.
 | [`triggers.go`](triggers.go) | `TriggerEvaluator` — checks the five CRD-declared trigger conditions. |
 | [`pressure.go`](pressure.go) | `NodePressureEvaluator` — CPU/Memory node pressure via metrics-server. Used by `TriggerEvaluator`. |
 | [`retry_enactor.go`](retry_enactor.go) | `retryPendingSchedule` — the mechanical enactor for `ActionRetryPendingSchedule` (see [Bypassing the AI for mechanical actions](#bypassing-the-ai-for-mechanical-actions)). |
+| [`dispatch.go`](dispatch.go) | `dispatchDecision` and the `actionDispatchers` registry — carries a successful AI response to a terminal transition (see [Dispatch](#dispatch--acting-on-the-ais-decision)). |
+| [`move_enactor.go`](move_enactor.go) | `moveEnactor` — evicts a pod and waits for its replacement, driving `Decided → Enacting → Watching` for an accepted `Move`. |
 | [`engine.go`](engine.go) | `Engine` — a `manager.Runnable` used to register the rebalance engine's lifecycle with the operator's Manager. |
+
+`internal/placement-server/decision_store.go` (not in this package) holds `DecisionStore`,
+shared between `moveEnactor` (writes) and `PlacementServer.score` (reads) — see
+[The decision store](#the-decision-store--how-move-actually-lands-a-pod-on-a-specific-node).
 
 Every `.go` file above has a matching `_test.go`.
 
@@ -208,13 +214,62 @@ initial-placement scoring, not a second HTTP path:
    can't say which pod is going there when more than one could), `TargetNode`, `Improvement`,
    and `Reason`.
 4. A context-build error or a request timeout/error returns the profile to `Watching` with
-   outcome `Failed` via `failEvaluation`, with a reason describing which step failed. A
-   successful response is logged but **not dispatched any further yet** — the
-   improvement-threshold guardrail and the `Move`/`NoOp` dispatch (and, for `Move`, an actual
-   enactor) aren't wired up yet, so the cycle currently stops at `Evaluating` on success. This
-   is a deliberately accepted gap, not an oversight, and it reopens the same "stuck in a
-   non-Watching state" risk described below — just for the success path this time instead of
-   the "no path forward" case that used to apply here.
+   outcome `Failed` via `failEvaluation` (with the profile's own cooldown applied, so an
+   unreachable AI agent is retried on the normal cooldown cadence instead of every single
+   `DetectionInterval` tick), with a reason describing which step failed. A successful response
+   is handed to `Reconciler.dispatchDecision` (in `dispatch.go`) — see
+   [Dispatch — acting on the AI's decision](#dispatch--acting-on-the-ais-decision) below.
+
+## Dispatch — acting on the AI's decision
+
+[`dispatch.go`](dispatch.go) carries a successful `RebalanceDecisionResponse` the rest of the
+way to a terminal `Watching` write. It's a registry (`actionDispatchers`, keyed by
+`orchestrationv1alpha1.RebalanceAction`), not a hardcoded switch, so a future enactor
+(`AdjustResources`, `AdjustReplicas`, `Defer`, `Escalate`) is a new map entry — `dispatchDecision`
+itself never changes. An action with no registered dispatcher (today: anything other than
+`Move`/`NoOp`, including `Reject`/`Defer`, which exist as values but have no enactor yet) is
+treated as a processing error — `Watching` + outcome `Failed` — rather than guessed at.
+
+- **`NoOp`** (`dispatchNoOp`) exits straight from `Evaluating` to `Watching` with outcome `NoOp`.
+  No `Decided`/`Enacting` hop — both are valid direct exits from `Evaluating` in
+  `validTransitions`.
+- **`Move`** (`dispatchMove`) first applies the improvement-threshold guardrail
+  (`Reconciler.ImprovementThreshold`, default `DefaultImprovementThreshold` — a single global
+  value for now, not per-trigger-reason). Below threshold, or missing `PodName`/`TargetNode`,
+  exits straight to `Watching` (`Rejected` / `Failed`) without ever reaching `Decided`. An
+  accepted, well-formed `Move` transitions `Decided → Enacting` and calls `moveEnactor`
+  ([`move_enactor.go`](move_enactor.go)):
+  1. Records a [`DecisionStore`](decision_store.go) entry — see below — *before* evicting.
+  2. Evicts the pod via the PDB-aware Eviction API (`c.SubResource("eviction").Create`, not a
+     raw delete — the pod being moved is `Ready`, unlike `retryPendingSchedule`'s target).
+     A `429` (PDB refused) maps to outcome `Deferred`.
+  3. Polls (`Reconciler.MoveActionTimeout`, default `DefaultMoveActionTimeout` = 60s) for a
+     replacement pod — one not present before eviction, now scheduled to a node. Landing on
+     `TargetNode` is outcome `Enacted`; landing elsewhere or timing out is outcome `Failed`.
+  4. The `DecisionStore` entry is cleared on every path out, regardless of outcome.
+
+### The decision store — how `Move` actually lands a pod on a specific node
+
+Kubernetes gives no direct way to pin a specific pod to a specific node through the normal
+scheduling path — evicting a pod only tells its owning controller to create a replacement;
+*where* that replacement lands is still kube-scheduler's own decision. [`decision_store.go`](decision_store.go)
+(`internal/placement-server`) is how the rebalance engine influences that decision instead of
+fighting it: a concurrency-safe, TTL-bounded (`DefaultDecisionStoreTTL` = 60s) in-memory map,
+keyed by **workload identity** (`WorkloadKey(profile.Namespace, profile.Name)`), not by pod
+name — the replacement pod has a different generated name than the one evicted, so there's no
+pod-name correlation available at the moment it's scored.
+
+`PlacementServer.score` (`server.go`) checks the store first, via `decisionStoreResponse`: a
+live entry with `Action == Move` synthesizes a `DecisionResponse` that scores `TargetNode`
+decisively (100) above every other candidate (0) — the same shape the AI agent would return —
+instead of making a fresh AI call. A miss (the common case) falls through unchanged.
+
+Lookup **self-consumes**: the entry is removed the moment any pod for that workload is scored,
+not left live for the rest of the TTL. Without that, a concurrent, unrelated pod for the same
+workload (e.g. a scale-up racing the rebalance cycle) could pick up the same node hint. The
+enactor's own `Delete` at its terminal transition is therefore a no-op safety net for whichever
+case reaches a terminal outcome without `score` ever having been called (e.g. the eviction never
+produced a schedulable replacement) — TTL expiry is the final backstop for that same case.
 
 One design consequence worth calling out: the AI sees the *entire* current placement every
 call but the response only ever describes one action. Multi-pod convergence (e.g. two pods
@@ -299,17 +354,21 @@ the real manager cache.
 
 `Reconcile` skips detection entirely whenever `state != Watching` (`Triggered`, `Evaluating`,
 `Decided`, `Enacting`) — deliberately, so it doesn't re-trigger a cycle that's still in flight.
-`evaluateWithAI` closes most of this gap: a trigger match that needs a real AI consultation now
-has a path all the way back to `Watching` (outcome `Failed`) whenever the AI is unreachable or
-errors, instead of dead-ending at `Triggered` forever. But the gap still exists for the success
-path: a *successful* AI response currently stops at `Evaluating` and goes no further, since the
-guardrail/dispatch logic that would carry it on to `Decided`/`Enacting` isn't built yet. Every
-subsequent Pod/Node/EAO event and periodic tick for that profile gets silently swallowed by the
-in-flight guard until dispatch exists, no matter what changes in the cluster afterward. The
-only way out today is a manual status patch back to `Watching` (e.g. `kubectl patch ...
---subresource=status -p '{"status":{"rebalancingStatus":{"state":"Watching"}}}'`), which itself
-immediately re-triggers a reconcile via the primary watch. Noting it here so it isn't
-rediscovered from scratch once dispatch is being built.
+Every path that can enter the state machine now also has a defined way back to `Watching` —
+AI-unreachable (`failEvaluation`), guardrail-rejected/unrecognized-action/malformed-Move
+(`dispatchDecision`), and a `Move`'s eviction/replacement outcome (`moveEnactor`), each ending in
+a terminal `Watching` write with an outcome.
+
+What isn't fully closed: `enactBypassAction` and `dispatchMove` each drive several `Transition`
+calls sequentially *within a single `Reconcile` call*. If the operator process dies exactly
+between two of those calls (e.g. mid-rollout), the profile is abandoned wherever it was —
+`Reconcile`'s in-flight guard then skips it forever, since nothing else ever revisits a non-
+`Watching` state on its own. The only way out today is a manual status patch back to `Watching`
+(e.g. `kubectl patch ... --subresource=status -p
+'{"status":{"rebalancingStatus":{"state":"Watching"}}}'`), which itself immediately re-triggers
+a reconcile via the primary watch. Closing this fully would need a stuck-state watchdog (revert
+anything stuck past some max cycle duration) — not built, noted here so it isn't rediscovered
+from scratch.
 
 ## Wiring into the system
 
@@ -325,6 +384,9 @@ rebalanceMaxRecentDecisions := parseIntEnv("REBALANCE_MAX_RECENT_DECISIONS")    
 rebalanceDetectionInterval := parseDurationEnv("REBALANCE_DETECTION_INTERVAL")    // -> rebalance.DefaultDetectionInterval
 rebalanceDecisionTimeout := parseDurationEnv("REBALANCE_DECISION_TIMEOUT")        // -> rebalance.DefaultDecisionTimeout
 rebalanceNodePressureThreshold := parseFloatEnv("REBALANCE_NODE_PRESSURE_THRESHOLD") // -> rebalance.DefaultNodePressureThreshold
+rebalanceImprovementThreshold := parseFloatEnv("REBALANCE_IMPROVEMENT_THRESHOLD") // -> rebalance.DefaultImprovementThreshold
+rebalanceDecisionStoreTTL := parseDurationEnv("REBALANCE_DECISION_STORE_TTL")     // -> placementserver.DefaultDecisionStoreTTL
+rebalanceMoveActionTimeout := parseDurationEnv("REBALANCE_MOVE_ACTION_TIMEOUT")   // -> rebalance.DefaultMoveActionTimeout
 
 rebalanceWriter := rebalance.NewStateWriter(
     mgr.GetClient(), mgr.GetAPIReader(), mgr.GetEventRecorderFor("rebalance-engine"),
@@ -332,6 +394,11 @@ rebalanceWriter := rebalance.NewStateWriter(
 )
 rebalanceEngine := rebalance.NewEngine(mgr.GetClient(), rebalanceWriter)
 mgr.Add(rebalanceEngine)
+
+// decisionStore is shared between PlacementServer (reads it in score) and the
+// rebalance engine's Move enactor (writes to it before eviction) — both live
+// in this same operator binary.
+decisionStore := placementserver.NewDecisionStore(rebalanceDecisionStoreTTL)
 
 metricsClient, _ := metricsclientset.NewForConfig(restConfig)
 pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, rebalanceNodePressureThreshold)
@@ -344,8 +411,11 @@ rebalanceDetector := rebalance.NewReconciler(
     mgr.GetClient(), rebalanceWriter, triggerEvaluator,
     controller.ProfileByAppRefIndex, rebalanceDetectionInterval,
     contextBuilder, decisionClient, rebalanceDecisionTimeout,
+    rebalanceImprovementThreshold, decisionStore, rebalanceMoveActionTimeout,
 )
 rebalanceDetector.SetupWithManager(mgr, eaoItemGVK)
+
+// decisionStore is also passed to NewPlacementServer so score() can read it.
 ```
 
 ### Configuration
@@ -359,6 +429,9 @@ change or rebuild to tune for a given cluster:
 | `REBALANCE_DETECTION_INTERVAL` | `Reconciler`'s periodic detection tick (Go duration, e.g. `30s`) | `DefaultDetectionInterval` (30s) |
 | `REBALANCE_DECISION_TIMEOUT` | `Reconciler`'s AI-consultation timeout (Go duration, e.g. `5s`) | `DefaultDecisionTimeout` (5s) |
 | `REBALANCE_NODE_PRESSURE_THRESHOLD` | `NodePressureEvaluator`'s CPU/Memory pressure fraction (e.g. `0.90`) | `DefaultNodePressureThreshold` (0.90) |
+| `REBALANCE_IMPROVEMENT_THRESHOLD` | `dispatchMove`'s guardrail — minimum `Improvement` to enact a `Move` | `DefaultImprovementThreshold` (20) |
+| `REBALANCE_DECISION_STORE_TTL` | How long a `Move` decision biases `PlacementServer.score` (Go duration) | `placementserver.DefaultDecisionStoreTTL` (60s) |
+| `REBALANCE_MOVE_ACTION_TIMEOUT` | Max wait for a `Move`'s replacement pod to be scheduled (Go duration) | `DefaultMoveActionTimeout` (60s) |
 
 Each default lives once, as a constant next to the type it configures — `main.go` doesn't
 duplicate the numbers, it just resolves "unset" to that constant before constructing anything,

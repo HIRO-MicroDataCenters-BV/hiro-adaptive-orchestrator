@@ -96,6 +96,12 @@ spec:
           value: "5s"
         - name: REBALANCE_NODE_PRESSURE_THRESHOLD
           value: "0.90"
+        - name: REBALANCE_IMPROVEMENT_THRESHOLD
+          value: "20"
+        - name: REBALANCE_DECISION_STORE_TTL
+          value: "60s"
+        - name: REBALANCE_MOVE_ACTION_TIMEOUT
+          value: "60s"
         - name: ENABLE_WEBHOOKS
           value: "false"
         - name: HIRO_SCHEDULER_NAME

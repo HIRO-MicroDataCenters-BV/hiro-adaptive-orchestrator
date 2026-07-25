@@ -47,6 +47,14 @@ const DefaultDetectionInterval = 30 * time.Second
 // it as failed.
 const DefaultDecisionTimeout = 5 * time.Second
 
+// DefaultImprovementThreshold is the minimum Improvement score (see
+// placementserver.RebalanceDecisionResponse) a Move recommendation must
+// clear to be enacted. Below this, the guardrail rejects the AI's own
+// recommendation instead of enacting a marginal move. A single global value
+// for now — per-trigger-reason thresholds are a possible future refinement,
+// not implemented here.
+const DefaultImprovementThreshold = 20.0
+
 // Never Ever delete this comments as they are used by kubebuilder to generate RBAC permissions for the controller.
 // If you need to change the permissions,
 // modify the verbs and resources in the comments below and then run "make generate" to update the generated code.
@@ -92,10 +100,26 @@ type Reconciler struct {
 	// DecisionTimeout bounds evaluateWithAI's wait for the AI agent to
 	// respond. <= 0 uses DefaultDecisionTimeout.
 	DecisionTimeout time.Duration
+
+	// ImprovementThreshold is the guardrail applied to a Move recommendation
+	// in dispatchDecision. <= 0 uses DefaultImprovementThreshold.
+	ImprovementThreshold float64
+
+	// MoveActionTimeout bounds how long the Move enactor waits for a
+	// replacement pod to be scheduled after eviction. <= 0 uses
+	// DefaultMoveActionTimeout.
+	MoveActionTimeout time.Duration
+
+	// DecisionStore is the same instance PlacementServer.score reads —
+	// dispatchDecision's Move enactor writes to it before eviction so the
+	// scheduler can honor the decision when the replacement pod is scored.
+	DecisionStore *placementserver.DecisionStore
 }
 
 // NewReconciler creates a Reconciler. interval <= 0 uses
-// DefaultDetectionInterval; decisionTimeout <= 0 uses DefaultDecisionTimeout.
+// DefaultDetectionInterval; decisionTimeout <= 0 uses DefaultDecisionTimeout;
+// improvementThreshold <= 0 uses DefaultImprovementThreshold; moveActionTimeout
+// <= 0 uses DefaultMoveActionTimeout.
 func NewReconciler(
 	c client.Client,
 	writer *StateWriter,
@@ -105,6 +129,9 @@ func NewReconciler(
 	contextBuilder *placementserver.DecisionContextBuilder,
 	decisionClient *placementserver.DecisionClient,
 	decisionTimeout time.Duration,
+	improvementThreshold float64,
+	decisionStore *placementserver.DecisionStore,
+	moveActionTimeout time.Duration,
 ) *Reconciler {
 	if interval <= 0 {
 		interval = DefaultDetectionInterval
@@ -112,15 +139,24 @@ func NewReconciler(
 	if decisionTimeout <= 0 {
 		decisionTimeout = DefaultDecisionTimeout
 	}
+	if improvementThreshold <= 0 {
+		improvementThreshold = DefaultImprovementThreshold
+	}
+	if moveActionTimeout <= 0 {
+		moveActionTimeout = DefaultMoveActionTimeout
+	}
 	return &Reconciler{
-		Client:            c,
-		Writer:            writer,
-		Evaluator:         evaluator,
-		ProfileIndexField: profileIndexField,
-		DetectionInterval: interval,
-		ContextBuilder:    contextBuilder,
-		DecisionClient:    decisionClient,
-		DecisionTimeout:   decisionTimeout,
+		Client:               c,
+		Writer:               writer,
+		Evaluator:            evaluator,
+		ProfileIndexField:    profileIndexField,
+		DetectionInterval:    interval,
+		ContextBuilder:       contextBuilder,
+		DecisionClient:       decisionClient,
+		DecisionTimeout:      decisionTimeout,
+		ImprovementThreshold: improvementThreshold,
+		DecisionStore:        decisionStore,
+		MoveActionTimeout:    moveActionTimeout,
 	}
 }
 
@@ -244,10 +280,10 @@ func (r *Reconciler) enactBypassAction(
 
 // evaluateWithAI drives Triggered -> Evaluating and consults the External AI
 // Agent for a trigger match that has no mechanical answer (result.BypassAction
-// is empty). Unlike enactBypassAction, a successful AI response is not acted
-// on any further here — dispatching the recommended action is a deliberately
-// accepted gap for a later change. Only the timeout/error paths return the
-// cycle to Watching (Outcome Failed) for now.
+// is empty). A successful response is handed to dispatchDecision, which
+// applies the improvement-threshold guardrail and drives the rest of the
+// cycle; the timeout/error paths return straight to Watching (Outcome
+// Failed) via failEvaluation.
 func (r *Reconciler) evaluateWithAI(
 	ctx context.Context,
 	key types.NamespacedName,
@@ -288,9 +324,7 @@ func (r *Reconciler) evaluateWithAI(
 		return
 	}
 
-	// Accepted gap: the response is logged but not dispatched further — no
-	// action is enacted here yet.
-	logger.Info("rebalance: AI rebalance decision received (not yet enacted)",
+	logger.Info("rebalance: AI rebalance decision received",
 		"profile", profile.Name,
 		"action", resp.Action,
 		"podName", resp.PodName,
@@ -298,6 +332,8 @@ func (r *Reconciler) evaluateWithAI(
 		"improvement", resp.Improvement,
 		"reason", resp.Reason,
 	)
+
+	r.dispatchDecision(ctx, key, profile, resp)
 }
 
 // failEvaluation returns a profile to Watching with Outcome Failed when the

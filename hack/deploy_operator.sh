@@ -61,6 +61,9 @@
 #   REBALANCE_DETECTION_INTERVAL        periodic detection tick, Go duration (default: 30s)
 #   REBALANCE_DECISION_TIMEOUT          AI-consultation timeout, Go duration (default: 5s)
 #   REBALANCE_NODE_PRESSURE_THRESHOLD   CPU/Memory pressure fraction         (default: 0.90)
+#   REBALANCE_IMPROVEMENT_THRESHOLD     min Move improvement score to enact  (default: 20)
+#   REBALANCE_DECISION_STORE_TTL        how long a Move decision biases scoring, Go duration (default: 60s)
+#   REBALANCE_MOVE_ACTION_TIMEOUT       max wait for a Move's replacement pod, Go duration (default: 60s)
 #
 # Usage (standalone):
 #   export GITHUB_PAT_TOKEN=<token>
@@ -131,6 +134,9 @@ export REBALANCE_MAX_RECENT_DECISIONS="${REBALANCE_MAX_RECENT_DECISIONS:-10}"
 export REBALANCE_DETECTION_INTERVAL="${REBALANCE_DETECTION_INTERVAL:-30s}"
 export REBALANCE_DECISION_TIMEOUT="${REBALANCE_DECISION_TIMEOUT:-5s}"
 export REBALANCE_NODE_PRESSURE_THRESHOLD="${REBALANCE_NODE_PRESSURE_THRESHOLD:-0.90}"
+export REBALANCE_IMPROVEMENT_THRESHOLD="${REBALANCE_IMPROVEMENT_THRESHOLD:-20}"
+export REBALANCE_DECISION_STORE_TTL="${REBALANCE_DECISION_STORE_TTL:-60s}"
+export REBALANCE_MOVE_ACTION_TIMEOUT="${REBALANCE_MOVE_ACTION_TIMEOUT:-60s}"
 
 # PlacementServer paths (must match what the operator reads from env)
 export PLACEMENT_SERVER_PORT=${PLACEMENT_SERVER_PORT:-:8090}
@@ -166,10 +172,22 @@ print_config() {
   echo "Deployment         : $DEPLOYMENT_NAME  (derived)"
   echo "Operator Image     : $IMG"
   echo "Kubeconfig         : $KUBECONFIG"
-  echo "Scheduler Plugin   : $DEPLOY_SCHEDULER_PLUGIN  (overlay: $([ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ] && echo config/default-with-webhook || echo config/default))"
+  echo "Scheduler Plugin   : $DEPLOY_SCHEDULER_PLUGIN"
+  echo "  Overlay                : $([ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ] && echo config/default-with-webhook || echo config/default)"
   echo "EAO CRD            : $EAO_GROUP/$EAO_VERSION, Kind=$EAO_KIND"
-  echo "Rebalance Engine   : MaxRecentDecisions=$REBALANCE_MAX_RECENT_DECISIONS  DetectionInterval=$REBALANCE_DETECTION_INTERVAL  DecisionTimeout=$REBALANCE_DECISION_TIMEOUT  NodePressureThreshold=$REBALANCE_NODE_PRESSURE_THRESHOLD"
-  echo "PlacementServer    : Service=$PLACEMENT_SERVICE_NAME  Port=$PLACEMENT_SERVER_PORT  Path=$PLACEMENT_SCORE_PATH  Health=$PLACEMENT_SERVER_HEALTH_PATH"
+  echo "Rebalance Engine   :"
+  echo "  Max Recent Decisions   : $REBALANCE_MAX_RECENT_DECISIONS"
+  echo "  Detection Interval     : $REBALANCE_DETECTION_INTERVAL"
+  echo "  Decision Timeout       : $REBALANCE_DECISION_TIMEOUT"
+  echo "  Node Pressure Threshold: $REBALANCE_NODE_PRESSURE_THRESHOLD"
+  echo "  Improvement Threshold  : $REBALANCE_IMPROVEMENT_THRESHOLD"
+  echo "  Decision Store TTL     : $REBALANCE_DECISION_STORE_TTL"
+  echo "  Move Action Timeout    : $REBALANCE_MOVE_ACTION_TIMEOUT"
+  echo "PlacementServer    :"
+  echo "  Service                : $PLACEMENT_SERVICE_NAME"
+  echo "  Port                   : $PLACEMENT_SERVER_PORT"
+  echo "  Path                   : $PLACEMENT_SCORE_PATH"
+  echo "  Health                 : $PLACEMENT_SERVER_HEALTH_PATH"
   echo "Extender Filter    : $EXTENDER_FILTER_PATH"
   echo "Extender Prioritize: $EXTENDER_PRIORITIZE_PATH"
   if [ "$USE_MOCK_AGENT" = "true" ]; then
@@ -269,7 +287,10 @@ inject_operator_env_vars() {
     REBALANCE_MAX_RECENT_DECISIONS="$REBALANCE_MAX_RECENT_DECISIONS" \
     REBALANCE_DETECTION_INTERVAL="$REBALANCE_DETECTION_INTERVAL" \
     REBALANCE_DECISION_TIMEOUT="$REBALANCE_DECISION_TIMEOUT" \
-    REBALANCE_NODE_PRESSURE_THRESHOLD="$REBALANCE_NODE_PRESSURE_THRESHOLD"
+    REBALANCE_NODE_PRESSURE_THRESHOLD="$REBALANCE_NODE_PRESSURE_THRESHOLD" \
+    REBALANCE_IMPROVEMENT_THRESHOLD="$REBALANCE_IMPROVEMENT_THRESHOLD" \
+    REBALANCE_DECISION_STORE_TTL="$REBALANCE_DECISION_STORE_TTL" \
+    REBALANCE_MOVE_ACTION_TIMEOUT="$REBALANCE_MOVE_ACTION_TIMEOUT"
 }
 
 restart_and_wait_for_operator() {

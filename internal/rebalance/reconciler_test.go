@@ -103,8 +103,10 @@ func newTestReconcilerWithAgent(t *testing.T, agentURL string, objs ...client.Ob
 	contextBuilder := placementserver.NewDecisionContextBuilder(c, testProfileIndexField, testEAOGVK)
 	decisionClient := placementserver.NewDecisionClient(agentURL, "", 200*time.Millisecond)
 
+	decisionStore := placementserver.NewDecisionStore(0)
+
 	return NewReconciler(c, writer, evaluator, testProfileIndexField, 30*time.Second,
-		contextBuilder, decisionClient, 200*time.Millisecond), c
+		contextBuilder, decisionClient, 200*time.Millisecond, 0, decisionStore, 0), c
 }
 
 func getProfile(t *testing.T, c client.Client, name string) *orchestrationv1alpha1.OrchestrationProfile {
@@ -262,12 +264,11 @@ func TestReconciler_EnergyVerdictFlipTriggersWorkload(t *testing.T) {
 	}
 }
 
-// TestReconciler_AIPathSuccessStopsAtEvaluating covers a trigger match
-// consulting a reachable AI agent successfully: the cycle stops at
-// Evaluating rather than continuing on to Decided/Enacting — dispatching
-// the AI's recommended action is not wired up yet, only the timeout/error
-// paths reach a terminal state so far.
-func TestReconciler_AIPathSuccessStopsAtEvaluating(t *testing.T) {
+// TestReconciler_MoveBelowThresholdRejected covers a trigger match
+// consulting a reachable AI agent successfully with a Move recommendation
+// whose Improvement doesn't clear the guardrail: the cycle exits straight
+// from Evaluating to Watching with Outcome Rejected, never reaching Decided.
+func TestReconciler_MoveBelowThresholdRejected(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
@@ -275,7 +276,7 @@ func TestReconciler_AIPathSuccessStopsAtEvaluating(t *testing.T) {
 			Action:      orchestrationv1alpha1.RebalanceActionMove,
 			PodName:     "app-a-1",
 			TargetNode:  "node-b",
-			Improvement: 0.4,
+			Improvement: 0.4, // well below DefaultImprovementThreshold (20)
 			Reason:      "better spread",
 		})
 	}))
@@ -294,11 +295,123 @@ func TestReconciler_AIPathSuccessStopsAtEvaluating(t *testing.T) {
 
 	got := getProfile(t, c, profile.Name)
 	rs := got.Status.RebalancingStatus
-	if rs.State != StateEvaluating {
-		t.Fatalf("state = %q, want Evaluating — a successful AI response isn't dispatched further yet", rs.State)
+	if rs.State != StateWatching {
+		t.Fatalf("state = %q, want Watching — a below-threshold Move is rejected without reaching Decided", rs.State)
 	}
-	if rs.DecisionID == "" {
-		t.Error("expected decisionId to be assigned entering the cycle")
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeRejected {
+		t.Errorf("recentDecisions = %+v, want one Rejected-outcome entry", rs.RecentDecisions)
+	}
+	if rs.RecentDecisions[0].Action != orchestrationv1alpha1.RebalanceActionMove {
+		t.Errorf("recentDecisions[0].Action = %q, want Move", rs.RecentDecisions[0].Action)
+	}
+}
+
+// TestReconciler_NoOpDispatchedDirectly covers a NoOp AI response: it exits
+// straight from Evaluating to Watching, never touching Decided/Enacting.
+func TestReconciler_NoOpDispatchedDirectly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+			RequestID: "test",
+			Action:    orchestrationv1alpha1.RebalanceActionNoOp,
+			Reason:    "already balanced",
+		})
+	}))
+	defer server.Close()
+
+	profile := testProfileWithConditions(TriggerScheduled)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), profile)
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if rs.State != StateWatching {
+		t.Fatalf("state = %q, want Watching", rs.State)
+	}
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeNoOp {
+		t.Errorf("recentDecisions = %+v, want one NoOp-outcome entry", rs.RecentDecisions)
+	}
+}
+
+// TestReconciler_UnrecognizedActionFailsDirectly covers an AI response whose
+// Action has no registered dispatcher (e.g. Reject/Defer, which exist as
+// values but have no enactor yet, or anything genuinely unrecognized): the
+// cycle is treated as a processing error, not guessed at.
+func TestReconciler_UnrecognizedActionFailsDirectly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+			RequestID: "test",
+			Action:    orchestrationv1alpha1.RebalanceActionReject,
+			Reason:    "AI declined",
+		})
+	}))
+	defer server.Close()
+
+	profile := testProfileWithConditions(TriggerScheduled)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), profile)
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if rs.State != StateWatching {
+		t.Fatalf("state = %q, want Watching", rs.State)
+	}
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
+		t.Errorf("recentDecisions = %+v, want one Failed-outcome entry", rs.RecentDecisions)
+	}
+}
+
+// TestReconciler_MoveAboveThresholdReachesEnacting covers an accepted Move
+// recommendation: the cycle reaches Decided and Enacting (verified via the
+// Warning event the terminal write emits) before the enactor's eviction
+// call — unsupported by the fake client — fails it back to Watching with
+// Outcome Failed. This still proves dispatchMove drives the cycle all the
+// way to the enactor instead of stopping at Decided, which is what Story
+// 28's own guardrail work is responsible for; actual eviction success is
+// exercised on a live cluster, not here.
+func TestReconciler_MoveAboveThresholdReachesEnacting(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+			RequestID:   "test",
+			Action:      orchestrationv1alpha1.RebalanceActionMove,
+			PodName:     "app-a-1",
+			TargetNode:  "node-b",
+			Improvement: 50,
+			Reason:      "better spread",
+		})
+	}))
+	defer server.Close()
+
+	profile := testProfileWithConditions(TriggerScheduled)
+	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile)
+	// Short-circuit awaitReplacement's poll loop — no replacement pod will
+	// ever appear against a fake client, and this test only cares that
+	// dispatchMove reaches the enactor, not the eviction outcome itself.
+	r.MoveActionTimeout = 50 * time.Millisecond
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if rs.State != StateWatching {
+		t.Fatalf("state = %q, want Watching", rs.State)
+	}
+	if len(rs.RecentDecisions) != 1 {
+		t.Fatalf("recentDecisions = %+v, want exactly one entry", rs.RecentDecisions)
+	}
+	if rs.RecentDecisions[0].Action != orchestrationv1alpha1.RebalanceActionMove {
+		t.Errorf("recentDecisions[0].Action = %q, want Move", rs.RecentDecisions[0].Action)
 	}
 }
 
