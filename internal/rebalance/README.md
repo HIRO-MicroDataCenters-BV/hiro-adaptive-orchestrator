@@ -9,6 +9,52 @@ It lives inside the same operator process as the `OrchestrationProfile` controll
 `PlacementServer` — see [Wiring into the system](#wiring-into-the-system) below. There is no
 separate binary, Deployment, or Service for it.
 
+### At a glance
+
+```mermaid
+graph TB
+    subgraph OP["Operator process — one binary, one Deployment, one pod"]
+        RE["Rebalance Engine<br/>(this package)"]
+        OC["OrchestrationProfile<br/>controller"]
+        PS["PlacementServer<br/>:8090"]
+    end
+    K8S[("Kubernetes API server")]
+    AI["External AI Agent"]
+    EAO[("EnergyAwareOrchestration<br/>CRD (optional)")]
+    SCHED["kube-scheduler /<br/>HIROScore plugin"]
+
+    RE <--> K8S
+    OC <--> K8S
+    PS <--> K8S
+    RE -- "AI consultation" --> AI
+    PS -- "placement scoring" --> AI
+    RE -. "reads (optional)" .-> EAO
+    SCHED -- "PreScore" --> PS
+```
+
+## Table of Contents
+
+- [The decision lifecycle](#the-decision-lifecycle)
+- [Package layout](#package-layout)
+- [Detection — how a workload becomes `Triggered`](#detection--how-a-workload-becomes-triggered)
+  - [Why both paths exist](#why-both-paths-exist)
+  - [The `EnergyAwareOrchestration` watch is optional](#the-energyawareorchestration-watch-is-optional)
+- [Trigger conditions](#trigger-conditions)
+  - [Bypassing the AI for mechanical actions](#bypassing-the-ai-for-mechanical-actions)
+- [Decision — how `Evaluating` calls the AI](#decision--how-evaluating-calls-the-ai)
+- [Dispatch — acting on the AI's decision](#dispatch--acting-on-the-ais-decision)
+  - [The decision store — how `Move` actually lands a pod on a specific node](#the-decision-store--how-move-actually-lands-a-pod-on-a-specific-node)
+- [Node pressure (CPU/Memory)](#node-pressure-cpumemory)
+- [`StateWriter` — the single-writer rule](#statewriter--the-single-writer-rule)
+  - [Why the reader must be uncached](#why-the-reader-must-be-uncached)
+  - [A profile can get permanently stuck in a non-Watching state](#a-profile-can-get-permanently-stuck-in-a-non-watching-state)
+- [Wiring into the system](#wiring-into-the-system)
+  - [Configuration](#configuration)
+  - [RBAC](#rbac)
+  - [CRD schema](#crd-schema)
+  - [Deployment](#deployment)
+- [Testing](#testing)
+
 ## The decision lifecycle
 
 Every rebalance evaluation for a workload is an instance of a state machine, tracked in
@@ -56,6 +102,19 @@ straight back to `Watching` — every such write must carry an outcome (`Transit
 enforced by `StateWriter.Transition` itself.
 
 ## Package layout
+
+```mermaid
+graph LR
+    engine[engine.go] --> writer[writer.go]
+    reconciler[reconciler.go] --> writer
+    reconciler --> triggers[triggers.go]
+    triggers --> pressure[pressure.go]
+    reconciler --> dispatch[dispatch.go]
+    dispatch --> move[move_enactor.go]
+    dispatch --> writer
+    reconciler --> retry[retry_enactor.go]
+    move --> store["placement-server /<br/>decision_store.go"]
+```
 
 | File | Role |
 |---|---|
@@ -131,6 +190,27 @@ checked, just only on the periodic tick instead of instantly.
 
 ## Trigger conditions
 
+```mermaid
+flowchart TD
+    Start(["Evaluate(profile)"]) --> C1{"EnergyThreshold<br/>declared?"}
+    C1 -- yes --> E1{"insufficient energy OR<br/>Delayed / Waiting?"}
+    E1 -- yes --> Match(["matched — needs AI<br/>(no bypass)"])
+    E1 -- no --> E2{"DeployImmediately / Scheduled<br/>AND a pod is Pending?"}
+    E2 -- yes --> Bypass(["matched — BypassAction set<br/>(no AI needed)"])
+    E2 -- no --> C2
+    C1 -- no --> C2{"CPU/MemoryThreshold<br/>declared?"}
+    C2 -- yes --> P{"NodePressureEvaluator<br/>over threshold?"}
+    P -- yes --> Match
+    P -- no --> C3
+    C2 -- no --> C3{"NodeFailure<br/>declared?"}
+    C3 -- yes --> N{"hosting node<br/>NotReady?"}
+    N -- yes --> Match
+    N -- no --> C4
+    C3 -- no --> C4{"Scheduled<br/>declared?"}
+    C4 -- yes --> Match
+    C4 -- no --> None(["no match this cycle"])
+```
+
 `TriggerEvaluator.Evaluate` (in [`triggers.go`](triggers.go)) walks
 `profile.Spec.Rebalancing.TriggerConditions` in the order the user declared them and returns
 the **first** one that currently matches. If nothing matches, that's not an error — it's just
@@ -148,6 +228,24 @@ EAO being unavailable, or a metrics-server call failing, is soft-failed per cond
 `Evaluate()` call or the reconcile.
 
 ### Bypassing the AI for mechanical actions
+
+```mermaid
+sequenceDiagram
+    participant T as TriggerEvaluator
+    participant R as Reconciler
+    participant W as StateWriter
+    participant E as retryPendingSchedule
+
+    T->>R: matched, BypassAction = ActionRetryPendingSchedule
+    R->>W: Transition -> Triggered
+    R->>W: Transition -> Evaluating (no AI call made)
+    R->>W: Transition -> Decided
+    R->>W: Transition -> Enacting
+    R->>E: retryPendingSchedule(profile)
+    E->>E: delete the Pending, unscheduled pod
+    E-->>R: ok / error
+    R->>W: Transition -> Watching (Enacted / Failed)
+```
 
 `EnergyThreshold`'s case 3 (pending pod, window reopened) is different from the other two
 cases in one important way: there's no judgment call to make. Cases 1/2 are genuine problem
@@ -191,6 +289,31 @@ the problem would retry every `DetectionInterval` in a tight loop.
 
 ## Decision — how `Evaluating` calls the AI
 
+```mermaid
+sequenceDiagram
+    participant R as Reconciler
+    participant W as StateWriter
+    participant B as DecisionContextBuilder
+    participant C as DecisionClient
+    participant AI as External AI Agent
+
+    R->>W: Transition -> Evaluating
+    R->>B: BuildRebalanceContext(profile, recentDecisions)
+    B-->>R: DecisionRequest (or error)
+    alt build error
+        R->>W: Transition -> Watching (Failed)
+    else built ok
+        R->>C: RequestRebalanceDecision(req)
+        C->>AI: POST (same endpoint as placement scoring)
+        AI-->>C: RebalanceDecisionResponse
+        alt timeout / error
+            R->>W: Transition -> Watching (Failed)
+        else success
+            R->>R: dispatchDecision(resp)
+        end
+    end
+```
+
 For every trigger match that has no mechanical bypass (i.e. `TriggerResult.BypassAction` is
 empty), `Reconciler.evaluateWithAI` (in `reconciler.go`) drives `Triggered → Evaluating` and
 consults the External AI Agent — the same agent the placement server already uses for
@@ -222,6 +345,20 @@ initial-placement scoring, not a second HTTP path:
 
 ## Dispatch — acting on the AI's decision
 
+```mermaid
+flowchart TD
+    Resp(["RebalanceDecisionResponse"]) --> Reg{"actionDispatchers[Action]?"}
+    Reg -- "no entry<br/>(Reject / Defer / unknown)" --> F1(["Watching + Failed"])
+    Reg -- NoOp --> N1(["Watching + NoOp"])
+    Reg -- Move --> G{"Improvement >= threshold<br/>AND PodName / TargetNode set?"}
+    G -- no --> Rej(["Watching + Rejected / Failed"])
+    G -- yes --> D(["Decided"]) --> Enacting(["Enacting"]) --> ME["moveEnactor"]
+    ME --> Out{"outcome"}
+    Out -- Enacted --> W1(["Watching + Enacted"])
+    Out -- Deferred --> W2(["Watching + Deferred"])
+    Out -- Failed --> W3(["Watching + Failed"])
+```
+
 [`dispatch.go`](dispatch.go) carries a successful `RebalanceDecisionResponse` the rest of the
 way to a terminal `Watching` write. It's a registry (`actionDispatchers`, keyed by
 `orchestrationv1alpha1.RebalanceAction`), not a hardcoded switch, so a future enactor
@@ -249,6 +386,26 @@ treated as a processing error — `Watching` + outcome `Failed` — rather than 
   4. The `DecisionStore` entry is cleared on every path out, regardless of outcome.
 
 ### The decision store — how `Move` actually lands a pod on a specific node
+
+```mermaid
+sequenceDiagram
+    participant ME as moveEnactor
+    participant DS as DecisionStore
+    participant K8s as Kubernetes API
+    participant PS as PlacementServer.score
+    participant Sched as kube-scheduler
+
+    ME->>DS: Put(workloadKey, TargetNode, ...)
+    ME->>K8s: Evict pod (policy/v1 Eviction)
+    K8s->>K8s: owning controller creates replacement pod
+    Sched->>PS: POST /score (replacement pod)
+    PS->>DS: Lookup(workloadKey)
+    DS-->>PS: hit — entry self-consumes
+    PS-->>Sched: TargetNode scored 100, others 0
+    Sched->>K8s: bind replacement -> TargetNode
+    ME->>K8s: poll for replacement, check NodeName
+    ME->>DS: Delete(workloadKey) — no-op, already consumed
+```
 
 Kubernetes gives no direct way to pin a specific pod to a specific node through the normal
 scheduling path — evicting a pod only tells its owning controller to create a replacement;
@@ -283,6 +440,16 @@ either.
 
 ## Node pressure (CPU/Memory)
 
+```mermaid
+flowchart LR
+    Node["node hosting<br/>profile's pod"] --> MS["metrics-server<br/>(metrics.k8s.io)"]
+    MS --> NPE["NodePressureEvaluator"]
+    NPE --> Cmp{"usage / allocatable<br/>over threshold?"}
+    Cmp -- yes --> Match(["trigger matched"])
+    Cmp -- no --> NoMatch(["no match"])
+    MS -. unavailable .-> Soft(["soft-fail:<br/>not currently evaluable"])
+```
+
 [`pressure.go`](pressure.go)'s `NodePressureEvaluator` answers a node-level question — "is
 the node this pod happens to be on under enough pressure that moving away would help" — not
 a pod-level one. A node can be under pressure entirely because of *other* workloads; that's
@@ -303,6 +470,23 @@ return an error, which `TriggerEvaluator` catches and treats as "not currently e
 Default threshold: 90% (`DefaultNodePressureThreshold`).
 
 ## `StateWriter` — the single-writer rule
+
+```mermaid
+flowchart LR
+    subgraph Callers
+        RC["Reconciler<br/>(Triggered / Evaluating)"]
+        DP["dispatch.go<br/>(NoOp / Move guardrail)"]
+        ME["moveEnactor<br/>(Enacting outcomes)"]
+        EB["enactBypassAction<br/>(mechanical Move)"]
+    end
+    RC --> SW(("StateWriter.Transition<br/>sole writer"))
+    DP --> SW
+    ME --> SW
+    EB --> SW
+    SW --> Validate["IsValidTransition check"]
+    Validate --> API[("Status().Update<br/>+ RetryOnConflict")]
+    SW --> Event["Kubernetes Event<br/>(RebalanceTransition)"]
+```
 
 This is a hard architectural rule, not a convention: **no code anywhere in this codebase may
 mutate `status.rebalancingStatus` except through `StateWriter.Transition`.** Every stage of
@@ -371,6 +555,23 @@ anything stuck past some max cycle duration) — not built, noted here so it isn
 from scratch.
 
 ## Wiring into the system
+
+```mermaid
+flowchart TD
+    Env["env vars<br/>REBALANCE_*"] --> Main["cmd/main.go"]
+    Main --> SW2["StateWriter"]
+    Main --> DS2["DecisionStore"]
+    Main --> NPE2["NodePressureEvaluator"]
+    Main --> TE2["TriggerEvaluator"]
+    Main --> Recon["Reconciler"]
+    SW2 --> Recon
+    NPE2 --> TE2
+    TE2 --> Recon
+    DS2 --> Recon
+    DS2 --> PS2["PlacementServer"]
+    Recon --> Mgr["mgr.SetupWithManager"]
+    PS2 --> HTTP["HTTP :8090"]
+```
 
 Everything below runs inside the **same operator process** — one binary, one Deployment, one
 pod. Wired in `cmd/main.go`:
@@ -457,13 +658,23 @@ unexplained behavior.
 
 ### RBAC
 
+```mermaid
+flowchart LR
+    Role["ClusterRole<br/>(generated via make manifests)"] --> Nodes["nodes:<br/>get, list, watch"]
+    Role --> Metrics["metrics.k8s.io/nodes:<br/>get"]
+    Role --> PodsDel["pods:<br/>delete<br/>(merged into existing rule)"]
+    Role --> PodsEvict["pods/eviction:<br/>create"]
+```
+
 Permissions added specifically for this package (`+kubebuilder:rbac` markers live in
-[`reconciler.go`](reconciler.go) and [`retry_enactor.go`](retry_enactor.go)):
+[`reconciler.go`](reconciler.go), [`retry_enactor.go`](retry_enactor.go), and
+[`move_enactor.go`](move_enactor.go)):
 
 ```
 +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 +kubebuilder:rbac:groups=metrics.k8s.io,resources=nodes,verbs=get
 +kubebuilder:rbac:groups="",resources=pods,verbs=delete
++kubebuilder:rbac:groups="",resources=pods/eviction,verbs=create
 ```
 
 The `pods` `delete` verb merges into the same rule as the `get;list;watch` already granted
@@ -473,6 +684,13 @@ combined `pods` rule, not a duplicate.
 Regenerate `config/rbac/role.yaml` with `make manifests` after changing these markers.
 
 ### CRD schema
+
+```mermaid
+flowchart TD
+    RS["RebalancingStatus"] --> Active["Active fields:<br/>state, reason, decisionId,<br/>action, details, startedAt,<br/>lastTransitionAt, cooldownUntil"]
+    RS --> RD["recentDecisions[]"]
+    RD --> RDF["RebalanceDecision:<br/>outcome, action, reason,<br/>decisionId, details,<br/>startedAt, lastTransitionAt"]
+```
 
 `RebalancingStatus` (in `api/v1alpha1/orchestrationprofile_types.go`) carries: `state`
 (OpenAPI-enum-validated against the 5 active states), `reason`, `decisionId`, `action`,
@@ -487,6 +705,13 @@ new operator build).
 
 ### Deployment
 
+```mermaid
+flowchart LR
+    P2["Phase 2<br/>install_metrics_server.sh"] --> P4["Phase 4<br/>deploy_operator.sh"]
+    P4 --> Ready["operator pod Ready"]
+    Ready --> RE2["Rebalance Engine<br/>starts automatically"]
+```
+
 - `hack/install_metrics_server.sh` — idempotent metrics-server installer, wired into
   `hack/deploy_full_stack.sh` Phase 2 (default on, `INSTALL_METRICS_SERVER=false` to skip).
   Without it, `CPUThreshold`/`MemoryThreshold` simply never fire; nothing else is affected.
@@ -495,6 +720,12 @@ new operator build).
   the moment the operator pod is `Ready`.
 
 ## Testing
+
+```mermaid
+flowchart TB
+    Unit["Unit tests (this package)<br/>fake client + fake metrics-server"] --> Fast["Fast — no CRD schema checks"]
+    Envtest["envtest<br/>internal/controller/op_rebalancing_status_test.go"] --> Real["Real API server —<br/>proves OpenAPI enum validation"]
+```
 
 No envtest suite in this package — everything is tested against `sigs.k8s.io/controller-
 runtime/pkg/client/fake` (plus `k8s.io/metrics/.../fake` for metrics-server), which is fast
