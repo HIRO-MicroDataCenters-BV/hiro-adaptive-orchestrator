@@ -30,13 +30,13 @@ graph LR
 
 - [Architecture](#architecture)
   - [Components](#components)
-  - [PlacementServer](#placementserver)
-  - [Flow 1 — Reconciliation Controller](#flow-1--reconciliation-controller)
-  - [Flow 2 — Plugin Path](#flow-2--plugin-path-hiro-scheduler--placementserver)
-  - [Flow 3 — Extender Path](#flow-3--extender-path-default-kube-scheduler--placementserver)
+    - [Reconciliation Flow](#reconciliation-flow)
+    - [PlacementServer](#placementserver)
+    - [Plugin Path](#plugin-path-hiro-scheduler--placementserver)
+    - [Extender Path](#extender-path-default-kube-scheduler--placementserver)
+    - [Detailed Scheduling Flows](docs/scheduling-flows.md) ← function-level call chains for Plugin Path / Extender Path
+    - [Rebalance Engine](internal/rebalance/README.md) ← decision lifecycle state machine, hybrid trigger detection, wiring
   - [Parameter Flow](#parameter-flow)
-- [Detailed Scheduling Flows](docs/scheduling-flows.md) ← function-level call chains for both paths
-- [Rebalance Engine](internal/rebalance/README.md) ← decision lifecycle state machine, hybrid trigger detection, wiring
 - [Features](#features)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
@@ -78,8 +78,9 @@ The system consists of two independently deployed binaries plus an optional mock
 | Component | Binary / File | Description |
 |-----------|--------------|-------------|
 | **Operator** | `cmd/main.go` | Single pod running three cooperating parts in one process: the placement Reconciler, the Rebalance Engine, and the PlacementServer HTTP service (`:8090`) serving 4 routes — plugin path, extender filter, extender prioritize, healthz |
-| **Rebalance Engine** | `internal/rebalance/` | Hybrid periodic + event-driven trigger detection → AI-consulted decision lifecycle (`Watching → Triggered → Evaluating → Decided → Enacting`) → action enactment (`Move`, `RetryPendingSchedule`); shares a `DecisionStore` with the PlacementServer so an accepted `Move` biases where the replacement pod lands — see [internal/rebalance/README.md](internal/rebalance/README.md) |
+| **PlacementServer** | `internal/placement-server/` | Single HTTP listener on `:8090` inside the operator pod, serving 4 routes: `/api/v1/placement/decision`, `/extender/filter`, `/extender/prioritize`, `/healthz` — see [PlacementServer](#placementserver) |
 | **Scheduler Plugin** | `scheduler-plugin/cmd/main.go` | Custom `kube-scheduler` binary with `HIROScore` plugin registered |
+| **Rebalance Engine** | `internal/rebalance/` | Hybrid periodic + event-driven trigger detection → AI-consulted decision lifecycle (`Watching → Triggered → Evaluating → Decided → Enacting`) → action enactment (`Move`, `RetryPendingSchedule`); shares a `DecisionStore` with the PlacementServer so an accepted `Move` biases where the replacement pod lands — see [internal/rebalance/README.md](internal/rebalance/README.md) |
 | **Mock Decision Agent** | `hack/mock_decision_agent.yaml` | Lightweight Python HTTP server for local/CI testing; scores placement candidates randomly and responds to rebalance evaluations (Move/NoOp) |
 
 ```
@@ -151,39 +152,7 @@ flowchart TB
     RE -->|"POST RebalanceContext"| Agent
 ```
 
-### PlacementServer
-
-The `PlacementServer` is a **single HTTP listener on `:8090`** inside the operator pod. Both scheduler integration approaches — plugin and extender — call the same server on different routes. There is no separate binary or process: it is one `net/http` mux started by `cmd/main.go` alongside the reconciler.
-
-
-
-```mermaid
-flowchart LR
-    Plugin["hiro-scheduler<br/>(plugin)"]
-    Extender["default scheduler<br/>(extender)"]
-    Probes["Kubernetes<br/>probes"]
-
-    subgraph PS["PlacementServer :8090 — HIRO Operator Pod"]
-        direction TB
-        R1["POST /api/v1/placement/decision<br/>1. look up OrchestrationProfile (O(1) field index)<br/>2. build DecisionRequest (AOProfile + EAOProfile + nodes)<br/>3. call External AI Agent → return NodeScores to plugin"]
-        R2["POST /extender/filter<br/>1. look up OrchestrationProfile for pod<br/>2. CheckEnergyGate via EAO CRD<br/>&nbsp;&nbsp;allowed → pass all nodes through unchanged<br/>&nbsp;&nbsp;blocked → FailedNodes: all (scheduler defers the pod)"]
-        R3["POST /extender/prioritize<br/>1. build DecisionRequest (same pipeline as plugin path)<br/>2. call External AI Agent → map scores [0-100] → [0-10]<br/>3. missing nodes → score 5 (neutral fallback)"]
-        R4["GET /healthz → 200 ok"]
-    end
-
-    Agent["Decision<br/>Agent :8080"]
-
-    Plugin --> R1
-    Extender --> R2
-    Extender --> R3
-    Probes --> R4
-    R1 -->|"POST DecisionRequest"| Agent
-    R3 -->|"POST DecisionRequest"| Agent
-```
-
-> `/extender/filter` + `/extender/prioritize` share the same `DecisionContextBuilder.Build()` + `DecisionClient.RequestDecision()` pipeline as the plugin path. The filter step runs `CheckEnergyGate` first; the prioritize step calls the AI agent and normalises scores.
-
-### Flow 1 — Reconciliation Controller
+#### Reconciliation Flow
 
 ```
 Kubernetes API server
@@ -238,7 +207,37 @@ flowchart TD
     Upd --> Evt["Status transition →<br/>Kubernetes Event emitted"]
 ```
 
-### Flow 2 — Plugin Path: hiro-scheduler + PlacementServer
+#### PlacementServer
+
+The `PlacementServer` is a **single HTTP listener on `:8090`** inside the operator pod. Both scheduler integration approaches — plugin and extender — call the same server on different routes. There is no separate binary or process: it is one `net/http` mux started by `cmd/main.go` alongside the reconciler.
+
+```mermaid
+flowchart LR
+    Plugin["hiro-scheduler<br/>(plugin)"]
+    Extender["default scheduler<br/>(extender)"]
+    Probes["Kubernetes<br/>probes"]
+
+    subgraph PS["PlacementServer :8090 — HIRO Operator Pod"]
+        direction TB
+        R1["POST /api/v1/placement/decision<br/>1. look up OrchestrationProfile (O(1) field index)<br/>2. build DecisionRequest (AOProfile + EAOProfile + nodes)<br/>3. call External AI Agent → return NodeScores to plugin"]
+        R2["POST /extender/filter<br/>1. look up OrchestrationProfile for pod<br/>2. CheckEnergyGate via EAO CRD<br/>&nbsp;&nbsp;allowed → pass all nodes through unchanged<br/>&nbsp;&nbsp;blocked → FailedNodes: all (scheduler defers the pod)"]
+        R3["POST /extender/prioritize<br/>1. build DecisionRequest (same pipeline as plugin path)<br/>2. call External AI Agent → map scores [0-100] → [0-10]<br/>3. missing nodes → score 5 (neutral fallback)"]
+        R4["GET /healthz → 200 ok"]
+    end
+
+    Agent["Decision<br/>Agent :8080"]
+
+    Plugin --> R1
+    Extender --> R2
+    Extender --> R3
+    Probes --> R4
+    R1 -->|"POST DecisionRequest"| Agent
+    R3 -->|"POST DecisionRequest"| Agent
+```
+
+> `/extender/filter` + `/extender/prioritize` share the same `DecisionContextBuilder.Build()` + `DecisionClient.RequestDecision()` pipeline as the plugin path. The filter step runs `CheckEnergyGate` first; the prioritize step calls the AI agent and normalises scores.
+
+#### Plugin Path: hiro-scheduler + PlacementServer
 
 End-to-end flow for pods with `spec.schedulerName: hiro-scheduler`. The `HIROScore` plugin runs inside the `hiro-scheduler` pod; the `PlacementServer` runs inside the operator pod. They communicate via HTTP on `/api/v1/placement/decision`.
 
@@ -268,7 +267,7 @@ Plugin configuration (URL, path, timeout) is injected into the `KubeSchedulerCon
 
 For a detailed function-level trace of every call in this path see [docs/scheduling-flows.md — Path A](docs/scheduling-flows.md#path-a--scheduler-plugin-hiro-scheduler).
 
-### Flow 3 — Extender Path: default kube-scheduler + PlacementServer
+#### Extender Path: default kube-scheduler + PlacementServer
 
 End-to-end flow when the extender is deployed. The default `kube-scheduler` calls the PlacementServer during its filter and prioritize phases for **all pods** cluster-wide. No custom scheduler pod is needed.
 
@@ -354,7 +353,7 @@ flowchart TD
 
 For a detailed function-level trace of every call in this path see [docs/scheduling-flows.md — Path B](docs/scheduling-flows.md#path-b--extender-default-kube-scheduler).
 
-#### Operator logs (extender side)
+##### Operator logs (extender side)
 
 | Event | Log message |
 |-------|-------------|
