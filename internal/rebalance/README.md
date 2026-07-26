@@ -63,30 +63,15 @@ values — it never encodes *how* a cycle ended. The result of a finished cycle 
 separately, as an `outcome` on the `recentDecisions` entry written in the same transition that
 returns `state` to `Watching`.
 
-```
-                        ┌──────────────┐
-                        │   Watching   │◀────────────────────────┐
-                        └──────┬───────┘                         │
-                               │ trigger fires                   │
-                               ▼                                 │
-                        ┌──────────────┐                         │
-                        │   Triggered  │                         │
-                        └──────┬───────┘                         │
-                               │ AI call                         │
-                               ▼                                 │
-                        ┌──────────────┐                         │
-                        │  Evaluating  │──── NoOp / Rejected ────┤
-                        └──────┬───────┘        / Failed         │
-                               │ Move accepted                   │
-                               ▼                                 │
-                        ┌──────────────┐                         │
-                        │   Decided    │                         │
-                        └──────┬───────┘                         │
-                               │                                 │
-                               ▼                                 │
-                        ┌──────────────┐                         │
-                        │   Enacting   │─── Enacted / Deferred ──┘
-                        └──────────────┘        / Failed
+```mermaid
+stateDiagram-v2
+    [*] --> Watching
+    Watching --> Triggered: trigger fires
+    Triggered --> Evaluating: AI call
+    Evaluating --> Watching: NoOp / Rejected / Failed
+    Evaluating --> Decided: Move accepted
+    Decided --> Enacting
+    Enacting --> Watching: Enacted / Deferred / Failed
 ```
 
 Active states (`state`): `Watching`, `Triggered`, `Evaluating`, `Decided`, `Enacting`.
@@ -140,28 +125,20 @@ Detection is hybrid, per the original design: **event-driven** for fast signals,
 for slow ones. Both paths call the *exact same* `TriggerEvaluator.Evaluate()` — the watches
 and the ticker only decide *when* to check; `Evaluate()` decides *what* currently holds.
 
-```
-   ┌─────────────────────────┐        ┌──────────────────────────┐
-   │  Periodic (every 30s)   │        │  Event-driven (watches)  │
-   │  Reconcile requeues     │        │  Pod / Node / EAO change │
-   │  itself unconditionally │        │  → immediate reconcile   │
-   └────────────┬────────────┘        └─────────────┬────────────┘
-                │                                    │
-                └──────────────┬─────────────────────┘
-                                ▼
-                    Reconciler.Reconcile(profile)
-                                │
-                 cooldown active? ── yes ──► requeue at cooldown expiry
-                                │ no
-                 cycle already in flight? ── yes ──► no-op (let it finish)
-                                │ no
-                    TriggerEvaluator.Evaluate(profile)
-                                │
-                          any condition matched?
-                        yes │           │ no
-                            ▼           ▼
-              StateWriter.Transition   requeue at DetectionInterval
-              (-> Triggered)
+```mermaid
+flowchart TD
+    P["Periodic (every 30s)<br/>Reconcile requeues itself<br/>unconditionally"] --> RC["Reconciler.Reconcile(profile)"]
+    E["Event-driven (watches)<br/>Pod / Node / EAO change<br/>→ immediate reconcile"] --> RC
+
+    RC --> CD{"cooldown active?"}
+    CD -->|"yes"| RQ1["requeue at cooldown expiry"]
+    CD -->|"no"| IF{"cycle already in flight?"}
+    IF -->|"yes"| NOOP["no-op (let it finish)"]
+    IF -->|"no"| TE["TriggerEvaluator.Evaluate(profile)"]
+
+    TE --> M{"any condition matched?"}
+    M -->|"yes"| SW["StateWriter.Transition<br/>(→ Triggered)"]
+    M -->|"no"| RQ2["requeue at DetectionInterval"]
 ```
 
 ### Why both paths exist
@@ -623,6 +600,38 @@ rebalanceDetector.SetupWithManager(mgr, eaoItemGVK)
 
 Every numeric default in this package is overridable at deploy time — none of it needs a code
 change or rebuild to tune for a given cluster:
+
+```mermaid
+flowchart LR
+    subgraph EnvVars["Environment variables (all optional)"]
+        direction TB
+        V1["REBALANCE_MAX_RECENT_DECISIONS"]
+        V2["REBALANCE_DETECTION_INTERVAL"]
+        V3["REBALANCE_DECISION_TIMEOUT"]
+        V4["REBALANCE_NODE_PRESSURE_THRESHOLD"]
+        V5["REBALANCE_IMPROVEMENT_THRESHOLD"]
+        V6["REBALANCE_DECISION_STORE_TTL"]
+        V7["REBALANCE_MOVE_ACTION_TIMEOUT"]
+    end
+
+    Resolve{"main.go: resolve unset/invalid<br/>before constructing anything —<br/>bad value fails the operator at startup"}
+
+    V1 --> Resolve
+    V2 --> Resolve
+    V3 --> Resolve
+    V4 --> Resolve
+    V5 --> Resolve
+    V6 --> Resolve
+    V7 --> Resolve
+
+    Resolve -->|"unset → DefaultMaxRecentDecisions (10)"| SW["StateWriter<br/>recentDecisions length"]
+    Resolve -->|"unset → DefaultDetectionInterval (30s)"| Recon1["Reconciler<br/>periodic detection tick"]
+    Resolve -->|"unset → DefaultDecisionTimeout (5s)"| Recon2["Reconciler<br/>AI-consultation timeout"]
+    Resolve -->|"unset → DefaultNodePressureThreshold (0.90)"| NPE["NodePressureEvaluator<br/>CPU/Memory pressure fraction"]
+    Resolve -->|"unset → DefaultImprovementThreshold (20)"| Disp["dispatchMove<br/>guardrail"]
+    Resolve -->|"unset → DefaultDecisionStoreTTL (60s)"| DS["DecisionStore<br/>Move-bias TTL"]
+    Resolve -->|"unset → DefaultMoveActionTimeout (60s)"| ME["Move enactor<br/>replacement-pod wait"]
+```
 
 | Environment variable | Overrides | Default |
 |---|---|---|

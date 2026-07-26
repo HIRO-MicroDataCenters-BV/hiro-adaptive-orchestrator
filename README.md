@@ -77,30 +77,41 @@ The system consists of two independently deployed binaries plus an optional mock
 
 | Component | Binary / File | Description |
 |-----------|--------------|-------------|
-| **Operator** | `cmd/main.go` | Reconciliation controller + PlacementServer HTTP service (`:8090`) serving 4 routes — plugin path, extender filter, extender prioritize, healthz |
+| **Operator** | `cmd/main.go` | Single pod running three cooperating parts in one process: the placement Reconciler, the Rebalance Engine, and the PlacementServer HTTP service (`:8090`) serving 4 routes — plugin path, extender filter, extender prioritize, healthz |
+| **Rebalance Engine** | `internal/rebalance/` | Hybrid periodic + event-driven trigger detection → AI-consulted decision lifecycle (`Watching → Triggered → Evaluating → Decided → Enacting`) → action enactment (`Move`, `RetryPendingSchedule`); shares a `DecisionStore` with the PlacementServer so an accepted `Move` biases where the replacement pod lands — see [internal/rebalance/README.md](internal/rebalance/README.md) |
 | **Scheduler Plugin** | `scheduler-plugin/cmd/main.go` | Custom `kube-scheduler` binary with `HIROScore` plugin registered |
 | **Mock Decision Agent** | `hack/mock_decision_agent.yaml` | Lightweight Python HTTP server for local/CI testing; scores placement candidates randomly and responds to rebalance evaluations (Move/NoOp) |
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Kubernetes API Server                                              │
-└──────────┬──────────────────────────────────────┬───────────────────┘
-           │ watch OrchestrationProfiles           │ schedule pods
-           │ watch Deployments/StatefulSets/Jobs   │
-           ▼                                       │
-┌──────────────────────────────────┐    ┌──────────┴──────────────────────┐
-│  HIRO Operator Pod               │    │  Scheduler (choose one)         │
-│  ────────────────────────────── │    │  ─────────────────────────────  │
-│  Reconciler                      │    │  [A] hiro-scheduler (plugin)    │
-│                                  │    │      per-pod opt-in             │
-│  PlacementServer (:8090)         │◄───┤  [B] default kube-scheduler     │
-│  ─────────────────────────────   │    │      extender, cluster-wide     │
-│  /api/v1/placement/decision      │    │                                 │
-│  /extender/filter                │    │  [A] → /placement/decision      │
-│  /extender/prioritize            │    │  [B] → /extender/filter         │
-│  /healthz                        │    │       /extender/prioritize      │
-└──────────────────┬───────────────┘    └─────────────────────────────────┘
-                   │ POST DecisionRequest
+┌───────────────────────────────────────────────────────────────────────┐
+│  Kubernetes API Server                                                │
+└──────────┬──────────────────────────────────────────┬──────────────────┘
+           │ watch OrchestrationProfile / EAO          │ schedule pods
+           │ watch Deployments/StatefulSets/Jobs       │
+           │ watch Pod/Node events + periodic tick     │
+           ▼                                           │
+┌────────────────────────────────────────┐   ┌─────────┴───────────────────┐
+│  HIRO Operator Pod                      │   │  Scheduler (choose one)     │
+│  ──────────────────────────────────    │   │  ─────────────────────────  │
+│  Reconciler (placement status)          │   │  [A] hiro-scheduler(plugin) │
+│                                          │   │      per-pod opt-in        │
+│  Rebalance Engine                       │   │  [B] default kube-scheduler │
+│    Watching → Triggered → Evaluating    │   │      extender, cluster-wide │
+│    → Decided → Enacting                 │   │                             │
+│    (Move / RetryPendingSchedule)        │◄──┤  [A] → /placement/decision │
+│    │ writes on Move                     │   │  [B] → /extender/filter     │
+│    ▼                                    │   │       /extender/prioritize  │
+│  DecisionStore (shared, TTL-bounded)    │   │                             │
+│    │ read before AI call                │   │                             │
+│    ▼                                    │   │                             │
+│  PlacementServer (:8090)                │   │                             │
+│  ──────────────────────────────────    │   │                             │
+│  /api/v1/placement/decision             │   │                             │
+│  /extender/filter                       │   │                             │
+│  /extender/prioritize                   │   │                             │
+│  /healthz                               │   │                             │
+└──────────────────┬───────────────────────┘   └─────────────────────────────┘
+                   │ POST DecisionRequest / RebalanceContext
                    ▼
          ┌──────────────────────┐
          │  Decision Agent      │
@@ -108,32 +119,66 @@ The system consists of two independently deployed binaries plus an optional mock
          └──────────────────────┘
 ```
 
+```mermaid
+flowchart TB
+    API["Kubernetes API Server"]
+
+    subgraph Operator["HIRO Operator Pod"]
+        direction TB
+        Reconciler["Reconciler<br/>(placement status)"]
+        RE["Rebalance Engine<br/>Watching → Triggered → Evaluating<br/>→ Decided → Enacting<br/>(Move / RetryPendingSchedule)"]
+        Store[("DecisionStore<br/>shared, TTL-bounded")]
+        PS["PlacementServer (:8090)<br/>─────────────────────<br/>/api/v1/placement/decision<br/>/extender/filter<br/>/extender/prioritize<br/>/healthz"]
+
+        RE -->|"writes on Move"| Store
+        Store -->|"read before AI call"| PS
+    end
+
+    subgraph SchedChoice["Scheduler (choose one)"]
+        direction TB
+        A["[A] hiro-scheduler (plugin)<br/>per-pod opt-in"]
+        B["[B] default kube-scheduler<br/>extender, cluster-wide"]
+    end
+
+    Agent["Decision Agent<br/>(AI or Mock) :8080"]
+
+    API -->|"watch OrchestrationProfile / EAO<br/>watch Deployments/StatefulSets/Jobs"| Reconciler
+    API -->|"watch Pod/Node events<br/>+ periodic tick"| RE
+    API -->|"schedule pods"| SchedChoice
+    A -->|"[A] → /placement/decision"| PS
+    B -->|"[B] → /extender/filter<br/>/extender/prioritize"| PS
+    PS -->|"POST DecisionRequest"| Agent
+    RE -->|"POST RebalanceContext"| Agent
+```
+
 ### PlacementServer
 
 The `PlacementServer` is a **single HTTP listener on `:8090`** inside the operator pod. Both scheduler integration approaches — plugin and extender — call the same server on different routes. There is no separate binary or process: it is one `net/http` mux started by `cmd/main.go` alongside the reconciler.
 
-```
-            HIRO Operator Pod — PlacementServer (:8090)
-           ┌──────────────────────────────────────────────────────────────┐
- hiro-     │  POST /api/v1/placement/decision                            │
- scheduler ►│    1. look up OrchestrationProfile (O(1) field index)       │──► Decision
- (plugin)  │    2. build DecisionRequest (AOProfile + EAOProfile + nodes) │    Agent
-           │    3. call External AI Agent → return NodeScores to plugin   │    :8080
-           │                                                              │
- default   │  POST /extender/filter                                       │
- scheduler ►│    1. look up OrchestrationProfile for pod                  │
- (extender)│    2. CheckEnergyGate via EAO CRD                            │
-           │       allowed  → pass all nodes through unchanged            │
-           │       blocked  → FailedNodes: all (scheduler defers the pod) │
-           │                                                              │
-          ►│  POST /extender/prioritize                                   │──► Decision
-           │    1. build DecisionRequest (same pipeline as plugin path)   │    Agent
-           │    2. call External AI Agent → map scores [0-100] → [0-10]   │    :8080
-           │    3. missing nodes → score 5 (neutral fallback)             │
-           │                                                              │
- Kubernetes│  GET  /healthz → 200 ok                                      │
- probes   ►│                                                              │
-           └──────────────────────────────────────────────────────────────┘
+
+
+```mermaid
+flowchart LR
+    Plugin["hiro-scheduler<br/>(plugin)"]
+    Extender["default scheduler<br/>(extender)"]
+    Probes["Kubernetes<br/>probes"]
+
+    subgraph PS["PlacementServer :8090 — HIRO Operator Pod"]
+        direction TB
+        R1["POST /api/v1/placement/decision<br/>1. look up OrchestrationProfile (O(1) field index)<br/>2. build DecisionRequest (AOProfile + EAOProfile + nodes)<br/>3. call External AI Agent → return NodeScores to plugin"]
+        R2["POST /extender/filter<br/>1. look up OrchestrationProfile for pod<br/>2. CheckEnergyGate via EAO CRD<br/>&nbsp;&nbsp;allowed → pass all nodes through unchanged<br/>&nbsp;&nbsp;blocked → FailedNodes: all (scheduler defers the pod)"]
+        R3["POST /extender/prioritize<br/>1. build DecisionRequest (same pipeline as plugin path)<br/>2. call External AI Agent → map scores [0-100] → [0-10]<br/>3. missing nodes → score 5 (neutral fallback)"]
+        R4["GET /healthz → 200 ok"]
+    end
+
+    Agent["Decision<br/>Agent :8080"]
+
+    Plugin --> R1
+    Extender --> R2
+    Extender --> R3
+    Probes --> R4
+    R1 -->|"POST DecisionRequest"| Agent
+    R3 -->|"POST DecisionRequest"| Agent
 ```
 
 > `/extender/filter` + `/extender/prioritize` share the same `DecisionContextBuilder.Build()` + `DecisionClient.RequestDecision()` pipeline as the plugin path. The filter step runs `CheckEnergyGate` first; the prioritize step calls the AI agent and normalises scores.
@@ -163,43 +208,60 @@ OrchestrationProfile.status updated
         └── Status transition → Kubernetes Event emitted
 ```
 
+```mermaid
+flowchart TD
+    API["Kubernetes API server<br/>OrchestrationProfile created/updated<br/>Deployment/StatefulSet/Job updated<br/>Pod phase changed"] --> RC["Reconciliation Controller"]
+
+    RC --> V["Validate spec<br/>(applicationRef, strategy, awareness)"]
+    V -->|"on failure"| ErrV["status = Error<br/>+ Kubernetes Event"]
+    V -->|"ok"| RW["Resolve workload<br/>(Deployment / StatefulSet / Job)"]
+
+    RW -->|"not found"| ErrRW["status = Error<br/>+ Kubernetes Event"]
+    RW -->|"found"| DP["Discover pods via<br/>OwnerReference walk"]
+
+    DP -->|"no pods"| NoPods["status = NoPods"]
+    DP -->|"pods found"| CH["Compute pod health<br/>(ready / pending / failed counts)"]
+
+    CH -->|"all ready"| Active["status = Active"]
+    CH -->|"some ready"| Partial["status = Partial"]
+    CH -->|"none ready"| Pending["status = Pending"]
+    CH -->|"any failed"| Degraded["status = Degraded"]
+
+    ErrV --> Upd["OrchestrationProfile.status updated"]
+    ErrRW --> Upd
+    NoPods --> Upd
+    Active --> Upd
+    Partial --> Upd
+    Pending --> Upd
+    Degraded --> Upd
+
+    Upd --> Evt["Status transition →<br/>Kubernetes Event emitted"]
+```
+
 ### Flow 2 — Plugin Path: hiro-scheduler + PlacementServer
 
 End-to-end flow for pods with `spec.schedulerName: hiro-scheduler`. The `HIROScore` plugin runs inside the `hiro-scheduler` pod; the `PlacementServer` runs inside the operator pod. They communicate via HTTP on `/api/v1/placement/decision`.
 
-```
-Pod created with spec.schedulerName: hiro-scheduler
-        ▼
-hiro-scheduler — Filter phase
-        HIROScore.Filter  (soft-fail open — never blocks scheduling)
-        ▼
-hiro-scheduler — PreScore phase
-        HIROScore.PreScore
-        │  POST /api/v1/placement/decision
-        │  Body: PlacementContext { pod *corev1.Pod, candidateNodes []*corev1.Node }
-        ▼
-PlacementServer.handlePlacementDecision (:8090, operator pod)
-        ├── Decode PlacementContext
-        ├── builder.Build() — assemble DecisionRequest
-        │     ├── findProfileForPod()      O(1) field index lookup
-        │     ├── buildAOProfileContext()  strategy + awareness + current placement
-        │     └── fetchEAOProfile()        energy data (only if awareness.Energy=true)
-        │
-        └── client.RequestDecision()
-              │  POST DECISION_AGENT_URL
-              │  Body: DecisionRequest { pod, candidateNodes, AOProfile, EAOProfile }
-              ▼
-        External Decision Agent (:8080)
-              │  Response: { nodeScores: [{nodeName, score 0-100}, ...], reason }
-              ▼
-        PlacementServer → 200 OK { nodeScores, reason }
-        ▼
-hiro-scheduler — PreScore stashes NodeScores in CycleState
-        ▼
-hiro-scheduler — Score phase
-        HIROScore.Score reads NodeScore from CycleState → returns score to framework
-        ▼
-hiro-scheduler selects highest-scored node → binds pod
+
+```mermaid
+sequenceDiagram
+    participant Sched as hiro-scheduler
+    participant PS as PlacementServer<br/>(:8090, operator pod)
+    participant Agent as External Decision<br/>Agent (:8080)
+
+    Note over Sched: Pod created with<br/>spec.schedulerName: hiro-scheduler
+    Sched->>Sched: Filter phase — HIROScore.Filter<br/>(soft-fail open, never blocks scheduling)
+    Sched->>PS: PreScore — POST /api/v1/placement/decision<br/>Body: PlacementContext{pod, candidateNodes}
+    activate PS
+    PS->>PS: Decode PlacementContext
+    PS->>PS: builder.Build() — assemble DecisionRequest<br/>findProfileForPod() (O(1) field index)<br/>buildAOProfileContext() (strategy + awareness + placement)<br/>fetchEAOProfile() (if awareness.Energy=true)
+    PS->>Agent: client.RequestDecision()<br/>POST DECISION_AGENT_URL<br/>Body: DecisionRequest{pod, candidateNodes, AOProfile, EAOProfile}
+    Agent-->>PS: {nodeScores: [{nodeName, score 0-100}], reason}
+    PS-->>Sched: 200 OK {nodeScores, reason}
+    deactivate PS
+    Sched->>Sched: PreScore stashes NodeScores in CycleState
+    Sched->>Sched: Score phase — HIROScore.Score reads<br/>NodeScore from CycleState → returns score to framework
+    Sched->>Sched: Selects highest-scored node → binds pod
 ```
 
 Plugin configuration (URL, path, timeout) is injected into the `KubeSchedulerConfiguration` ConfigMap at deploy time — see [Scheduler Plugin Config](#scheduler-plugin-config).
@@ -262,6 +324,30 @@ On any error (profile not found, AI agent unreachable):
 If extender is unreachable (ignorable: true in ConfigMap):
         kube-scheduler logs "Skipping extender as it returned error and has ignorable flag set"
         scheduling continues normally — extender never blocks the cluster
+```
+
+```mermaid
+flowchart TD
+    Pod["Pod created<br/>(any pod — default scheduler handles all)"] --> KS["default kube-scheduler<br/>KubeSchedulerConfiguration from<br/>/etc/kubernetes/hiro-scheduler-config.yaml<br/>extender urlPrefix: http://ClusterIP:8090<br/>(resolved at deploy time)"]
+
+    KS --> F["Filter phase<br/>POST /extender/filter<br/>Body: ExtenderArgs{Pod, Nodes}"]
+    F --> HF["PlacementServer.handleExtenderFilter<br/>(operator pod)"]
+    HF --> CEG["CheckEnergyGate(pod)<br/>findProfileForPod() (O(1) field index)<br/>fetchEAOProfile() (energy data from EAO CRD)"]
+    CEG -->|"allowed"| FA["ExtenderFilterResult{Nodes: all candidates}"]
+    CEG -->|"blocked"| FB["ExtenderFilterResult{FailedNodes: all + reason}<br/>scheduler defers pod — no node selected this cycle"]
+
+    FA --> S["Score phase (prioritize)<br/>POST /extender/prioritize<br/>Body: ExtenderArgs{Pod, Nodes}"]
+    S --> HP["PlacementServer.handleExtenderPrioritize<br/>(operator pod)"]
+    HP --> B["builder.Build() — assemble DecisionRequest<br/>findProfileForPod()<br/>buildAOProfileContext()<br/>fetchEAOProfile()"]
+    B --> RD["client.RequestDecision()<br/>POST DECISION_AGENT_URL<br/>Response: {nodeScores: [{nodeName, score 0-100}]}"]
+    RD --> NS["nodeScoresToHostPriorities()<br/>score/10 → int64 [0-10] (extender protocol)<br/>missing node → score 5 (neutral fallback)"]
+    NS --> HPL["HostPriorityList [{host, score 0-10}, ...]"]
+    HPL --> Merge["kube-scheduler merges extender scores<br/>with built-in priorities<br/>selects highest-scored node → binds pod"]
+
+    RD -.->|"on error: profile not found,<br/>AI agent unreachable"| EQ["equalPriorities()<br/>→ score 5 for all nodes<br/>scheduling continues using built-in priorities only"]
+    EQ -.-> Merge
+
+    KS -.->|"if extender unreachable<br/>(ignorable: true in ConfigMap)"| Ignore["kube-scheduler logs 'Skipping extender...'<br/>scheduling continues normally —<br/>extender never blocks the cluster"]
 ```
 
 `ignorable: true` is set in `config/extender/scheduler-config.yaml`. The extender is never a hard dependency for scheduling.
@@ -360,6 +446,7 @@ deploy_full_stack.sh  (master parameter sheet — all vars defined here)
                   kubelet detects manifest change via inotify → restarts kube-scheduler
                   wait pod/kube-scheduler-<node> --for=condition=Ready
 ```
+
 
 `PLACEMENT_SERVICE_NAME` is applied at **deploy time** to set the Kubernetes Service name. It is not injected into the operator pod (the operator only listens on a port; routing is handled by Kubernetes). The scheduler and extender scripts use `PLACEMENT_SERVICE_NAME` to construct the URL they call.
 
@@ -1078,6 +1165,22 @@ Deploy everything (operator + mock agent + extender)
 
 Deploy everything (operator + mock agent + scheduler plugin)
         └── DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_full_stack.sh
+```
+
+```mermaid
+flowchart LR
+    T1["Edit *_types.go<br/>or markers"] --> T1a["make manifests<br/>(regenerate CRDs / RBAC)"]
+    T1 --> T1b["make generate<br/>(regenerate DeepCopy)"]
+
+    T2["Edit *.go files"] --> T2a["make lint-fix<br/>(auto-fix style)"]
+    T2 --> T2b["make test<br/>(unit + integration tests)"]
+
+    T3["Deploy operator only"] --> T3a["hack/deploy_operator.sh"]
+    T3a -.->|"if USE_MOCK_AGENT=true, also"| T3b["kubectl apply -f<br/>hack/mock_decision_agent.yaml"]
+
+    T4["Deploy everything<br/>(operator + mock agent + extender)"] --> T4a["DEPLOY_EXTENDER=true<br/>hack/deploy_full_stack.sh"]
+
+    T5["Deploy everything<br/>(operator + mock agent + scheduler plugin)"] --> T5a["DEPLOY_SCHEDULER_PLUGIN=true<br/>hack/deploy_full_stack.sh"]
 ```
 
 > **Never manually edit** auto-generated files: `config/crd/bases/*.yaml`, `config/rbac/role.yaml`, `zz_generated.*.go`, `dist/chart/`, `dist/install.yaml`.
