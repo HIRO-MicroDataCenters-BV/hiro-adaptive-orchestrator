@@ -546,14 +546,16 @@ deploy_oprator_with_samples() {
 deploy_mock_agent() {
   if [ "$USE_MOCK_AGENT" = "true" ]; then
     step "Phase 5 — Deploying mock decision agent..."
-    sed "s/namespace: hiro-adaptive-orchestrator-system/namespace: $NAMESPACE/g" \
+    # Stamping a fresh timestamp into the pod template's redeployed-at
+    # annotation on every apply forces a new ReplicaSet even when nothing
+    # else changed, so the pod always picks up the ConfigMap's latest script
+    # content instead of an already-running process keeping the old one.
+    sed -e "s/namespace: hiro-adaptive-orchestrator-system/namespace: $NAMESPACE/g" \
+        -e "s/REPLACE_DEPLOY_TIMESTAMP/$(date -u +%Y-%m-%dT%H:%M:%SZ)/g" \
       "$SCRIPT_DIR/mock_decision_agent.yaml" | kubectl apply -f -
 
-    echo "  Waiting for mock decision agent pod to be Ready..."
-    kubectl wait --for=condition=Ready pod \
-      -l app=mock-decision-agent \
-      -n "$NAMESPACE" \
-      --timeout=120s
+    echo "  Waiting for mock decision agent rollout to complete..."
+    kubectl rollout status deployment/mock-decision-agent -n "$NAMESPACE" --timeout=120s
     echo "  Mock decision agent is ready."
   else
     step "Phase 5 — Skipping mock agent              (USE_MOCK_AGENT=false)."

@@ -182,6 +182,13 @@ spec:
     metadata:
       labels:
         app: mock-decision-agent
+      annotations:
+        # Replaced with the current timestamp by deploy_full_stack.sh on every
+        # apply. A changing pod-template annotation forces a new ReplicaSet
+        # even when nothing else in this manifest changed, so the pod always
+        # picks up the ConfigMap-mounted script's latest content instead of
+        # keeping the old script loaded in the already-running process.
+        hiro.io/redeployed-at: "REPLACE_DEPLOY_TIMESTAMP"
     spec:
       containers:
         - name: mock-agent
