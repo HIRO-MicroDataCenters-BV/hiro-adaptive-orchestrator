@@ -114,8 +114,25 @@ data:
             rebalance_context = req.get("rebalanceContext") or {}
             current_placements = rebalance_context.get("currentPlacements", [])
             candidate_nodes = req.get("candidateNodes", [])
-            candidate_names = [n.get("metadata", {}).get("name") for n in candidate_nodes]
-            candidate_names = [n for n in candidate_names if n]
+
+            # candidateNodes for a rebalance decision is every node in the
+            # cluster, not just Filter-passed ones (unlike initial-placement
+            # scoring) — so control-plane (and other NoSchedule/NoExecute
+            # tainted) nodes are still in the list. Recommending one of those
+            # as a Move target would always fail once the replacement pod
+            # actually tries to schedule there, so skip them the same way a
+            # real agent would need to.
+            def schedulable(node):
+                for taint in node.get("spec", {}).get("taints", []) or []:
+                    if taint.get("effect") in ("NoSchedule", "NoExecute"):
+                        return False
+                return True
+
+            candidate_names = [
+                n.get("metadata", {}).get("name")
+                for n in candidate_nodes
+                if n.get("metadata", {}).get("name") and schedulable(n)
+            ]
 
             movable = [p for p in current_placements if p.get("phase") == "Running"]
 

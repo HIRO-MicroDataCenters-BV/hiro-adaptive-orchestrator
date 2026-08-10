@@ -216,6 +216,30 @@ func TestTriggerEvaluator_FreshPendingPodNotYetRetryEligible(t *testing.T) {
 	}
 }
 
+// TestTriggerEvaluator_ScheduledPendingPodNotRetryEligible covers a second
+// live-observed regression: a pod that's Pending but already has a
+// NodeName (scheduled, just hasn't started its container yet — ordinary
+// startup latency, unrelated to the energy gate) was still matching
+// hasPendingPod, but retryPendingSchedule's own selection (retry_enactor.go)
+// requires NodeName == "" and finds nothing — so the bypass fired
+// repeatedly and unproductively (cooldown-exempt) until the pod left
+// Pending on its own. hasPendingPod must require the same "truly
+// unscheduled" criteria retryPendingSchedule actually acts on.
+func TestTriggerEvaluator_ScheduledPendingPodNotRetryEligible(t *testing.T) {
+	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	eao := testEAO("DeployImmediately", "", boolPtr(true))
+	pending := testPod("app-a-pending", "node-a", corev1.PodPending)
+	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, pending)
+
+	matched, _, err := evaluator.Evaluate(context.Background(), profile)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if matched {
+		t.Error("matched = true, want false — a Pending pod that's already scheduled isn't retry-eligible")
+	}
+}
+
 func TestTriggerEvaluator_EnergyOKNoPendingPod(t *testing.T) {
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
 	eao := testEAO("DeployImmediately", "", boolPtr(true))

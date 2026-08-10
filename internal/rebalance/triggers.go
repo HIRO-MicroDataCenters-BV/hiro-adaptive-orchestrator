@@ -274,11 +274,21 @@ func (e *TriggerEvaluator) evaluateEnergyThreshold(
 // Pending well past it regardless, so real retries are barely delayed.
 const MinPendingPodAge = 10 * time.Second
 
-// hasPendingPod reports whether any pod in the list has been Pending for at
-// least MinPendingPodAge.
+// hasPendingPod reports whether any pod in the list is Pending, unscheduled
+// (NodeName == ""), and has been so for at least MinPendingPodAge. Must
+// match retryPendingSchedule's own selection criteria (retry_enactor.go)
+// exactly: a pod that's already scheduled but simply hasn't started its
+// container yet is still Phase: Pending for a few seconds — normal startup
+// latency, nothing to do with the energy gate. Without the NodeName check,
+// hasPendingPod would keep matching that pod on every reconcile while
+// retryPendingSchedule (correctly) finds nothing to act on, and since the
+// bypass path isn't cooldown-gated, that mismatch alone is enough to drive
+// a tight, unproductive Triggered->...->Watching loop until the pod
+// naturally leaves Pending.
 func hasPendingPod(pods []corev1.Pod) bool {
 	for _, pod := range pods {
-		if pod.Status.Phase == corev1.PodPending && time.Since(pod.CreationTimestamp.Time) >= MinPendingPodAge {
+		if pod.Status.Phase == corev1.PodPending && pod.Spec.NodeName == "" &&
+			time.Since(pod.CreationTimestamp.Time) >= MinPendingPodAge {
 			return true
 		}
 	}

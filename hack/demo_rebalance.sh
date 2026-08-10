@@ -16,10 +16,12 @@
 # Beat 3 needs the energy window CLOSED to fire the trigger (EnergyThreshold
 # only matches on insufficient/Delayed/Waiting) but OPEN for the replacement
 # pod to actually pass CheckEnergyGate and schedule — see the Move-vs-energy-
-# gate interaction documented in internal/rebalance/README.md. This script
-# handles that by polling for State: Enacting (eviction has happened, the
-# replacement is about to be attempted) and opening the window at exactly
-# that moment — moveEnactor's 60s timeout gives plenty of margin.
+# gate interaction documented in internal/rebalance/README.md. Same race as
+# beat 2: a one-shot patch can lose to a NoOp re-arming cooldown or to the
+# external EAO controller's own reconcile reverting it before our watch
+# reacts. So this script re-asserts clear-cooldown+close-window every few
+# seconds until the cycle leaves Watching, then re-asserts the open window
+# throughout the whole Enacting phase instead of patching either side once.
 #
 # This script does NOT stream logs itself — open these in separate terminal
 # panes before you start, so you (the presenter) can narrate over them while
@@ -91,23 +93,11 @@ profile_state() {
   kubectl get orchestrationprofile "$PROFILE" -o jsonpath='{.status.rebalancingStatus.state}' 2>/dev/null
 }
 
-# Polls profile_state until it equals $1, or $2 seconds elapse (2s interval).
-# Prints a running "." per poll so the presenter sees it's alive, not hung.
-wait_for_state() {
-  local want=$1 timeout=$2 waited=0
-  while [ "$(profile_state)" != "$want" ]; do
-    [ "$waited" -ge "$timeout" ] && { echo " timed out waiting for state=$want"; return 1; }
-    printf '.'
-    sleep 2
-    waited=$((waited + 2))
-  done
-  echo " reached state=$want after ${waited}s"
-}
-
 # ─── Cleanup (always runs on exit, even Ctrl-C) ────────────────────────────
 
 MOCK_AGENT_BUMPED=false
 NGINX2_ORIGINAL_REPLICAS=""
+RETRY_PENDING_POD=""
 
 cleanup() {
   step "Cleanup"
@@ -129,6 +119,20 @@ trap cleanup EXIT INT TERM
 
 # ─── Mock agent tuning (beat 3 needs a guaranteed, above-threshold Move) ───
 
+# Applies $MOCK_AGENT_YAML with a fresh redeployed-at timestamp piped in
+# (never written to disk — same non-destructive trick deploy_full_stack.sh
+# uses). Without this, kubectl apply alone sees no pod-template diff when
+# only the ConfigMap-mounted script's constants changed, so it reports
+# "deployment.apps/mock-decision-agent unchanged", the pod never restarts,
+# and the running process keeps serving the OLD MOVE_PROBABILITY /
+# IMPROVEMENT_MIN indefinitely — silently, since rollout status still
+# reports success (there's nothing to roll out).
+apply_mock_agent() {
+  sed -e "s/REPLACE_DEPLOY_TIMESTAMP/$(date -u +%Y-%m-%dT%H:%M:%SZ)/g" \
+    "$MOCK_AGENT_YAML" | run kubectl apply -f -
+  run kubectl rollout status deployment/mock-decision-agent -n "$NAMESPACE" --timeout=120s
+}
+
 bump_mock_agent() {
   step "Forcing the mock agent to always recommend an above-threshold Move"
   sed -i.bak \
@@ -136,8 +140,7 @@ bump_mock_agent() {
     -e 's/^    IMPROVEMENT_MIN    = 10.0$/    IMPROVEMENT_MIN    = 30.0/' \
     "$MOCK_AGENT_YAML"
   rm -f "$MOCK_AGENT_YAML.bak"
-  run kubectl apply -f "$MOCK_AGENT_YAML"
-  run kubectl rollout status deployment/mock-decision-agent -n "$NAMESPACE" --timeout=120s
+  apply_mock_agent
   MOCK_AGENT_BUMPED=true
 }
 
@@ -148,8 +151,7 @@ revert_mock_agent() {
     -e 's/^    IMPROVEMENT_MIN    = 30.0$/    IMPROVEMENT_MIN    = 10.0/' \
     "$MOCK_AGENT_YAML"
   rm -f "$MOCK_AGENT_YAML.bak"
-  run kubectl apply -f "$MOCK_AGENT_YAML"
-  run kubectl rollout status deployment/mock-decision-agent -n "$NAMESPACE" --timeout=120s
+  apply_mock_agent
   MOCK_AGENT_BUMPED=false
 }
 
@@ -170,76 +172,75 @@ open_energy_window() {
 
 # ─── Beat 1 — NoOp ──────────────────────────────────────────────────────────
 
+# NoOp arms cooldownSeconds same as any other terminal outcome (see
+# dispatch.go's dispatchNoOp), so each round clears it by hand first instead
+# of waiting out the real cooldown.
 noop() {
   step "Beat 1 — NoOp"
-  narrate "Every terminal outcome — including NoOp — arms the profile's full
-cooldownSeconds (see dispatch.go's dispatchNoOp), not just the 30s detection
-tick. So this doesn't repeat on its own every 30s; each cycle below clears
-cooldown by hand first, same as a real cooldown expiry would, then waits for
-one full Watching -> Triggered -> Evaluating -> Watching cycle."
+  narrate "NoOp still arms cooldown, so each round below clears it by hand."
 
   local rounds=3
   for i in $(seq 1 "$rounds"); do
     step "NoOp cycle $i of $rounds"
     clear_cooldown
-    narrate "Watch Pane A/B/D for this cycle to complete (<=30s for the next
-detection tick, then near-instant once triggered)."
+    narrate "Watch Pane A/B/D — up to 30s for the next tick, then instant."
     pause
   done
 }
 
 # ─── Beat 2 — RetryPendingSchedule ──────────────────────────────────────────
 
-retry() {
-  step "Beat 2 — RetryPendingSchedule"
-  clear_cooldown
-
+# Scales $APP up by one and waits (up to 60s) for the new pod to go Pending
+# behind the energy gate. Sets RETRY_PENDING_POD.
+retry_scale_and_wait_pending() {
   NGINX2_ORIGINAL_REPLICAS=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
     -o jsonpath='{.spec.replicas}')
-
   narrate "Scaling $APP up by one to force a pod Pending behind the energy gate."
   run kubectl scale deployment "$APP" -n "$APP_NAMESPACE" \
     --replicas=$((NGINX2_ORIGINAL_REPLICAS + 1))
 
   step "Waiting for the new pod to go Pending"
-  local pending_pod="" waited=0
-  while [ -z "$pending_pod" ] && [ "$waited" -lt 60 ]; do
-    pending_pod=$(kubectl get pods -n "$APP_NAMESPACE" -l app=nginx-2 \
+  RETRY_PENDING_POD=""
+  local waited=0
+  while [ -z "$RETRY_PENDING_POD" ] && [ "$waited" -lt 60 ]; do
+    RETRY_PENDING_POD=$(kubectl get pods -n "$APP_NAMESPACE" -l app=nginx-2 \
       --field-selector=status.phase=Pending -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-    [ -z "$pending_pod" ] && { printf '.'; sleep 2; waited=$((waited + 2)); }
+    [ -z "$RETRY_PENDING_POD" ] && { printf '.'; sleep 2; waited=$((waited + 2)); }
   done
   echo
   run kubectl get pods -n "$APP_NAMESPACE" -l app=nginx-2 -o wide
-  pause
+}
 
-  narrate "The event-driven watch on the EAO fires Reconcile right when we
-patch it — that part isn't the issue. But Reconcile checks cooldown before
-it ever looks at the trigger (reconciler.go), and a NoOp cycle can slip in
-and re-arm a fresh cooldownSeconds between our clear and our patch landing —
-same fixed cooldown a NoOp gets as anything else. So instead of a one-shot
-patch, this clears cooldown and re-asserts the open window every few seconds
-until $pending_pod is actually retried. Each pair of commands below IS the
-retry — the echoed patches double as the progress indicator."
-
-  step "Re-asserting the open energy window until $pending_pod is retried"
-  local retried=false
-  waited=0
+# Re-asserts clear-cooldown + open-window every 3s (up to 90s) until
+# RETRY_PENDING_POD is gone. A one-shot patch can lose a race to cooldown
+# re-arming (reconciler.go checks cooldown before the trigger) or to a NoOp
+# cycle slipping in between our clear and our patch landing.
+retry_reassert_until_retried() {
+  local waited=0
   while [ "$waited" -lt 90 ]; do
     clear_cooldown
     open_energy_window
     sleep 3
     waited=$((waited + 3))
-    if ! kubectl get pod "$pending_pod" -n "$APP_NAMESPACE" >/dev/null 2>&1; then
-      retried=true
-      break
+    if ! kubectl get pod "$RETRY_PENDING_POD" -n "$APP_NAMESPACE" >/dev/null 2>&1; then
+      echo "  $RETRY_PENDING_POD was deleted/replaced — retried after ${waited}s."
+      return 0
     fi
   done
+  echo "  Timed out after ${waited}s without a retry — check Pane B."
+  return 1
+}
 
-  if [ "$retried" = true ]; then
-    echo "  $pending_pod was deleted/replaced — RetryPendingSchedule fired after ${waited}s."
-  else
-    echo "  Timed out after ${waited}s without a retry — check Pane B for what happened."
-  fi
+retry() {
+  step "Beat 2 — RetryPendingSchedule"
+  clear_cooldown
+  retry_scale_and_wait_pending
+  pause
+
+  narrate "A one-shot patch can lose to cooldown re-arming, so this
+re-asserts every few seconds — the echoed patches double as progress."
+  step "Re-asserting the open energy window until $RETRY_PENDING_POD is retried"
+  retry_reassert_until_retried || true
 
   run kubectl get pods -n "$APP_NAMESPACE" -l app=nginx-2 -o wide
   pause
@@ -247,35 +248,66 @@ retry — the echoed patches double as the progress indicator."
 
 # ─── Beat 3 — Move ──────────────────────────────────────────────────────────
 
+# Re-asserts clear-cooldown + close-window every 2s (up to 150s), polling
+# directly for Enacting rather than "left Watching": a full NoOp cycle
+# (Watching->Triggered->Evaluating->Watching) completes in under a second,
+# so sampling for "not Watching" would alias right past it. Enacting is the
+# one state that actually holds still (moveEnactor's fixed 60s window).
+move_wait_for_enacting() {
+  local waited=0
+  while [ "$waited" -lt 150 ]; do
+    clear_cooldown
+    close_energy_window
+    if [ "$(profile_state)" = "Enacting" ]; then
+      echo "  Reached Enacting after ${waited}s — check Pane A/B for the Decided reason."
+      return 0
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  echo "  Did not observe Enacting after ${waited}s — check Pane B. A NoOp in
+  between is expected; if it keeps NoOp-ing, check $APP has a Running pod."
+  return 1
+}
+
+# Re-asserts the open window every 3s for the rest of moveEnactor's 60s
+# window, in case the external EAO controller reverts a single patch.
+move_keep_window_open() {
+  local waited=0
+  while [ "$waited" -lt 60 ] && [ "$(profile_state)" = "Enacting" ]; do
+    open_energy_window
+    sleep 3
+    waited=$((waited + 3))
+  done
+}
+
 move() {
   step "Beat 3 — Move"
-  clear_cooldown
+  narrate "Needs the window CLOSED to trigger, OPEN for the replacement to
+schedule — same cooldown/kopf race as beat 2, handled the same way."
 
-  narrate "The trigger needs the energy window CLOSED to fire (EnergyThreshold
-only matches on insufficient/Delayed/Waiting), but the replacement pod needs
-it OPEN to actually schedule. This script closes it now, triggers the Move,
-waits for eviction (State: Enacting), then flips the window open before
-moveEnactor's 60s timeout — the same trick you'd do by hand, just timed
-automatically."
-
-  step "Closing the energy window and forcing a guaranteed Move"
-  close_energy_window
+  step "Forcing a guaranteed above-threshold Move"
   bump_mock_agent
 
-  step "Waiting for the cycle to reach Enacting (eviction in progress)"
-  printf '  '
-  if ! wait_for_state Enacting 60; then
-    echo "  Did not observe Enacting in time — check Pane B for what happened."
-    return 1
-  fi
+  step "Closing the energy window and re-asserting until Enacting is observed"
+  move_wait_for_enacting || return 1
 
-  step "Eviction is in flight — opening the energy window now"
+  step "Eviction is in flight — opening the energy window immediately"
   open_energy_window
+  narrate "Re-asserting the open window for the rest of the enacting window."
+  pause
+  move_keep_window_open
 
-  narrate "Watch Pane C for \"decision-store hit, bypassing AI call\" — that's
-the replacement pod's scheduling request being biased toward the Move's
-target node instead of a fresh AI call."
-  step "Watching $APP pods (Ctrl-C to stop watching once you see the move complete)"
+  # Revert MOVE_PROBABILITY now rather than waiting for script exit: once the
+  # move has resolved, nothing is holding the window open any more, so any
+  # natural trigger that fires during the unbounded watch/pause below would
+  # get a forced Move recommendation with no one home to rescue it — exactly
+  # the failure mode this sidesteps.
+  revert_mock_agent
+
+  narrate "Watch Pane C for a decision-store hit — the replacement pod being
+steered to the Move's target node instead of a fresh AI call."
+  step "Watching $APP pods (Ctrl-C once you see the move complete)"
   run kubectl get pods -n "$APP_NAMESPACE" -l app=nginx-2 -o wide --watch || true
 
   step "Final state"
