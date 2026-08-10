@@ -46,9 +46,9 @@
 #
 # Usage:
 #   hack/demo_rebalance.sh              # run all three beats, in order
-#   hack/demo_rebalance.sh beat1        # run a single beat
-#   hack/demo_rebalance.sh beat2
-#   hack/demo_rebalance.sh beat3
+#   hack/demo_rebalance.sh noop         # run a single beat
+#   hack/demo_rebalance.sh retry
+#   hack/demo_rebalance.sh move
 #   hack/demo_rebalance.sh cleanup      # revert the mock agent + restore
 #                                       # replica count, without running
 #                                       # anything else
@@ -170,7 +170,7 @@ open_energy_window() {
 
 # ─── Beat 1 — NoOp ──────────────────────────────────────────────────────────
 
-beat1_noop() {
+noop() {
   step "Beat 1 — NoOp"
   narrate "Every terminal outcome — including NoOp — arms the profile's full
 cooldownSeconds (see dispatch.go's dispatchNoOp), not just the 30s detection
@@ -190,7 +190,7 @@ detection tick, then near-instant once triggered)."
 
 # ─── Beat 2 — RetryPendingSchedule ──────────────────────────────────────────
 
-beat2_retry_pending_schedule() {
+retry() {
   step "Beat 2 — RetryPendingSchedule"
   clear_cooldown
 
@@ -247,7 +247,7 @@ retry — the echoed patches double as the progress indicator."
 
 # ─── Beat 3 — Move ──────────────────────────────────────────────────────────
 
-beat3_move() {
+move() {
   step "Beat 3 — Move"
   clear_cooldown
 
@@ -286,20 +286,20 @@ target node instead of a fresh AI call."
 # ─── Main ───────────────────────────────────────────────────────────────────
 
 usage() {
-  echo "Usage: $0 [beat1|beat2|beat3|cleanup]"
-  echo "  (no argument) runs beat1, beat2, beat3 in order"
+  echo "Usage: $0 [noop|retry|move|cleanup]"
+  echo "  (no argument) runs noop, retry, move in order"
 }
 
 main() {
   case "${1:-all}" in
-    beat1) beat1_noop ;;
-    beat2) beat2_retry_pending_schedule ;;
-    beat3) beat3_move ;;
+    noop) noop ;;
+    retry) retry ;;
+    move) move ;;
     cleanup) : ;; # cleanup runs unconditionally via the EXIT trap below
     all)
-      beat1_noop
-      beat2_retry_pending_schedule
-      beat3_move
+      noop
+      retry
+      move
       ;;
     -h|--help) usage; trap - EXIT; exit 0 ;;
     *) usage >&2; trap - EXIT; exit 1 ;;
