@@ -19,6 +19,7 @@ package rebalance
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -260,10 +261,24 @@ func (e *TriggerEvaluator) evaluateEnergyThreshold(
 	return false, "", ""
 }
 
-// hasPendingPod reports whether any pod in the list is still Pending.
+// MinPendingPodAge is how long a pod must have been Pending before
+// hasPendingPod considers it retry-eligible. Reconcile no longer gates the
+// RetryPendingSchedule bypass on cooldown (see reconciler.go), so without
+// this floor a retry's own deletion produces a brand-new replacement that is
+// itself briefly Pending — and since every StateWriter transition is a
+// status write the primary watch reacts to, that immediately re-queues
+// another Reconcile which would see "still Pending" and retry again before
+// the replacement ever got a real chance to schedule, live-locking in a
+// tight loop with no backstop at all. This floor gives normal scheduling a
+// fair window first; a pod genuinely stuck behind the energy gate stays
+// Pending well past it regardless, so real retries are barely delayed.
+const MinPendingPodAge = 10 * time.Second
+
+// hasPendingPod reports whether any pod in the list has been Pending for at
+// least MinPendingPodAge.
 func hasPendingPod(pods []corev1.Pod) bool {
 	for _, pod := range pods {
-		if pod.Status.Phase == corev1.PodPending {
+		if pod.Status.Phase == corev1.PodPending && time.Since(pod.CreationTimestamp.Time) >= MinPendingPodAge {
 			return true
 		}
 	}

@@ -160,8 +160,9 @@ func NewReconciler(
 	}
 }
 
-// Reconcile checks one profile's cooldown and trigger conditions, and
-// transitions it to Triggered if warranted.
+// Reconcile checks one profile's trigger conditions and transitions it to
+// Triggered if warranted. Cooldown only gates the AI-consultation path, not
+// the mechanical bypass path — see the BypassAction branch below for why.
 func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 
@@ -178,14 +179,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl
 	}
 
 	rs := profile.Status.RebalancingStatus
-
-	if !rs.CooldownUntil.IsZero() {
-		if remaining := time.Until(rs.CooldownUntil.Time); remaining > 0 {
-			logger.V(1).Info("rebalance: still in cooldown, skipping",
-				"profile", profile.Name, "remaining", remaining)
-			return ctrl.Result{RequeueAfter: remaining}, nil
-		}
-	}
 
 	if rs.State != "" && rs.State != StateWatching {
 		// A cycle is already past Triggered (Evaluating/Decided/Enacting) —
@@ -207,10 +200,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl
 
 	if result.BypassAction != "" {
 		// No AI consultation needed — the trigger already fully determined
-		// the action. Drive the whole Triggered -> ... -> Enacted/Failed
+		// the action, and it's cheap/mechanical (RetryPendingSchedule today:
+		// deleting an already-Pending, never-Ready pod). Deliberately NOT
+		// gated by cooldown: cooldown exists to rate-limit AI consultation,
+		// not to delay reacting to a still-unresolved condition (e.g. a pod
+		// still Pending after an unrelated NoOp/Move armed cooldown) once
+		// any reconcile — periodic or event-driven — observes it's now
+		// actionable. Drive the whole Triggered -> ... -> Enacted/Failed
 		// sequence now instead of waiting on a future reconcile.
 		r.enactBypassAction(ctx, req.NamespacedName, profile, result)
 		return ctrl.Result{RequeueAfter: r.DetectionInterval}, nil
+	}
+
+	if !rs.CooldownUntil.IsZero() {
+		if remaining := time.Until(rs.CooldownUntil.Time); remaining > 0 {
+			logger.V(1).Info("rebalance: still in cooldown, skipping AI consultation",
+				"profile", profile.Name, "remaining", remaining)
+			return ctrl.Result{RequeueAfter: remaining}, nil
+		}
 	}
 
 	r.evaluateWithAI(ctx, req.NamespacedName, profile, result)

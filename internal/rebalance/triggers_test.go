@@ -19,6 +19,7 @@ package rebalance
 import (
 	"context"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -188,6 +189,30 @@ func TestTriggerEvaluator_EnergyWindowReachedWithPendingPod(t *testing.T) {
 	if result.BypassAction != ActionRetryPendingSchedule {
 		t.Errorf("BypassAction = %q, want %q — no AI consultation needed for a pending-pod retry",
 			result.BypassAction, ActionRetryPendingSchedule)
+	}
+}
+
+// TestTriggerEvaluator_FreshPendingPodNotYetRetryEligible covers the fix for
+// a live-observed regression: once Reconcile stopped gating the
+// RetryPendingSchedule bypass on cooldown, a retry's own deletion produced a
+// brand-new replacement pod that was itself briefly Pending — which
+// immediately re-matched this same case and retried again before the
+// replacement ever got a real chance to schedule, live-locking in a tight
+// loop (93 transitions observed in ~1-2s). A pod younger than
+// MinPendingPodAge must not be considered retry-eligible yet.
+func TestTriggerEvaluator_FreshPendingPodNotYetRetryEligible(t *testing.T) {
+	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	eao := testEAO("DeployImmediately", "", boolPtr(true))
+	pending := testPod("app-a-pending", "", corev1.PodPending)
+	pending.CreationTimestamp = metav1.NewTime(time.Now())
+	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, pending)
+
+	matched, _, err := evaluator.Evaluate(context.Background(), profile)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if matched {
+		t.Error("matched = true, want false — a pod pending for under MinPendingPodAge should not retry yet")
 	}
 }
 

@@ -49,7 +49,7 @@ data:
     # and Story 30 (Move enactor) aren't built yet, so a Move recommendation
     # currently has nothing to consume it past Decided. Keep NoOp dominant
     # until those land, then raise this back up.
-    MOVE_PROBABILITY   = 0.1
+    MOVE_PROBABILITY   = 0.0
     IMPROVEMENT_MIN    = 10.0
     IMPROVEMENT_MAX    = 100.0
 

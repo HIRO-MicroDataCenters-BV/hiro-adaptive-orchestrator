@@ -456,3 +456,46 @@ func TestReconciler_EnergyPendingRetryBypassesToEnacted(t *testing.T) {
 		t.Error("expected the pending pod to have been deleted by the bypass enactor")
 	}
 }
+
+// TestReconciler_BypassIgnoresActiveCooldown covers the fix for a real gap
+// found during live testing: an unrelated NoOp/Move can arm a full
+// cooldownSeconds, and if the EAO's window then reopens while a pod is still
+// Pending, that genuinely-actionable RetryPendingSchedule bypass used to be
+// silently swallowed by the stale cooldown until it expired on its own —
+// even though the bypass path never calls the AI and has nothing to do with
+// what cooldown is rate-limiting. Same fixture as
+// TestReconciler_EnergyPendingRetryBypassesToEnacted, but with an active
+// CooldownUntil in the future: the bypass must still fire immediately.
+func TestReconciler_BypassIgnoresActiveCooldown(t *testing.T) {
+	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile.Status.RebalancingStatus.CooldownUntil = metav1.NewTime(time.Now().Add(4 * time.Minute))
+	sufficient := true
+	eao := testEAO("DeployImmediately", "", &sufficient)
+	pending := testPod("app-a-pending", "", corev1.PodPending)
+	r, c := newTestReconciler(t, testDeployment(), eao, pending, profile)
+
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.RequeueAfter != 30*time.Second {
+		t.Errorf("RequeueAfter = %v, want DetectionInterval (30s), not the stale cooldown", res.RequeueAfter)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if rs.State != StateWatching {
+		t.Fatalf("state = %q, want Watching — bypass should ignore the active cooldown entirely", rs.State)
+	}
+	if rs.Action != orchestrationv1alpha1.RebalanceAction(ActionRetryPendingSchedule) {
+		t.Errorf("action = %q, want %q", rs.Action, ActionRetryPendingSchedule)
+	}
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeEnacted {
+		t.Errorf("recentDecisions = %+v, want one Enacted-outcome entry", rs.RecentDecisions)
+	}
+
+	err = c.Get(context.Background(), types.NamespacedName{Name: "app-a-pending", Namespace: "default"}, &corev1.Pod{})
+	if err == nil {
+		t.Error("expected the pending pod to have been deleted despite the active cooldown")
+	}
+}
