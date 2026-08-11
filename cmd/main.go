@@ -410,6 +410,7 @@ func main() {
 	//   REBALANCE_IMPROVEMENT_THRESHOLD    — minimum Move improvement score to enact, e.g. "20"
 	//   REBALANCE_DECISION_STORE_TTL       — how long a Move decision biases scoring, e.g. "60s"
 	//   REBALANCE_MOVE_ACTION_TIMEOUT      — max wait for a Move's replacement pod, e.g. "60s"
+	//   REBALANCE_MOVE_RATE_LIMIT          — cluster-wide Moves/minute across every profile, e.g. "5"
 	// -------------------------------------------------------------------------
 	rebalanceMaxRecentDecisions := parseIntEnv("REBALANCE_MAX_RECENT_DECISIONS")
 	if rebalanceMaxRecentDecisions <= 0 {
@@ -439,6 +440,10 @@ func main() {
 	if rebalanceMoveActionTimeout <= 0 {
 		rebalanceMoveActionTimeout = rebalance.DefaultMoveActionTimeout
 	}
+	rebalanceMoveRateLimit := parseIntEnv("REBALANCE_MOVE_RATE_LIMIT")
+	if rebalanceMoveRateLimit <= 0 {
+		rebalanceMoveRateLimit = rebalance.DefaultMoveRateLimit
+	}
 	// Resolved above (not left at the parseXEnv zero-sentinel) so this log
 	// line — and everything downstream — reflects what's actually in
 	// effect, not "0" for anything the deployer left unset.
@@ -450,6 +455,7 @@ func main() {
 		"improvementThreshold", rebalanceImprovementThreshold,
 		"decisionStoreTTL", rebalanceDecisionStoreTTL,
 		"moveActionTimeout", rebalanceMoveActionTimeout,
+		"moveRateLimit", rebalanceMoveRateLimit,
 	)
 
 	// decisionStore is shared between the PlacementServer (reads it in
@@ -493,6 +499,7 @@ func main() {
 		rebalanceImprovementThreshold,
 		decisionStore,
 		rebalanceMoveActionTimeout,
+		rebalanceMoveRateLimit,
 	)
 	// eaoGVK above is the List kind (used for List() calls); Watches()/
 	// RESTMapper need the singular item kind, derived here rather than

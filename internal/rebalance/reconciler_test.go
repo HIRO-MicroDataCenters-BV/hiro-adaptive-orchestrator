@@ -21,9 +21,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"golang.org/x/time/rate"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -106,7 +108,7 @@ func newTestReconcilerWithAgent(t *testing.T, agentURL string, objs ...client.Ob
 	decisionStore := placementserver.NewDecisionStore(0)
 
 	return NewReconciler(c, writer, evaluator, testProfileIndexField, 30*time.Second,
-		contextBuilder, decisionClient, 200*time.Millisecond, 0, decisionStore, 0), c
+		contextBuilder, decisionClient, 200*time.Millisecond, 0, decisionStore, 0, 0), c
 }
 
 func getProfile(t *testing.T, c client.Client, name string) *orchestrationv1alpha1.OrchestrationProfile {
@@ -412,6 +414,49 @@ func TestReconciler_MoveAboveThresholdReachesEnacting(t *testing.T) {
 	}
 	if rs.RecentDecisions[0].Action != orchestrationv1alpha1.RebalanceActionMove {
 		t.Errorf("recentDecisions[0].Action = %q, want Move", rs.RecentDecisions[0].Action)
+	}
+}
+
+// TestReconciler_MoveRateLimitedFailsCleanly covers Story 31's cluster-wide
+// rate limit: an accepted, above-threshold Move still reaches Decided, but
+// with MoveRateLimiter exhausted (burst 0 — any Wait fails immediately, no
+// timing dependency) it must not proceed to Enacting. It should fail
+// cleanly back to Watching with a rate-limit reason, the same way a
+// below-threshold or malformed Move fails without ever touching the
+// enactor.
+func TestReconciler_MoveRateLimitedFailsCleanly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+			RequestID:   "test",
+			Action:      orchestrationv1alpha1.RebalanceActionMove,
+			PodName:     "app-a-1",
+			TargetNode:  "node-b",
+			Improvement: 50, // well above DefaultImprovementThreshold (20)
+			Reason:      "better spread",
+		})
+	}))
+	defer server.Close()
+
+	profile := testProfileWithConditions(TriggerScheduled)
+	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile)
+	r.MoveRateLimiter = rate.NewLimiter(rate.Limit(0), 0) // burst 0: every Wait fails instantly
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if rs.State != StateWatching {
+		t.Fatalf("state = %q, want Watching — a rate-limited Move must still resolve cleanly", rs.State)
+	}
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
+		t.Fatalf("recentDecisions = %+v, want one Failed-outcome entry", rs.RecentDecisions)
+	}
+	if !strings.Contains(rs.RecentDecisions[0].Reason, "rate limit") {
+		t.Errorf("reason = %q, want it to mention the rate limit", rs.RecentDecisions[0].Reason)
 	}
 }
 

@@ -141,6 +141,27 @@ func dispatchMove(
 		return
 	}
 
+	// Cluster-wide throttle: an accepted Move sits in Decided — visible in
+	// status, not yet disruptive — until a rate-limit token is available.
+	// This is a single limiter shared by every profile (see MoveRateLimiter's
+	// doc comment), so it bounds the fleet's total eviction rate regardless
+	// of how many individually-cooled-down profiles want to act at once.
+	rateWaitTimeout := r.MoveRateWaitTimeout
+	if rateWaitTimeout <= 0 {
+		rateWaitTimeout = DefaultMoveRateWaitTimeout
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, rateWaitTimeout)
+	err = r.MoveRateLimiter.Wait(waitCtx)
+	cancel()
+	if err != nil {
+		reason := fmt.Sprintf("cluster-wide move rate limit: %v", err)
+		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, reason,
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, rate limit) failed", "profile", profile.Name)
+		}
+		return
+	}
+
 	if _, err := r.Writer.Transition(ctx, key, StateEnacting,
 		fmt.Sprintf("enacting move of %s to %s", resp.PodName, resp.TargetNode),
 		TransitionOptions{Action: resp.Action}); err != nil {

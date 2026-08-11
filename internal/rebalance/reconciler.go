@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -54,6 +55,18 @@ const DefaultDecisionTimeout = 5 * time.Second
 // for now — per-trigger-reason thresholds are a possible future refinement,
 // not implemented here.
 const DefaultImprovementThreshold = 20.0
+
+// DefaultMoveRateLimit is the default cluster-wide cap on how many Moves
+// (across every profile, not per-profile — that's cooldown's job) may reach
+// Enacting per minute. Bounds the fleet's total eviction rate regardless of
+// how many individually-cooled-down profiles decide to act at once.
+const DefaultMoveRateLimit = 5
+
+// DefaultMoveRateWaitTimeout bounds how long dispatchMove will block waiting
+// for a rate-limit token before giving up and failing the Move — long enough
+// to guarantee multiple refill opportunities at DefaultMoveRateLimit, short
+// enough that a Move doesn't hang indefinitely if the budget is starved.
+const DefaultMoveRateWaitTimeout = 60 * time.Second
 
 // Never Ever delete this comments as they are used by kubebuilder to generate RBAC permissions for the controller.
 // If you need to change the permissions,
@@ -114,12 +127,27 @@ type Reconciler struct {
 	// dispatchDecision's Move enactor writes to it before eviction so the
 	// scheduler can honor the decision when the replacement pod is scored.
 	DecisionStore *placementserver.DecisionStore
+
+	// MoveRateLimiter caps the cluster-wide rate of Decided -> Enacting
+	// transitions for Move (see dispatchMove) — a single shared limiter
+	// across every profile, since this bounds the fleet's total eviction
+	// rate, not any one workload's own pace (that's cooldown). Constructed
+	// by NewReconciler; RetryPendingSchedule is not gated by it (cheap,
+	// deletes an already-unscheduled pod, no running workload disrupted).
+	MoveRateLimiter *rate.Limiter
+
+	// MoveRateWaitTimeout bounds how long dispatchMove blocks waiting on
+	// MoveRateLimiter before failing the Move. <= 0 uses
+	// DefaultMoveRateWaitTimeout. A settable field (not wired to an env var)
+	// so tests can shrink it, same as MoveActionTimeout.
+	MoveRateWaitTimeout time.Duration
 }
 
 // NewReconciler creates a Reconciler. interval <= 0 uses
 // DefaultDetectionInterval; decisionTimeout <= 0 uses DefaultDecisionTimeout;
 // improvementThreshold <= 0 uses DefaultImprovementThreshold; moveActionTimeout
-// <= 0 uses DefaultMoveActionTimeout.
+// <= 0 uses DefaultMoveActionTimeout; moveRateLimit <= 0 uses
+// DefaultMoveRateLimit.
 func NewReconciler(
 	c client.Client,
 	writer *StateWriter,
@@ -132,6 +160,7 @@ func NewReconciler(
 	improvementThreshold float64,
 	decisionStore *placementserver.DecisionStore,
 	moveActionTimeout time.Duration,
+	moveRateLimit int,
 ) *Reconciler {
 	if interval <= 0 {
 		interval = DefaultDetectionInterval
@@ -145,6 +174,13 @@ func NewReconciler(
 	if moveActionTimeout <= 0 {
 		moveActionTimeout = DefaultMoveActionTimeout
 	}
+	if moveRateLimit <= 0 {
+		moveRateLimit = DefaultMoveRateLimit
+	}
+	// Burst equals the per-minute limit itself: a quiet fleet can absorb a
+	// full minute's budget worth of Moves immediately, then throttles to a
+	// steady trickle (one token every 60/moveRateLimit seconds) after that.
+	moveRateLimiter := rate.NewLimiter(rate.Limit(float64(moveRateLimit)/60.0), moveRateLimit)
 	return &Reconciler{
 		Client:               c,
 		Writer:               writer,
@@ -156,6 +192,8 @@ func NewReconciler(
 		DecisionTimeout:      decisionTimeout,
 		ImprovementThreshold: improvementThreshold,
 		DecisionStore:        decisionStore,
+		MoveRateLimiter:      moveRateLimiter,
+		MoveRateWaitTimeout:  DefaultMoveRateWaitTimeout,
 		MoveActionTimeout:    moveActionTimeout,
 	}
 }

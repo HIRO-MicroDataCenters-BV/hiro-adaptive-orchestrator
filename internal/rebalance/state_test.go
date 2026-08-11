@@ -39,7 +39,7 @@ func TestIsValidTransition(t *testing.T) {
 		{"Evaluating to Watching", StateEvaluating, StateWatching, true},
 		{"Evaluating to Enacting rejected", StateEvaluating, StateEnacting, false},
 		{"Decided to Enacting", StateDecided, StateEnacting, true},
-		{"Decided to Watching rejected", StateDecided, StateWatching, false},
+		{"Decided to Watching (rate-limit wait failure)", StateDecided, StateWatching, true},
 		{"Enacting to Watching", StateEnacting, StateWatching, true},
 		{"Enacting to Triggered rejected", StateEnacting, StateTriggered, false},
 	}
