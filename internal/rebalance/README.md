@@ -44,6 +44,7 @@ graph TB
 - [Decision — how `Evaluating` calls the AI](#decision--how-evaluating-calls-the-ai)
 - [Dispatch — acting on the AI's decision](#dispatch--acting-on-the-ais-decision)
   - [The decision store — how `Move` actually lands a pod on a specific node](#the-decision-store--how-move-actually-lands-a-pod-on-a-specific-node)
+  - [Cluster-wide Move rate limit](#cluster-wide-move-rate-limit)
 - [Node pressure (CPU/Memory)](#node-pressure-cpumemory)
 - [`StateWriter` — the single-writer rule](#statewriter--the-single-writer-rule)
   - [Why the reader must be uncached](#why-the-reader-must-be-uncached)
@@ -71,6 +72,7 @@ stateDiagram-v2
     Evaluating --> Watching: NoOp / Rejected / Failed
     Evaluating --> Decided: Move accepted
     Decided --> Enacting
+    Decided --> Watching: Failed (cluster-wide rate limit)
     Enacting --> Watching: Enacted / Deferred / Failed
 ```
 
@@ -82,9 +84,12 @@ The transition table lives in [`state.go`](state.go) (`validTransitions`,
 `IsValidTransition`). From `Watching` (or the unset initial state — the two are equivalent),
 the only legal move is into `Triggered` — starting a fresh cycle. Every other edge in the
 diagram above is the only path the state machine allows; anything else is rejected by the
-writer (see below). `Evaluating` and `Enacting` are the only states that can transition
+writer (see below). `Evaluating`, `Decided`, and `Enacting` are the states that can transition
 straight back to `Watching` — every such write must carry an outcome (`TransitionOptions.Outcome`),
-enforced by `StateWriter.Transition` itself.
+enforced by `StateWriter.Transition` itself. `Decided → Watching` is the newest of these edges
+(Story 31's cluster-wide Move rate limit — see
+[below](#cluster-wide-move-rate-limit)): an accepted Move can fail before ever reaching
+`Enacting` if the fleet-wide throughput budget isn't available in time.
 
 ## Package layout
 
@@ -329,7 +334,10 @@ flowchart TD
     Reg -- NoOp --> N1(["Watching + NoOp"])
     Reg -- Move --> G{"Improvement >= threshold<br/>AND PodName / TargetNode set?"}
     G -- no --> Rej(["Watching + Rejected / Failed"])
-    G -- yes --> D(["Decided"]) --> Enacting(["Enacting"]) --> ME["moveEnactor"]
+    G -- yes --> D(["Decided"])
+    D --> RL{"MoveRateLimiter.Wait<br/>(cluster-wide, up to<br/>MoveRateWaitTimeout)"}
+    RL -- "timed out" --> RLF(["Watching + Failed<br/>(no cooldown applied)"])
+    RL -- "token granted" --> Enacting(["Enacting"]) --> ME["moveEnactor"]
     ME --> Out{"outcome"}
     Out -- Enacted --> W1(["Watching + Enacted"])
     Out -- Deferred --> W2(["Watching + Deferred"])
@@ -351,7 +359,8 @@ treated as a processing error — `Watching` + outcome `Failed` — rather than 
   (`Reconciler.ImprovementThreshold`, default `DefaultImprovementThreshold` — a single global
   value for now, not per-trigger-reason). Below threshold, or missing `PodName`/`TargetNode`,
   exits straight to `Watching` (`Rejected` / `Failed`) without ever reaching `Decided`. An
-  accepted, well-formed `Move` transitions `Decided → Enacting` and calls `moveEnactor`
+  accepted, well-formed `Move` transitions to `Decided`, then must clear the cluster-wide rate
+  limit (see [below](#cluster-wide-move-rate-limit)) before `Enacting` and calling `moveEnactor`
   ([`move_enactor.go`](move_enactor.go)):
   1. Records a [`DecisionStore`](decision_store.go) entry — see below — *before* evicting.
   2. Evicts the pod via the PDB-aware Eviction API (`c.SubResource("eviction").Create`, not a
@@ -414,6 +423,68 @@ AI can recommend the next one. `recentDecisions` accumulates the history across 
 in the schema currently supports batching several decisions into one response, and the state
 machine (one active decision per profile at a time) isn't shaped for concurrent per-pod cycles
 either.
+
+### Cluster-wide Move rate limit
+
+```mermaid
+sequenceDiagram
+    participant A as Profile A (Decided)
+    participant B as Profile B (Decided)
+    participant RL as MoveRateLimiter<br/>(shared, 5/min, burst 5)
+
+    A->>RL: Wait(ctx)
+    RL-->>A: token granted immediately (burst available)
+    A->>A: Enacting -> moveEnactor
+
+    B->>RL: Wait(ctx)
+    Note over RL: burst exhausted by other profiles
+    RL-->>B: token granted ~12s later
+    B->>B: Enacting -> moveEnactor
+```
+
+Per-profile `cooldownSeconds` answers "how often can *this* workload act?" — it has no idea
+what any other profile is doing. Nothing stops many independently-cooled-down profiles from
+all landing an accepted `Move` in the same window (a shared `EnergyAwareOrchestration` slot
+opening, a node going `NotReady` and affecting everything scheduled on it) and all reaching
+`Enacting` — evicting real running pods — at once. `MoveRateLimiter` (in `reconciler.go`) is
+the backstop for that: a single `golang.org/x/time/rate.Limiter`, shared across every profile,
+gating only `dispatchMove`'s `Decided → Enacting` step. `RetryPendingSchedule` is **not**
+gated — it deletes an already-unscheduled pod, not a running one, so it doesn't need
+fleet-wide throttling the way an eviction does.
+
+Token bucket, not a fixed-window counter: burst equals the per-minute limit itself
+(`DefaultMoveRateLimit`, 5), so a quiet fleet can absorb a full minute's budget immediately,
+then throttles to a steady trickle (one token every `60/limit` seconds) after that.
+
+**The wait blocks synchronously, inside the same `dispatchMove` call, on purpose.** The
+alternative — give up immediately, requeue, and let some later `Reconcile` resume from
+`Decided` — was considered and rejected: that later call would have nothing but a free-text
+`details` string to reconstruct the pending `podName`/`targetNode`/`reason` from (no
+structured pending-action fields exist on `RebalancingStatus`), and would need `Reconcile`'s
+in-flight guard taught a new "Decided sometimes means resume, not skip" special case. Blocking
+avoids all of that: the goroutine that already has the AI's response in hand is the one that
+eventually proceeds, so nothing needs to be reconstructed. `MoveRateWaitTimeout` (default 5
+minutes — deliberately generous, not a "fail fast" bound) exists so this is a rare safety
+valve for a genuinely starved budget, not the normal path: since the bucket always refills
+eventually, a long wait almost always succeeds within the original call, meaning the AI is
+consulted once per Move, not once per retry.
+
+Blocking a reconcile worker for minutes has a real cost, though: with controller-runtime's
+default `MaxConcurrentReconciles` (1), one profile waiting on a token would stall *every other
+profile's* reconciliation too, even ones with nothing to do with Move. `SetupWithManager`
+raises this to `DefaultMaxConcurrentReconciles` (10) specifically to absorb that — sized
+comfortably above the rate limiter's own burst (5) rather than scaled to fleet size, since the
+number of profiles that can simultaneously be blocked in `Wait` is bounded by the limiter's
+own throughput, not by how many profiles exist.
+
+**A rate-limited Move deliberately does not apply the profile's cooldown**, unlike every other
+`Failed` exit in `dispatch.go`. The profile didn't lose on its merits — it lost a scheduling
+race against other profiles' Moves. `cooldownSeconds` can be minutes; the limiter's own budget
+refills in seconds, so applying the normal cooldown would leave a still-valid Move idle long
+after capacity actually freed up. This is safe specifically because `Wait()` itself already
+blocks (up to `MoveRateWaitTimeout`) before failing — that blocking *is* the pacing, so
+skipping cooldown here doesn't risk the sub-second self-triggering loop a missing cooldown
+caused elsewhere (see `hasPendingPod`'s doc comment in `triggers.go` for that story).
 
 ## Node pressure (CPU/Memory)
 
@@ -565,6 +636,7 @@ rebalanceNodePressureThreshold := parseFloatEnv("REBALANCE_NODE_PRESSURE_THRESHO
 rebalanceImprovementThreshold := parseFloatEnv("REBALANCE_IMPROVEMENT_THRESHOLD") // -> rebalance.DefaultImprovementThreshold
 rebalanceDecisionStoreTTL := parseDurationEnv("REBALANCE_DECISION_STORE_TTL")     // -> placementserver.DefaultDecisionStoreTTL
 rebalanceMoveActionTimeout := parseDurationEnv("REBALANCE_MOVE_ACTION_TIMEOUT")   // -> rebalance.DefaultMoveActionTimeout
+rebalanceMoveRateLimit := parseIntEnv("REBALANCE_MOVE_RATE_LIMIT")                // -> rebalance.DefaultMoveRateLimit
 
 rebalanceWriter := rebalance.NewStateWriter(
     mgr.GetClient(), mgr.GetAPIReader(), mgr.GetEventRecorderFor("rebalance-engine"),
@@ -590,6 +662,7 @@ rebalanceDetector := rebalance.NewReconciler(
     controller.ProfileByAppRefIndex, rebalanceDetectionInterval,
     contextBuilder, decisionClient, rebalanceDecisionTimeout,
     rebalanceImprovementThreshold, decisionStore, rebalanceMoveActionTimeout,
+    rebalanceMoveRateLimit,
 )
 rebalanceDetector.SetupWithManager(mgr, eaoItemGVK)
 
@@ -612,6 +685,7 @@ flowchart LR
         V5["REBALANCE_IMPROVEMENT_THRESHOLD"]
         V6["REBALANCE_DECISION_STORE_TTL"]
         V7["REBALANCE_MOVE_ACTION_TIMEOUT"]
+        V8["REBALANCE_MOVE_RATE_LIMIT"]
     end
 
     Resolve{"main.go: resolve unset/invalid<br/>before constructing anything —<br/>bad value fails the operator at startup"}
@@ -623,6 +697,7 @@ flowchart LR
     V5 --> Resolve
     V6 --> Resolve
     V7 --> Resolve
+    V8 --> Resolve
 
     Resolve -->|"unset → DefaultMaxRecentDecisions (10)"| SW["StateWriter<br/>recentDecisions length"]
     Resolve -->|"unset → DefaultDetectionInterval (30s)"| Recon1["Reconciler<br/>periodic detection tick"]
@@ -631,6 +706,7 @@ flowchart LR
     Resolve -->|"unset → DefaultImprovementThreshold (20)"| Disp["dispatchMove<br/>guardrail"]
     Resolve -->|"unset → DefaultDecisionStoreTTL (60s)"| DS["DecisionStore<br/>Move-bias TTL"]
     Resolve -->|"unset → DefaultMoveActionTimeout (60s)"| ME["Move enactor<br/>replacement-pod wait"]
+    Resolve -->|"unset → DefaultMoveRateLimit (5/min)"| RL["MoveRateLimiter<br/>cluster-wide Moves/minute"]
 ```
 
 | Environment variable | Overrides | Default |
@@ -642,6 +718,7 @@ flowchart LR
 | `REBALANCE_IMPROVEMENT_THRESHOLD` | `dispatchMove`'s guardrail — minimum `Improvement` to enact a `Move` | `DefaultImprovementThreshold` (20) |
 | `REBALANCE_DECISION_STORE_TTL` | How long a `Move` decision biases `PlacementServer.score` (Go duration) | `placementserver.DefaultDecisionStoreTTL` (60s) |
 | `REBALANCE_MOVE_ACTION_TIMEOUT` | Max wait for a `Move`'s replacement pod to be scheduled (Go duration) | `DefaultMoveActionTimeout` (60s) |
+| `REBALANCE_MOVE_RATE_LIMIT` | Cluster-wide cap on Moves/minute across every profile (see [Cluster-wide Move rate limit](#cluster-wide-move-rate-limit)) | `DefaultMoveRateLimit` (5) |
 
 Each default lives once, as a constant next to the type it configures — `main.go` doesn't
 duplicate the numbers, it just resolves "unset" to that constant before constructing anything,
@@ -649,6 +726,13 @@ so the startup log always shows the value actually in effect rather than a misle
 unparseable value (bad duration/float/int) fails the operator at startup rather than silently
 falling back, since a typo here should be caught at deploy time, not discovered later as
 unexplained behavior.
+
+Two related settings are deliberately **not** environment-configurable, unlike everything
+above: `MoveRateWaitTimeout` (default 5 minutes — a settable `Reconciler` field for tests, same
+as `MoveActionTimeout`, but not wired to an env var) and `DefaultMaxConcurrentReconciles` (10,
+a plain constant used directly in `SetupWithManager`). Both are operational tuning for the
+rate limiter's own blocking behavior rather than per-cluster business logic — see
+[Cluster-wide Move rate limit](#cluster-wide-move-rate-limit).
 
 - `controller.ProfileByAppRefIndex` — the same field index the `OrchestrationProfile`
   controller already registers (`internal/controller/op_index.go`), reused rather than

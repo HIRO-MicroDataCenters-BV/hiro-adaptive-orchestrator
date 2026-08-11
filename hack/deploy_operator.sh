@@ -64,6 +64,7 @@
 #   REBALANCE_IMPROVEMENT_THRESHOLD     min Move improvement score to enact  (default: 20)
 #   REBALANCE_DECISION_STORE_TTL        how long a Move decision biases scoring, Go duration (default: 60s)
 #   REBALANCE_MOVE_ACTION_TIMEOUT       max wait for a Move's replacement pod, Go duration (default: 60s)
+#   REBALANCE_MOVE_RATE_LIMIT           cluster-wide Moves/minute across every profile (default: 5)
 #
 # Usage (standalone):
 #   export GITHUB_PAT_TOKEN=<token>
