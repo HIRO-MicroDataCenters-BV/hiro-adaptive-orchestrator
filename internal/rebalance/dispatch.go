@@ -154,9 +154,23 @@ func dispatchMove(
 	err = r.MoveRateLimiter.Wait(waitCtx)
 	cancel()
 	if err != nil {
+		// Deliberately NOT applying cooldown here, unlike every other Failed
+		// exit in this file: the profile didn't lose on its merits, it lost a
+		// scheduling race against other profiles' Moves. cooldownSeconds can
+		// be minutes; the limiter's own budget refills in seconds, so the
+		// normal cooldown would leave a still-valid Move idle long after
+		// capacity actually freed up. Safe to skip: the very next reconcile
+		// this status write triggers calls Wait() again, and Wait() itself
+		// blocks (up to MoveRateWaitTimeout) before failing — that blocking
+		// IS the pacing, so there's no risk of the sub-second self-triggering
+		// loop a missing cooldown caused elsewhere (see hasPendingPod's doc
+		// comment in triggers.go). MoveRateWaitTimeout defaults generously
+		// (see its doc comment) specifically so this path is rarely taken at
+		// all — most waits succeed within the original call, without ever
+		// needing a second AI consultation.
 		reason := fmt.Sprintf("cluster-wide move rate limit: %v", err)
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed}); tErr != nil {
 			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, rate limit) failed", "profile", profile.Name)
 		}
 		return

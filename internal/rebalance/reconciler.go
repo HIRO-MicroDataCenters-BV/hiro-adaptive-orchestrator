@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -63,10 +64,28 @@ const DefaultImprovementThreshold = 20.0
 const DefaultMoveRateLimit = 5
 
 // DefaultMoveRateWaitTimeout bounds how long dispatchMove will block waiting
-// for a rate-limit token before giving up and failing the Move — long enough
-// to guarantee multiple refill opportunities at DefaultMoveRateLimit, short
-// enough that a Move doesn't hang indefinitely if the budget is starved.
-const DefaultMoveRateWaitTimeout = 60 * time.Second
+// for a rate-limit token before giving up and failing the Move. Deliberately
+// generous (not a short "fail fast" bound): the limiter's bucket always
+// refills eventually, so a long wait almost always succeeds within this one
+// call — meaning the already-obtained AI decision gets used, instead of
+// being discarded and re-requested from the AI on a later reconcile. This
+// only exists as a safety valve for a genuinely starved/misconfigured
+// budget, not as the normal path. Pair with DefaultMaxConcurrentReconciles
+// below — a worker blocked in Wait for minutes must not stall every other
+// profile's reconciliation.
+const DefaultMoveRateWaitTimeout = 5 * time.Minute
+
+// DefaultMaxConcurrentReconciles is how many profiles' Reconcile calls this
+// controller runs in parallel (see SetupWithManager). Raised above
+// controller-runtime's default of 1 specifically because of dispatchMove's
+// rate-limit Wait (DefaultMoveRateWaitTimeout): with only one worker, a
+// single profile blocked for minutes waiting on a Move token would stall
+// reconciliation for every other profile too, even ones with nothing to do
+// with Move at all. Sized comfortably above DefaultMoveRateLimit's burst (5)
+// rather than scaled to fleet size — the number of profiles that can
+// simultaneously be blocked in Wait is bounded by the limiter's own
+// throughput, not by how many profiles exist.
+const DefaultMaxConcurrentReconciles = 10
 
 // Never Ever delete this comments as they are used by kubebuilder to generate RBAC permissions for the controller.
 // If you need to change the permissions,
@@ -434,7 +453,8 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, eaoGVK schema.GroupVersi
 	bldr := ctrl.NewControllerManagedBy(mgr).
 		For(&orchestrationv1alpha1.OrchestrationProfile{}).
 		Watches(&corev1.Pod{}, r.podMapper()).
-		Watches(&corev1.Node{}, r.nodeMapper())
+		Watches(&corev1.Node{}, r.nodeMapper()).
+		WithOptions(controller.Options{MaxConcurrentReconciles: DefaultMaxConcurrentReconciles})
 
 	if r.eaoInstalled(mgr, eaoGVK) {
 		eaoObj := &unstructured.Unstructured{}
