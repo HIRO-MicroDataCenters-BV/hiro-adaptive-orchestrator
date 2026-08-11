@@ -658,6 +658,8 @@ spec:
           value: 60s
         - name: REBALANCE_MOVE_ACTION_TIMEOUT
           value: 60s
+        - name: REBALANCE_MOVE_RATE_LIMIT
+          value: "5"
         - name: ENABLE_WEBHOOKS
           value: "false"
         - name: HIRO_SCHEDULER_NAME

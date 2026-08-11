@@ -61,6 +61,7 @@
 #   REBALANCE_IMPROVEMENT_THRESHOLD     min Move improvement score to enact  (default: 20)
 #   REBALANCE_DECISION_STORE_TTL        how long a Move decision biases scoring, Go duration (default: 60s)
 #   REBALANCE_MOVE_ACTION_TIMEOUT       max wait for a Move's replacement pod, Go duration (default: 60s)
+#   REBALANCE_MOVE_RATE_LIMIT           cluster-wide Moves/minute across every profile (default: 5)
 #
 # ─── Scheduler ───────────────────────────────────────────────────────────────
 #   SCHED_K8S_VERSION         k8s version to build for    (default: v1.35.0)
@@ -209,6 +210,7 @@ export REBALANCE_NODE_PRESSURE_THRESHOLD=${REBALANCE_NODE_PRESSURE_THRESHOLD:-0.
 export REBALANCE_IMPROVEMENT_THRESHOLD=${REBALANCE_IMPROVEMENT_THRESHOLD:-20}
 export REBALANCE_DECISION_STORE_TTL=${REBALANCE_DECISION_STORE_TTL:-60s}
 export REBALANCE_MOVE_ACTION_TIMEOUT=${REBALANCE_MOVE_ACTION_TIMEOUT:-60s}
+export REBALANCE_MOVE_RATE_LIMIT=${REBALANCE_MOVE_RATE_LIMIT:-5}
 
 # ---------------------------------------------------------------------------
 # Deploy options — consumed by this script only
@@ -308,6 +310,7 @@ print_config() {
   echo "    Improvement Threshold  : $REBALANCE_IMPROVEMENT_THRESHOLD"
   echo "    Decision Store TTL     : $REBALANCE_DECISION_STORE_TTL"
   echo "    Move Action Timeout    : $REBALANCE_MOVE_ACTION_TIMEOUT"
+  echo "    Move Rate Limit        : $REBALANCE_MOVE_RATE_LIMIT"
   echo ""
   echo "  ── Scheduler ─────────────────────────────────────────────"
   echo "    K8s Target Version     : $SCHED_K8S_VERSION"
