@@ -787,6 +787,22 @@ Every parameter can be set as an environment variable before calling any deploy 
 | `EAO_VERSION` | `v1` | API version |
 | `EAO_KIND` | `EnergyAwareOrchestration` | Kind name |
 
+#### Operator — Rebalance Engine
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REBALANCE_MAX_RECENT_DECISIONS` | `10` | Decision-history length kept per profile |
+| `REBALANCE_DETECTION_INTERVAL` | `30s` | Periodic detection tick (Go duration) |
+| `REBALANCE_DECISION_TIMEOUT` | `5s` | AI-consultation timeout (Go duration) |
+| `REBALANCE_NODE_PRESSURE_THRESHOLD` | `0.90` | CPU/Memory pressure fraction that triggers `CPUThreshold`/`MemoryThreshold` |
+| `REBALANCE_IMPROVEMENT_THRESHOLD` | `20` | Minimum `Improvement` score a `Move` recommendation must clear to be enacted |
+| `REBALANCE_DECISION_STORE_TTL` | `60s` | How long a `Move` decision biases `PlacementServer` scoring (Go duration) |
+| `REBALANCE_MOVE_ACTION_TIMEOUT` | `60s` | Max wait for a `Move`'s replacement pod to be scheduled (Go duration) |
+| `REBALANCE_MOVE_RATE_LIMIT` | `5` | Cluster-wide cap on `Move`s/minute across every profile, independent of any single profile's own cooldown |
+
+See [`internal/rebalance/README.md`](internal/rebalance/README.md#configuration) for what each
+of these actually controls and why.
+
 #### Scheduler
 
 | Variable | Default | Description |
