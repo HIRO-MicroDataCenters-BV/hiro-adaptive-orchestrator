@@ -67,7 +67,8 @@ graph LR
 
 ---
 
-## Architecture
+<a id="architecture"></a>
+## 🏗️ <u>Architecture</u>
 
 ![Architecture](./K8S_adaptive_orchestrator_new-Integrate-EnergyAwareOrchestrator-1.gif)
 
@@ -453,7 +454,8 @@ Each sub-script also works **standalone** — it carries its own `:-` defaults f
 
 ---
 
-## Features
+<a id="features"></a>
+## ✨ <u>Features</u>
 
 ```mermaid
 graph TB
@@ -480,7 +482,8 @@ graph TB
 
 ---
 
-## Prerequisites
+<a id="prerequisites"></a>
+## 📋 <u>Prerequisites</u>
 
 ```mermaid
 flowchart LR
@@ -510,7 +513,8 @@ An **external Decision Agent** reachable at a URL you control is required for th
 
 ---
 
-## Quick Start
+<a id="quick-start"></a>
+## 🚀 <u>Quick Start</u>
 
 ```mermaid
 flowchart TD
@@ -548,7 +552,8 @@ NAMESPACE=my-ns NAME_PREFIX=my-org- DEPLOY_EXTENDER=true hack/deploy_full_stack.
 
 ---
 
-## Deployment
+<a id="deployment"></a>
+## 📦 <u>Deployment</u>
 
 ```mermaid
 flowchart LR
@@ -728,7 +733,8 @@ kubectl apply -f dist/install.yaml
 
 ---
 
-## Configuration Reference
+<a id="configuration-reference"></a>
+## ⚙️ <u>Configuration Reference</u>
 
 ```mermaid
 flowchart LR
@@ -941,7 +947,8 @@ kubectl describe orchestrationprofile <name>
 
 ---
 
-## Scheduler Integration Approaches
+<a id="scheduler-integration-approaches"></a>
+## 🔀 <u>Scheduler Integration Approaches</u>
 
 ```mermaid
 flowchart TD
@@ -1079,7 +1086,8 @@ See [config/extender/scheduler-config.yaml](config/extender/scheduler-config.yam
 
 ---
 
-## Mock Decision Agent
+<a id="mock-decision-agent"></a>
+## 🤖 <u>Mock Decision Agent</u>
 
 ```mermaid
 sequenceDiagram
@@ -1126,7 +1134,8 @@ USE_MOCK_AGENT=false DECISION_AGENT_URL=http://ai.example.com:8080 hack/deploy_f
 
 ---
 
-## Testing
+<a id="testing"></a>
+## 🧪 <u>Testing</u>
 
 ```mermaid
 flowchart LR
@@ -1160,7 +1169,8 @@ make lint-fix    # auto-fix where possible
 
 ---
 
-## Development Workflow
+<a id="development-workflow"></a>
+## 🛠️ <u>Development Workflow</u>
 
 ```
 Edit *_types.go or markers
@@ -1202,7 +1212,8 @@ flowchart LR
 
 ---
 
-## Project Structure
+<a id="project-structure"></a>
+## 📁 <u>Project Structure</u>
 
 ```
 cmd/
@@ -1305,7 +1316,8 @@ test/e2e/                              # End-to-end tests (Kind)
 
 ---
 
-## Upgrading Go or Kubernetes Version
+<a id="upgrading-go-or-kubernetes-version"></a>
+## ⬆️ <u>Upgrading Go or Kubernetes Version</u>
 
 ```mermaid
 flowchart LR
@@ -1358,7 +1370,8 @@ The `pin_k8s_version.sh` script uses `go mod edit` to surgically update only the
 
 ---
 
-## Project Initialization
+<a id="project-initialization"></a>
+## 🌱 <u>Project Initialization</u>
 
 Scaffolded using [Kubebuilder](https://book.kubebuilder.io/):
 
@@ -1379,7 +1392,8 @@ kubebuilder edit --plugins=helm/v2-alpha
 
 ---
 
-## Contributing
+<a id="contributing"></a>
+## 🤝 <u>Contributing</u>
 
 ```mermaid
 flowchart LR
@@ -1399,6 +1413,7 @@ For detailed development guidelines, Kubebuilder CLI cheat sheet, API design con
 
 ---
 
-## License
+<a id="license"></a>
+## 📄 <u>License</u>
 
 Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).

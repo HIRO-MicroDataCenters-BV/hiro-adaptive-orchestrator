@@ -56,7 +56,8 @@ graph TB
   - [Deployment](#deployment)
 - [Testing](#testing)
 
-## The decision lifecycle
+<a id="the-decision-lifecycle"></a>
+## 🔄 <u>The decision lifecycle</u>
 
 Every rebalance evaluation for a workload is an instance of a state machine, tracked in
 `OrchestrationProfile.status.rebalancingStatus`. `state` only ever holds one of five active
@@ -91,7 +92,8 @@ enforced by `StateWriter.Transition` itself. `Decided → Watching` is the newes
 [below](#cluster-wide-move-rate-limit)): an accepted Move can fail before ever reaching
 `Enacting` if the fleet-wide throughput budget isn't available in time.
 
-## Package layout
+<a id="package-layout"></a>
+## 📁 <u>Package layout</u>
 
 ```mermaid
 graph LR
@@ -124,7 +126,8 @@ shared between `moveEnactor` (writes) and `PlacementServer.score` (reads) — se
 
 Every `.go` file above has a matching `_test.go`.
 
-## Detection — how a workload becomes `Triggered`
+<a id="detection--how-a-workload-becomes-triggered"></a>
+## 🔍 <u>Detection — how a workload becomes `Triggered`</u>
 
 Detection is hybrid, per the original design: **event-driven** for fast signals, **periodic**
 for slow ones. Both paths call the *exact same* `TriggerEvaluator.Evaluate()` — the watches
@@ -170,7 +173,8 @@ before adding a watch for it — if it's absent, the operator logs a note and co
 without that watch rather than failing to start. Without the CRD, `EnergyThreshold` is still
 checked, just only on the periodic tick instead of instantly.
 
-## Trigger conditions
+<a id="trigger-conditions"></a>
+## ⚡ <u>Trigger conditions</u>
 
 ```mermaid
 flowchart TD
@@ -269,7 +273,8 @@ One deliberate scope pull-forward: this terminal transition sets `cooldownUntil`
 for the rest of the engine isn't built yet — without it, a delete that doesn't actually fix
 the problem would retry every `DetectionInterval` in a tight loop.
 
-## Decision — how `Evaluating` calls the AI
+<a id="decision--how-evaluating-calls-the-ai"></a>
+## 🧠 <u>Decision — how `Evaluating` calls the AI</u>
 
 ```mermaid
 sequenceDiagram
@@ -325,7 +330,8 @@ initial-placement scoring, not a second HTTP path:
    is handed to `Reconciler.dispatchDecision` (in `dispatch.go`) — see
    [Dispatch — acting on the AI's decision](#dispatch--acting-on-the-ais-decision) below.
 
-## Dispatch — acting on the AI's decision
+<a id="dispatch--acting-on-the-ais-decision"></a>
+## 📨 <u>Dispatch — acting on the AI's decision</u>
 
 ```mermaid
 flowchart TD
@@ -486,7 +492,8 @@ blocks (up to `MoveRateWaitTimeout`) before failing — that blocking *is* the p
 skipping cooldown here doesn't risk the sub-second self-triggering loop a missing cooldown
 caused elsewhere (see `hasPendingPod`'s doc comment in `triggers.go` for that story).
 
-## Node pressure (CPU/Memory)
+<a id="node-pressure-cpumemory"></a>
+## 📊 <u>Node pressure (CPU/Memory)</u>
 
 ```mermaid
 flowchart LR
@@ -517,7 +524,8 @@ return an error, which `TriggerEvaluator` catches and treats as "not currently e
 
 Default threshold: 90% (`DefaultNodePressureThreshold`).
 
-## `StateWriter` — the single-writer rule
+<a id="statewriter--the-single-writer-rule"></a>
+## ✍️ <u>`StateWriter` — the single-writer rule</u>
 
 ```mermaid
 flowchart LR
@@ -602,7 +610,8 @@ a reconcile via the primary watch. Closing this fully would need a stuck-state w
 anything stuck past some max cycle duration) — not built, noted here so it isn't rediscovered
 from scratch.
 
-## Wiring into the system
+<a id="wiring-into-the-system"></a>
+## 🔌 <u>Wiring into the system</u>
 
 ```mermaid
 flowchart TD
@@ -812,7 +821,8 @@ flowchart LR
   deploy time so it's clear the rebalance engine isn't a separate opt-in piece — it starts
   the moment the operator pod is `Ready`.
 
-## Testing
+<a id="testing"></a>
+## 🧪 <u>Testing</u>
 
 ```mermaid
 flowchart TB
