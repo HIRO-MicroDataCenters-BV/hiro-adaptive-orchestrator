@@ -23,14 +23,24 @@ graph TB
     EAO[("EnergyAwareOrchestration<br/>CRD (optional)")]
     SCHED["kube-scheduler /<br/>HIROScore plugin"]
 
-    RE <--> K8S
+    RE <-- "1. watch Pods/Nodes/profile,<br/>write every state transition" --> K8S
     OC <--> K8S
     PS <--> K8S
-    RE -- "AI consultation" --> AI
-    PS -- "placement scoring" --> AI
-    RE -. "reads (optional)" .-> EAO
-    SCHED -- "PreScore" --> PS
+    RE -- "3. AI consultation" --> AI
+    PS -- "5. placement scoring" --> AI
+    RE -. "2. reads (optional)" .-> EAO
+    SCHED -- "4. PreScore" --> PS
 ```
+
+Numbers above trace one full cycle (the `Move` case touches every numbered edge; `NoOp`/`Retry` stop after step 3):
+
+1. **Rebalance Engine ↔ Kubernetes API** — the engine watches Pods/Nodes/the `OrchestrationProfile` to detect a trigger, then reuses the same connection for every `StateWriter` transition it writes (`Watching → Triggered → …`) and, for an accepted `Move`, the pod eviction call itself.
+2. **Rebalance Engine → EnergyAwareOrchestration** *(optional)* — if the profile declares an `EnergyThreshold` trigger, the engine also reads the EAO CRD's current status while evaluating trigger conditions.
+3. **Rebalance Engine → External AI Agent** — once `Triggered`, the engine calls the AI during `Evaluating` for a decision (skipped entirely for the mechanical `RetryPendingSchedule` bypass — see [Bypassing the AI for mechanical actions](#bypassing-the-ai-for-mechanical-actions)).
+4. **kube-scheduler → PlacementServer** — only reached for an accepted `Move`: evicting the pod in step 1 makes its controller create a replacement, and kube-scheduler calls the PlacementServer's `PreScore` extension point for it, same as any newly-created pod.
+5. **PlacementServer → External AI Agent** — the PlacementServer normally re-consults the same AI Agent to score the replacement — unless the `Move`'s `DecisionStore` entry (written in step 1, just before eviction) is still live, in which case that hit short-circuits this call and scores the target node directly instead.
+
+Not numbered because they're continuous background wiring rather than steps in a single cycle: **OC ↔ K8S** is the `OrchestrationProfile` controller's own independent reconcile loop (initial placement — a separate concern from rebalancing), and **PS ↔ K8S** is the PlacementServer reading live pod/node state to build whichever request (scoring or otherwise) it's currently handling.
 
 ## Table of Contents
 
