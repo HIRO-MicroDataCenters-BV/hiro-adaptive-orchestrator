@@ -98,6 +98,10 @@ profile_state() {
 MOCK_AGENT_BUMPED=false
 NGINX2_ORIGINAL_REPLICAS=""
 RETRY_PENDING_POD=""
+EAO_TOUCHED=false
+EAO_ORIG_ACTION=""
+EAO_ORIG_REASON=""
+EAO_ORIG_SUFFICIENT=""
 
 cleanup() {
   step "Cleanup"
@@ -111,9 +115,11 @@ cleanup() {
     run kubectl scale deployment "$APP" -n "$APP_NAMESPACE" --replicas="$NGINX2_ORIGINAL_REPLICAS"
   fi
 
-  echo "  Done. Note: $EAO is managed by the external Energy Aware Orchestrator"
-  echo "  (kopf-based) — any manual status patches this script made will be"
-  echo "  overwritten by its own reconciliation on its normal schedule."
+  if [ "$EAO_TOUCHED" = true ]; then
+    revert_eao_window
+  fi
+
+  echo "  Done."
 }
 trap cleanup EXIT INT TERM
 
@@ -160,12 +166,44 @@ clear_cooldown() {
     -p '{"status":{"rebalancingStatus":{"cooldownUntil":null}}}' >/dev/null
 }
 
+# $EAO is owned by the external, kopf-based Energy Aware Orchestrator — our
+# window patches below are a demo-only override. Its own reconcile would
+# eventually overwrite them, but on its own schedule (minutes), not ours. So
+# we capture its real pre-demo window state here, once, the first time we're
+# about to touch it — then cleanup() restores exactly that instead of
+# waiting the external controller out. Empty capture means the field was
+# genuinely unset (not just empty string), so revert_eao_window patches it
+# back with JSON null (merge-patch semantics: null removes the key) rather
+# than writing a literal empty string.
+capture_eao_original() {
+  [ "$EAO_TOUCHED" = true ] && return
+  EAO_ORIG_ACTION=$(kubectl get energyawareorchestration "$EAO" -n "$APP_NAMESPACE" \
+    -o jsonpath='{.status.decision.action}' 2>/dev/null)
+  EAO_ORIG_REASON=$(kubectl get energyawareorchestration "$EAO" -n "$APP_NAMESPACE" \
+    -o jsonpath='{.status.decision.reason}' 2>/dev/null)
+  EAO_ORIG_SUFFICIENT=$(kubectl get energyawareorchestration "$EAO" -n "$APP_NAMESPACE" \
+    -o jsonpath='{.status.energyMetrics.sufficient}' 2>/dev/null)
+  EAO_TOUCHED=true
+}
+
+revert_eao_window() {
+  echo "  Restoring $EAO's energy window status to its pre-demo values (not waiting on its own controller)"
+  local action_json reason_json sufficient_json
+  action_json=$([ -n "$EAO_ORIG_ACTION" ] && printf '"%s"' "$EAO_ORIG_ACTION" || echo null)
+  reason_json=$([ -n "$EAO_ORIG_REASON" ] && printf '"%s"' "$EAO_ORIG_REASON" || echo null)
+  sufficient_json=$([ -n "$EAO_ORIG_SUFFICIENT" ] && echo "$EAO_ORIG_SUFFICIENT" || echo null)
+  run kubectl patch energyawareorchestration "$EAO" -n "$APP_NAMESPACE" --type=merge --subresource=status \
+    -p "{\"status\":{\"decision\":{\"action\":${action_json},\"reason\":${reason_json}},\"energyMetrics\":{\"sufficient\":${sufficient_json}}}}" >/dev/null
+}
+
 close_energy_window() {
+  capture_eao_original
   run kubectl patch energyawareorchestration "$EAO" -n "$APP_NAMESPACE" --type=merge --subresource=status \
     -p '{"status":{"decision":{"action":"Waiting","reason":"demo: energy window closed"},"energyMetrics":{"sufficient":false}}}' >/dev/null
 }
 
 open_energy_window() {
+  capture_eao_original
   run kubectl patch energyawareorchestration "$EAO" -n "$APP_NAMESPACE" --type=merge --subresource=status \
     -p '{"status":{"decision":{"action":"DeployImmediately","reason":"demo: energy window open"},"energyMetrics":{"sufficient":true}}}' >/dev/null
 }
