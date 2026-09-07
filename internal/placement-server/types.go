@@ -138,6 +138,11 @@ type RebalanceDecisionResponse struct {
 	// recommends moving PodName to.
 	TargetNode string `json:"targetNode,omitempty"`
 
+	// TargetReplicas is populated when Action == AdjustReplicas — the
+	// absolute replica count the AI recommends (not a delta), same
+	// convention as TargetNode for Move.
+	TargetReplicas int32 `json:"targetReplicas,omitempty"`
+
 	// Improvement is the AI's estimate of how much this action improves the
 	// placement, used by the improvement-threshold guardrail .
 	Improvement float64 `json:"improvement,omitempty"`

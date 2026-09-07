@@ -47,6 +47,7 @@ type RebalancingSpec struct {
 	Enabled           bool     `json:"enabled"`
 	TriggerConditions []string `json:"triggerConditions,omitempty"`
 	CooldownSeconds   int      `json:"cooldownSeconds,omitempty"`
+	DryRun            bool     `json:"dryRun,omitempty"`
 }
 
 // OrchestrationProfileSpec defines the desired state of OrchestrationProfile
@@ -109,10 +110,11 @@ const (
 type RebalanceAction string
 
 const (
-	RebalanceActionMove   RebalanceAction = "Move"
-	RebalanceActionNoOp   RebalanceAction = "NoOp"
-	RebalanceActionReject RebalanceAction = "Reject"
-	RebalanceActionDefer  RebalanceAction = "Defer"
+	RebalanceActionMove           RebalanceAction = "Move"
+	RebalanceActionNoOp           RebalanceAction = "NoOp"
+	RebalanceActionReject         RebalanceAction = "Reject"
+	RebalanceActionDefer          RebalanceAction = "Defer"
+	RebalanceActionAdjustReplicas RebalanceAction = "AdjustReplicas"
 )
 
 // RebalanceDecision is a single terminal-outcome record kept in the profile's

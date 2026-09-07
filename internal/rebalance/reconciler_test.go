@@ -27,6 +27,7 @@ import (
 
 	"golang.org/x/time/rate"
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -72,6 +73,9 @@ func newTestReconcilerWithAgent(t *testing.T, agentURL string, objs ...client.Ob
 	if err := appsv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("adding appsv1 scheme: %v", err)
 	}
+	if err := autoscalingv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding autoscalingv2 scheme: %v", err)
+	}
 	if err := orchestrationv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("adding orchestration scheme: %v", err)
 	}
@@ -108,7 +112,7 @@ func newTestReconcilerWithAgent(t *testing.T, agentURL string, objs ...client.Ob
 	decisionStore := placementserver.NewDecisionStore(0)
 
 	return NewReconciler(c, writer, evaluator, testProfileIndexField, 30*time.Second,
-		contextBuilder, decisionClient, 200*time.Millisecond, 0, decisionStore, 0, 0), c
+		contextBuilder, decisionClient, 200*time.Millisecond, 0, decisionStore, 0, 0, 0, 0, 0), c
 }
 
 func getProfile(t *testing.T, c client.Client, name string) *orchestrationv1alpha1.OrchestrationProfile {
@@ -457,6 +461,87 @@ func TestReconciler_MoveRateLimitedFailsCleanly(t *testing.T) {
 	}
 	if !strings.Contains(rs.RecentDecisions[0].Reason, "rate limit") {
 		t.Errorf("reason = %q, want it to mention the rate limit", rs.RecentDecisions[0].Reason)
+	}
+}
+
+// TestReconciler_MoveDryRunSkipsSideEffectsAndRateLimit covers Story 32: an
+// accepted, above-threshold Move on a spec.rebalancing.dryRun: true profile
+// must still reach Enacting and resolve Watching+Enacted, but without
+// actually evicting the pod and without waiting on MoveRateLimiter (exhausted
+// here with burst 0, which would fail a real Move instantly — proving the
+// dry-run path never calls Wait at all).
+func TestReconciler_MoveDryRunSkipsSideEffectsAndRateLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+			RequestID:   "test",
+			Action:      orchestrationv1alpha1.RebalanceActionMove,
+			PodName:     "app-a-1",
+			TargetNode:  "node-b",
+			Improvement: 50,
+			Reason:      "better spread",
+		})
+	}))
+	defer server.Close()
+
+	profile := testProfileWithConditions(TriggerScheduled)
+	profile.Spec.Rebalancing.DryRun = true
+	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile)
+	r.MoveRateLimiter = rate.NewLimiter(rate.Limit(0), 0) // burst 0: a real Wait would fail instantly
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if rs.State != StateWatching {
+		t.Fatalf("state = %q, want Watching", rs.State)
+	}
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeEnacted {
+		t.Fatalf("recentDecisions = %+v, want one Enacted-outcome entry", rs.RecentDecisions)
+	}
+	if !strings.Contains(rs.RecentDecisions[0].Details, "[dry-run]") {
+		t.Errorf("details = %q, want it to carry the dry-run marker", rs.RecentDecisions[0].Details)
+	}
+
+	stillThere := &corev1.Pod{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "app-a-1", Namespace: "default"}, stillThere); err != nil {
+		t.Fatalf("pod app-a-1 should not have been evicted in dry-run: %v", err)
+	}
+}
+
+// TestReconciler_MoveDryRunBelowThresholdStillRejected proves dry-run doesn't
+// bypass guardrails — only Enacting's real side effects are skipped, so a
+// below-threshold recommendation must still end Rejected, same as a live run.
+func TestReconciler_MoveDryRunBelowThresholdStillRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+			RequestID:   "test",
+			Action:      orchestrationv1alpha1.RebalanceActionMove,
+			PodName:     "app-a-1",
+			TargetNode:  "node-b",
+			Improvement: 5, // below DefaultImprovementThreshold (20)
+			Reason:      "marginal",
+		})
+	}))
+	defer server.Close()
+
+	profile := testProfileWithConditions(TriggerScheduled)
+	profile.Spec.Rebalancing.DryRun = true
+	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile)
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeRejected {
+		t.Fatalf("recentDecisions = %+v, want one Rejected-outcome entry", rs.RecentDecisions)
 	}
 }
 

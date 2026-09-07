@@ -160,13 +160,27 @@ type Reconciler struct {
 	// DefaultMoveRateWaitTimeout. A settable field (not wired to an env var)
 	// so tests can shrink it, same as MoveActionTimeout.
 	MoveRateWaitTimeout time.Duration
+
+	// ScaleActionTimeout bounds how long the AdjustReplicas enactor waits for
+	// the workload to report the target ReadyReplicas count. <= 0 uses
+	// DefaultScaleActionTimeout.
+	ScaleActionTimeout time.Duration
+
+	// MinReplicas/MaxReplicas are dispatchScale's fallback guardrail bounds,
+	// used only when the workload has no HorizontalPodAutoscaler of its own
+	// (see resolveReplicaBounds). <= 0 uses DefaultMinReplicas/
+	// DefaultMaxReplicas.
+	MinReplicas int32
+	MaxReplicas int32
 }
 
 // NewReconciler creates a Reconciler. interval <= 0 uses
 // DefaultDetectionInterval; decisionTimeout <= 0 uses DefaultDecisionTimeout;
 // improvementThreshold <= 0 uses DefaultImprovementThreshold; moveActionTimeout
 // <= 0 uses DefaultMoveActionTimeout; moveRateLimit <= 0 uses
-// DefaultMoveRateLimit.
+// DefaultMoveRateLimit; scaleActionTimeout <= 0 uses
+// DefaultScaleActionTimeout; minReplicas/maxReplicas <= 0 use
+// DefaultMinReplicas/DefaultMaxReplicas.
 func NewReconciler(
 	c client.Client,
 	writer *StateWriter,
@@ -180,6 +194,9 @@ func NewReconciler(
 	decisionStore *placementserver.DecisionStore,
 	moveActionTimeout time.Duration,
 	moveRateLimit int,
+	scaleActionTimeout time.Duration,
+	minReplicas int32,
+	maxReplicas int32,
 ) *Reconciler {
 	if interval <= 0 {
 		interval = DefaultDetectionInterval
@@ -195,6 +212,15 @@ func NewReconciler(
 	}
 	if moveRateLimit <= 0 {
 		moveRateLimit = DefaultMoveRateLimit
+	}
+	if scaleActionTimeout <= 0 {
+		scaleActionTimeout = DefaultScaleActionTimeout
+	}
+	if minReplicas <= 0 {
+		minReplicas = DefaultMinReplicas
+	}
+	if maxReplicas <= 0 {
+		maxReplicas = DefaultMaxReplicas
 	}
 	// Burst equals the per-minute limit itself: a quiet fleet can absorb a
 	// full minute's budget worth of Moves immediately, then throttles to a
@@ -214,6 +240,9 @@ func NewReconciler(
 		MoveRateLimiter:      moveRateLimiter,
 		MoveRateWaitTimeout:  DefaultMoveRateWaitTimeout,
 		MoveActionTimeout:    moveActionTimeout,
+		ScaleActionTimeout:   scaleActionTimeout,
+		MinReplicas:          minReplicas,
+		MaxReplicas:          maxReplicas,
 	}
 }
 

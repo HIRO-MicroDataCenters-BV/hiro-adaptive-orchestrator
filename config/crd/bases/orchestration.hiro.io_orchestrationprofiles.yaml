@@ -87,6 +87,8 @@ spec:
                 properties:
                   cooldownSeconds:
                     type: integer
+                  dryRun:
+                    type: boolean
                   enabled:
                     type: boolean
                   triggerConditions:

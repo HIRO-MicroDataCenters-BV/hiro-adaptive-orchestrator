@@ -4,6 +4,10 @@
 # Guided, narrated demo of the rebalance engine's decision lifecycle:
 #   Watching -> Triggered -> Evaluating -> Decided -> Enacting -> Watching
 #
+# See internal/rebalance/README.md#demo-walkthrough for a small flow diagram
+# of what each beat below actually does mechanically (Mermaid doesn't render
+# in a .sh comment, so it lives there, not here).
+#
 # Drives three beats against a live cluster (the full-stack deploy must
 # already be running — see hack/deploy_full_stack.sh), all against the
 # existing orchestrationprofile-2 / nginx-deployment-2 / eaoprofile-optional:

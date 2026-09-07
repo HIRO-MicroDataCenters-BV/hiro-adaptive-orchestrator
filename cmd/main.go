@@ -411,6 +411,9 @@ func main() {
 	//   REBALANCE_DECISION_STORE_TTL       — how long a Move decision biases scoring, e.g. "60s"
 	//   REBALANCE_MOVE_ACTION_TIMEOUT      — max wait for a Move's replacement pod, e.g. "60s"
 	//   REBALANCE_MOVE_RATE_LIMIT          — cluster-wide Moves/minute across every profile, e.g. "5"
+	//   REBALANCE_SCALE_ACTION_TIMEOUT     — max wait for an AdjustReplicas rollout, e.g. "60s"
+	//   REBALANCE_MIN_REPLICAS             — fallback min replicas when no HPA exists, e.g. "1"
+	//   REBALANCE_MAX_REPLICAS             — fallback max replicas when no HPA exists, e.g. "10"
 	// -------------------------------------------------------------------------
 	rebalanceMaxRecentDecisions := parseIntEnv("REBALANCE_MAX_RECENT_DECISIONS")
 	if rebalanceMaxRecentDecisions <= 0 {
@@ -444,6 +447,18 @@ func main() {
 	if rebalanceMoveRateLimit <= 0 {
 		rebalanceMoveRateLimit = rebalance.DefaultMoveRateLimit
 	}
+	rebalanceScaleActionTimeout := parseDurationEnv("REBALANCE_SCALE_ACTION_TIMEOUT")
+	if rebalanceScaleActionTimeout <= 0 {
+		rebalanceScaleActionTimeout = rebalance.DefaultScaleActionTimeout
+	}
+	rebalanceMinReplicas := int32(parseIntEnv("REBALANCE_MIN_REPLICAS"))
+	if rebalanceMinReplicas <= 0 {
+		rebalanceMinReplicas = rebalance.DefaultMinReplicas
+	}
+	rebalanceMaxReplicas := int32(parseIntEnv("REBALANCE_MAX_REPLICAS"))
+	if rebalanceMaxReplicas <= 0 {
+		rebalanceMaxReplicas = rebalance.DefaultMaxReplicas
+	}
 	// Resolved above (not left at the parseXEnv zero-sentinel) so this log
 	// line — and everything downstream — reflects what's actually in
 	// effect, not "0" for anything the deployer left unset.
@@ -456,6 +471,9 @@ func main() {
 		"decisionStoreTTL", rebalanceDecisionStoreTTL,
 		"moveActionTimeout", rebalanceMoveActionTimeout,
 		"moveRateLimit", rebalanceMoveRateLimit,
+		"scaleActionTimeout", rebalanceScaleActionTimeout,
+		"minReplicas", rebalanceMinReplicas,
+		"maxReplicas", rebalanceMaxReplicas,
 	)
 
 	// decisionStore is shared between the PlacementServer (reads it in
@@ -500,6 +518,9 @@ func main() {
 		decisionStore,
 		rebalanceMoveActionTimeout,
 		rebalanceMoveRateLimit,
+		rebalanceScaleActionTimeout,
+		rebalanceMinReplicas,
+		rebalanceMaxReplicas,
 	)
 	// eaoGVK above is the List kind (used for List() calls); Watches()/
 	// RESTMapper need the singular item kind, derived here rather than

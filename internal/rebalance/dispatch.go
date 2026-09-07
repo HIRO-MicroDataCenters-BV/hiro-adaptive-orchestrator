@@ -47,8 +47,9 @@ type actionDispatcher func(
 // dispatchDecision. An action with no entry here is handled defensively —
 // see dispatchDecision.
 var actionDispatchers = map[orchestrationv1alpha1.RebalanceAction]actionDispatcher{
-	orchestrationv1alpha1.RebalanceActionNoOp: dispatchNoOp,
-	orchestrationv1alpha1.RebalanceActionMove: dispatchMove,
+	orchestrationv1alpha1.RebalanceActionNoOp:           dispatchNoOp,
+	orchestrationv1alpha1.RebalanceActionMove:           dispatchMove,
+	orchestrationv1alpha1.RebalanceActionAdjustReplicas: dispatchScale,
 }
 
 // dispatchDecision applies actionDispatchers to a successful AI response.
@@ -141,6 +142,11 @@ func dispatchMove(
 		return
 	}
 
+	if profile.Spec.Rebalancing.DryRun {
+		dispatchMoveDryRun(r, ctx, key, profile, resp, cooldown)
+		return
+	}
+
 	// Cluster-wide throttle: an accepted Move sits in Decided — visible in
 	// status, not yet disruptive — until a rate-limit token is available.
 	// This is a single limiter shared by every profile (see MoveRateLimiter's
@@ -197,5 +203,150 @@ func dispatchMove(
 		TransitionOptions{Action: resp.Action, Outcome: result.outcome, Cooldown: cooldown}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Watching failed",
 			"profile", profile.Name, "outcome", result.outcome)
+	}
+}
+
+// dispatchMoveDryRun completes a Move that already cleared every guardrail
+// but is running with spec.rebalancing.dryRun: true: Decided -> Enacting ->
+// Watching, without calling moveEnactor or waiting on the cluster-wide rate
+// limiter — nothing is actually evicted, so nothing should compete for real
+// eviction capacity, and there's no real outcome to poll for.
+func dispatchMoveDryRun(
+	r *Reconciler,
+	ctx context.Context,
+	key types.NamespacedName,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	resp *placementserver.RebalanceDecisionResponse,
+	cooldown time.Duration,
+) {
+	logger := logf.FromContext(ctx)
+
+	if _, err := r.Writer.Transition(ctx, key, StateEnacting,
+		fmt.Sprintf("dry-run: would enact move of %s to %s", resp.PodName, resp.TargetNode),
+		TransitionOptions{Action: resp.Action}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Enacting (dry-run) failed", "profile", profile.Name)
+		return
+	}
+
+	details := fmt.Sprintf("[dry-run] would move %s to %s (improvement=%.2f): %s",
+		resp.PodName, resp.TargetNode, resp.Improvement, resp.Reason)
+	if _, err := r.Writer.Transition(ctx, key, StateWatching, "dry-run: no side effects applied",
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeEnacted, Details: details, Cooldown: cooldown}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Watching (dry-run Enacted) failed", "profile", profile.Name)
+	}
+}
+
+// dispatchScale applies the same improvement-threshold guardrail as Move,
+// plus a replica-bounds guardrail (see resolveReplicaBounds — an existing
+// HorizontalPodAutoscaler on the workload wins over the package/env
+// defaults), and for an accepted recommendation drives Decided -> Enacting ->
+// scaleEnactor -> Watching. Unlike Move, AdjustReplicas isn't gated by any
+// cluster-wide rate limiter or DecisionStore — scaling a Deployment/
+// StatefulSet's replica count doesn't disrupt a specific running pod the way
+// an eviction does.
+func dispatchScale(
+	r *Reconciler,
+	ctx context.Context,
+	key types.NamespacedName,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	resp *placementserver.RebalanceDecisionResponse,
+	cooldown time.Duration,
+) {
+	logger := logf.FromContext(ctx)
+
+	threshold := r.ImprovementThreshold
+	if threshold <= 0 {
+		threshold = DefaultImprovementThreshold
+	}
+	if resp.Improvement < threshold {
+		reason := fmt.Sprintf("improvement %.2f below threshold %.2f: %s", resp.Improvement, threshold, resp.Reason)
+		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
+			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected) failed", "profile", profile.Name)
+		}
+		return
+	}
+
+	if resp.TargetReplicas <= 0 {
+		reason := fmt.Sprintf("AdjustReplicas response missing/invalid targetReplicas: %s", resp.Reason)
+		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); err != nil {
+			logger.Error(err, "rebalance: dispatch transition to Watching (Failed, malformed AdjustReplicas) failed", "profile", profile.Name)
+		}
+		return
+	}
+
+	min, max, boundsSource := resolveReplicaBounds(ctx, r.Client, profile, r.MinReplicas, r.MaxReplicas)
+	if resp.TargetReplicas < min || resp.TargetReplicas > max {
+		reason := fmt.Sprintf("targetReplicas %d outside [%d, %d] (%s): %s",
+			resp.TargetReplicas, min, max, boundsSource, resp.Reason)
+		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
+			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected, out of bounds) failed", "profile", profile.Name)
+		}
+		return
+	}
+
+	details := fmt.Sprintf("targetReplicas=%d improvement=%.2f bounds=[%d,%d] (%s)",
+		resp.TargetReplicas, resp.Improvement, min, max, boundsSource)
+	if _, err := r.Writer.Transition(ctx, key, StateDecided, resp.Reason,
+		TransitionOptions{Action: resp.Action, Details: details}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Decided failed", "profile", profile.Name)
+		return
+	}
+
+	if profile.Spec.Rebalancing.DryRun {
+		dispatchScaleDryRun(r, ctx, key, profile, resp, cooldown)
+		return
+	}
+
+	if _, err := r.Writer.Transition(ctx, key, StateEnacting,
+		fmt.Sprintf("enacting scale to %d replicas", resp.TargetReplicas),
+		TransitionOptions{Action: resp.Action}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Enacting failed", "profile", profile.Name)
+		return
+	}
+
+	result, err := scaleEnactor(ctx, r.Client, profile, resp.TargetReplicas, resp.Reason, r.ScaleActionTimeout)
+	if err != nil {
+		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, err.Error(),
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, scale enactor error) failed", "profile", profile.Name)
+		}
+		return
+	}
+
+	if _, err := r.Writer.Transition(ctx, key, StateWatching, result.reason,
+		TransitionOptions{Action: resp.Action, Outcome: result.outcome, Cooldown: cooldown}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Watching failed",
+			"profile", profile.Name, "outcome", result.outcome)
+	}
+}
+
+// dispatchScaleDryRun mirrors dispatchMoveDryRun: Decided -> Enacting ->
+// Watching(Enacted), without ever calling scaleEnactor — no Spec.Replicas
+// patch, so nothing to poll for either.
+func dispatchScaleDryRun(
+	r *Reconciler,
+	ctx context.Context,
+	key types.NamespacedName,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	resp *placementserver.RebalanceDecisionResponse,
+	cooldown time.Duration,
+) {
+	logger := logf.FromContext(ctx)
+
+	if _, err := r.Writer.Transition(ctx, key, StateEnacting,
+		fmt.Sprintf("dry-run: would enact scale to %d replicas", resp.TargetReplicas),
+		TransitionOptions{Action: resp.Action}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Enacting (dry-run) failed", "profile", profile.Name)
+		return
+	}
+
+	details := fmt.Sprintf("[dry-run] would scale to %d replicas (improvement=%.2f): %s",
+		resp.TargetReplicas, resp.Improvement, resp.Reason)
+	if _, err := r.Writer.Transition(ctx, key, StateWatching, "dry-run: no side effects applied",
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeEnacted, Details: details, Cooldown: cooldown}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Watching (dry-run Enacted) failed", "profile", profile.Name)
 	}
 }

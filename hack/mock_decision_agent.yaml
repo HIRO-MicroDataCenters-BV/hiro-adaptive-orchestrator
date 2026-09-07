@@ -18,7 +18,8 @@
 #                                   [0, 100], returns DecisionResponse
 #   POST <DECISION_AGENT_PATH>  (rebalanceContext set) → parses the
 #                                   RebalanceContext, randomly recommends
-#                                   Move (a running pod to a candidate node)
+#                                   Move (a running pod to a candidate node),
+#                                   AdjustReplicas (scale up or down by one),
 #                                   or NoOp, returns RebalanceDecisionResponse
 #   GET  /healthz                    → 200 ok
 #
@@ -44,12 +45,12 @@ data:
     PLACEMENT_SCORE_MIN = 0.0
     PLACEMENT_SCORE_MAX = 100.0
 
-    # Rebalance (Move vs NoOp) knobs.
-    # MOVE_PROBABILITY is deliberately low for now: Story 29 (decision store)
-    # and Story 30 (Move enactor) aren't built yet, so a Move recommendation
-    # currently has nothing to consume it past Decided. Keep NoOp dominant
-    # until those land, then raise this back up.
+    # Rebalance (Move / AdjustReplicas / NoOp) knobs. Both MOVE_PROBABILITY
+    # and SCALE_PROBABILITY default to 0.0 — keep NoOp dominant by default,
+    # bump one of them (see hack/demo_rebalance.sh's bump_mock_agent) when a
+    # test specifically wants to force that action.
     MOVE_PROBABILITY   = 0.0
+    SCALE_PROBABILITY  = 0.0
     IMPROVEMENT_MIN    = 10.0
     IMPROVEMENT_MAX    = 100.0
 
@@ -155,6 +156,28 @@ data:
                     "targetNode": target,
                     "improvement": round(random.uniform(IMPROVEMENT_MIN, IMPROVEMENT_MAX), 2),
                     "reason": f"mock: moving {pod.get('podName', '')} to {target} improves balance",
+                }
+
+            # AdjustReplicas: current replica count is just how many pods
+            # this workload has right now (currentPlacements is every pod of
+            # the application). Scale can go either way — up when demand
+            # looks high, down when it looks low — so pick a direction at
+            # random rather than only ever growing. Never recommend 0 (that's
+            # not "adjust", that's "stop"), and never recommend the same
+            # count as now — that's a NoOp with extra ceremony, not a real
+            # scale.
+            current_count = len(current_placements)
+            if current_count > 0 and random.random() < SCALE_PROBABILITY:
+                if current_count <= 1:
+                    target_replicas = current_count + 1  # can't scale down below 1
+                else:
+                    target_replicas = current_count + random.choice([-1, 1])
+                return {
+                    "requestId": request_id,
+                    "action": "AdjustReplicas",
+                    "targetReplicas": target_replicas,
+                    "improvement": round(random.uniform(IMPROVEMENT_MIN, IMPROVEMENT_MAX), 2),
+                    "reason": f"mock: {'scaling up' if target_replicas > current_count else 'scaling down'} from {current_count} to {target_replicas}",
                 }
 
             return {

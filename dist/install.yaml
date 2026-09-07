@@ -95,6 +95,8 @@ spec:
                 properties:
                   cooldownSeconds:
                     type: integer
+                  dryRun:
+                    type: boolean
                   enabled:
                     type: boolean
                   triggerConditions:
@@ -352,8 +354,24 @@ rules:
   - apps
   resources:
   - deployments
-  - replicasets
   - statefulsets
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - replicasets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - autoscaling
+  resources:
+  - horizontalpodautoscalers
   verbs:
   - get
   - list

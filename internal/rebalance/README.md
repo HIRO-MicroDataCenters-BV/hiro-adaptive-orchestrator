@@ -55,6 +55,8 @@ Not numbered because they're continuous background wiring rather than steps in a
 - [Dispatch — acting on the AI's decision](#dispatch--acting-on-the-ais-decision)
   - [The decision store — how `Move` actually lands a pod on a specific node](#the-decision-store--how-move-actually-lands-a-pod-on-a-specific-node)
   - [Cluster-wide Move rate limit](#cluster-wide-move-rate-limit)
+  - [Dry-run mode](#dry-run-mode)
+  - [Replica bounds — `AdjustReplicas`](#replica-bounds--adjustreplicas)
 - [Node pressure (CPU/Memory)](#node-pressure-cpumemory)
 - [`StateWriter` — the single-writer rule](#statewriter--the-single-writer-rule)
   - [Why the reader must be uncached](#why-the-reader-must-be-uncached)
@@ -64,6 +66,7 @@ Not numbered because they're continuous background wiring rather than steps in a
   - [RBAC](#rbac)
   - [CRD schema](#crd-schema)
   - [Deployment](#deployment)
+- [Demo walkthrough](#demo-walkthrough)
 - [Testing](#testing)
 
 <a id="the-decision-lifecycle"></a>
@@ -358,15 +361,23 @@ flowchart TD
     Out -- Enacted --> W1(["Watching + Enacted"])
     Out -- Deferred --> W2(["Watching + Deferred"])
     Out -- Failed --> W3(["Watching + Failed"])
+
+    Reg -- AdjustReplicas --> G2{"Improvement >= threshold<br/>AND TargetReplicas set<br/>AND within bounds?"}
+    G2 -- no --> Rej2(["Watching + Rejected / Failed"])
+    G2 -- yes --> D2(["Decided"]) --> Enacting2(["Enacting"]) --> SE["scaleEnactor"]
+    SE --> Out2{"outcome"}
+    Out2 -- Enacted --> W4(["Watching + Enacted"])
+    Out2 -- Failed --> W5(["Watching + Failed"])
 ```
 
 [`dispatch.go`](dispatch.go) carries a successful `RebalanceDecisionResponse` the rest of the
 way to a terminal `Watching` write. It's a registry (`actionDispatchers`, keyed by
 `orchestrationv1alpha1.RebalanceAction`), not a hardcoded switch, so a future enactor
-(`AdjustResources`, `AdjustReplicas`, `Defer`, `Escalate`) is a new map entry — `dispatchDecision`
-itself never changes. An action with no registered dispatcher (today: anything other than
-`Move`/`NoOp`, including `Reject`/`Defer`, which exist as values but have no enactor yet) is
-treated as a processing error — `Watching` + outcome `Failed` — rather than guessed at.
+(`AdjustResources`, `Defer`, `Escalate`) is a new map entry — `dispatchDecision` itself never
+changes. An action with no registered dispatcher (today: anything other than
+`Move`/`NoOp`/`AdjustReplicas`, including `Reject`/`Defer`, which exist as values but have no
+enactor yet) is treated as a processing error — `Watching` + outcome `Failed` — rather than
+guessed at.
 
 - **`NoOp`** (`dispatchNoOp`) exits straight from `Evaluating` to `Watching` with outcome `NoOp`.
   No `Decided`/`Enacting` hop — both are valid direct exits from `Evaluating` in
@@ -386,6 +397,16 @@ treated as a processing error — `Watching` + outcome `Failed` — rather than 
      replacement pod — one not present before eviction, now scheduled to a node. Landing on
      `TargetNode` is outcome `Enacted`; landing elsewhere or timing out is outcome `Failed`.
   4. The `DecisionStore` entry is cleared on every path out, regardless of outcome.
+- **`AdjustReplicas`** (`dispatchScale`) applies the same improvement-threshold guardrail as
+  `Move`, then a replica-bounds guardrail (see [below](#replica-bounds--adjustreplicas)).
+  Below threshold is `Rejected`; missing/non-positive `TargetReplicas` is `Failed`;
+  out-of-bounds is `Rejected`. An accepted, in-bounds recommendation transitions to `Decided`,
+  then `Enacting`, and calls `scaleEnactor` ([`scale_enactor.go`](scale_enactor.go)): patches
+  the workload's (`Deployment` or `StatefulSet`) `Spec.Replicas` to `TargetReplicas`, then polls
+  (`Reconciler.ScaleActionTimeout`, default `DefaultScaleActionTimeout` = 60s) for
+  `Status.ReadyReplicas` to reach that count — matching is `Enacted`, timing out is `Failed`.
+  Unlike `Move`, there's no cluster-wide rate limiter or `DecisionStore` entry: scaling a
+  workload's replica count doesn't disrupt one specific running pod the way an eviction does.
 
 ### The decision store — how `Move` actually lands a pod on a specific node
 
@@ -501,6 +522,64 @@ after capacity actually freed up. This is safe specifically because `Wait()` its
 blocks (up to `MoveRateWaitTimeout`) before failing — that blocking *is* the pacing, so
 skipping cooldown here doesn't risk the sub-second self-triggering loop a missing cooldown
 caused elsewhere (see `hasPendingPod`'s doc comment in `triggers.go` for that story).
+
+### Dry-run mode
+
+```mermaid
+flowchart TD
+    D(["Decided"]) --> Q{"spec.rebalancing<br/>.dryRun?"}
+    Q -- "false (default)" --> RL["MoveRateLimiter.Wait"] --> Enacting1(["Enacting"]) --> ME["moveEnactor<br/>(real eviction)"]
+    Q -- true --> Enacting2(["Enacting<br/>(no Wait)"]) --> Sim["no eviction,<br/>no DecisionStore write"]
+    Sim --> W(["Watching + Enacted<br/>details: [dry-run] ..."])
+```
+
+`spec.rebalancing.dryRun: true` runs the full lifecycle — including the AI consultation and
+every guardrail — but skips a `Move`'s real side effects. The improvement-threshold and
+malformed-response guardrails in `dispatchMove` still apply exactly as they do live, so a
+below-threshold or malformed recommendation still ends `Rejected`/`Failed`: those outcomes
+genuinely happened. Only a recommendation that clears every guardrail takes the simulated
+path (`dispatchMoveDryRun`) — `Decided → Enacting → Watching` with outcome `Enacted` and
+`details` prefixed `[dry-run]`, without calling `moveEnactor` or touching `DecisionStore`.
+
+It also skips `MoveRateLimiter.Wait` — a dry run never evicts anything, so it shouldn't
+consume or wait on the fleet's real eviction-rate budget alongside profiles doing live Moves.
+Every transition still emits its usual Kubernetes Event (`StateWriter.emitEvent` fires
+unconditionally), so `kubectl describe` shows exactly what a dry run decided without any
+special-casing there.
+
+`Move` and `AdjustReplicas` each have their own dry-run branch (`dispatchMoveDryRun` /
+`dispatchScaleDryRun`) — there's no shared helper between them, since what "the real side
+effect" means differs per action. Any future enactor (`AdjustResources`, `Defer`, `Escalate`)
+will need its own the same way.
+
+### Replica bounds — `AdjustReplicas`
+
+```mermaid
+flowchart LR
+    Resp(["AdjustReplicas response"]) --> Q{"HorizontalPodAutoscaler<br/>targeting this workload?"}
+    Q -- yes --> HPA["[hpa.Spec.MinReplicas,<br/>hpa.Spec.MaxReplicas]"]
+    Q -- no --> Def["[Reconciler.MinReplicas,<br/>Reconciler.MaxReplicas]<br/>(env-configurable, default [1, 10])"]
+    HPA --> Check{"TargetReplicas<br/>in range?"}
+    Def --> Check
+    Check -- no --> Rej(["Watching + Rejected"])
+    Check -- yes --> OK(["proceeds to Decided"])
+```
+
+`resolveReplicaBounds` ([`scale_enactor.go`](scale_enactor.go)) decides how far `dispatchScale`
+lets a recommendation move a workload's replica count. A `HorizontalPodAutoscaler` whose
+`spec.scaleTargetRef` names the same workload (matched by kind + name — `scaleTargetRef` has no
+namespace field, so it's implicitly the HPA's own namespace) is authoritative: it's the
+standard, pre-existing place a user already expresses "how far this workload may scale," so
+honouring it avoids introducing a second, competing bound the user would have to keep in sync.
+No matching HPA falls back to `Reconciler.MinReplicas`/`MaxReplicas` (`REBALANCE_MIN_REPLICAS` /
+`REBALANCE_MAX_REPLICAS`, default `[1, 10]`) — deliberately conservative, meant to stop a
+misbehaving or overly aggressive AI response from scaling to zero or to something absurd, not
+to express real capacity planning for any given workload.
+
+This only covers direct `Deployment`/`StatefulSet` scaling — a workload owned by a KEDA
+`ScaledObject` isn't detected or deferred to specially today, so `AdjustReplicas` and KEDA
+could both try to act on the same workload's replica count. Worth revisiting if that comes up
+in practice.
 
 <a id="node-pressure-cpumemory"></a>
 ## 📊 <u>Node pressure (CPU/Memory)</u>
@@ -705,6 +784,9 @@ flowchart LR
         V6["REBALANCE_DECISION_STORE_TTL"]
         V7["REBALANCE_MOVE_ACTION_TIMEOUT"]
         V8["REBALANCE_MOVE_RATE_LIMIT"]
+        V9["REBALANCE_SCALE_ACTION_TIMEOUT"]
+        V10["REBALANCE_MIN_REPLICAS"]
+        V11["REBALANCE_MAX_REPLICAS"]
     end
 
     Resolve{"main.go: resolve unset/invalid<br/>before constructing anything —<br/>bad value fails the operator at startup"}
@@ -717,15 +799,20 @@ flowchart LR
     V6 --> Resolve
     V7 --> Resolve
     V8 --> Resolve
+    V9 --> Resolve
+    V10 --> Resolve
+    V11 --> Resolve
 
     Resolve -->|"unset → DefaultMaxRecentDecisions (10)"| SW["StateWriter<br/>recentDecisions length"]
     Resolve -->|"unset → DefaultDetectionInterval (30s)"| Recon1["Reconciler<br/>periodic detection tick"]
     Resolve -->|"unset → DefaultDecisionTimeout (5s)"| Recon2["Reconciler<br/>AI-consultation timeout"]
     Resolve -->|"unset → DefaultNodePressureThreshold (0.90)"| NPE["NodePressureEvaluator<br/>CPU/Memory pressure fraction"]
-    Resolve -->|"unset → DefaultImprovementThreshold (20)"| Disp["dispatchMove<br/>guardrail"]
+    Resolve -->|"unset → DefaultImprovementThreshold (20)"| Disp["dispatchMove / dispatchScale<br/>guardrail"]
     Resolve -->|"unset → DefaultDecisionStoreTTL (60s)"| DS["DecisionStore<br/>Move-bias TTL"]
     Resolve -->|"unset → DefaultMoveActionTimeout (60s)"| ME["Move enactor<br/>replacement-pod wait"]
     Resolve -->|"unset → DefaultMoveRateLimit (5/min)"| RL["MoveRateLimiter<br/>cluster-wide Moves/minute"]
+    Resolve -->|"unset → DefaultScaleActionTimeout (60s)"| SE["Scale enactor<br/>ready-replicas wait"]
+    Resolve -->|"unset → DefaultMinReplicas (1)<br/>DefaultMaxReplicas (10)"| SB["dispatchScale<br/>fallback replica bounds"]
 ```
 
 | Environment variable | Overrides | Default |
@@ -734,10 +821,13 @@ flowchart LR
 | `REBALANCE_DETECTION_INTERVAL` | `Reconciler`'s periodic detection tick (Go duration, e.g. `30s`) | `DefaultDetectionInterval` (30s) |
 | `REBALANCE_DECISION_TIMEOUT` | `Reconciler`'s AI-consultation timeout (Go duration, e.g. `5s`) | `DefaultDecisionTimeout` (5s) |
 | `REBALANCE_NODE_PRESSURE_THRESHOLD` | `NodePressureEvaluator`'s CPU/Memory pressure fraction (e.g. `0.90`) | `DefaultNodePressureThreshold` (0.90) |
-| `REBALANCE_IMPROVEMENT_THRESHOLD` | `dispatchMove`'s guardrail — minimum `Improvement` to enact a `Move` | `DefaultImprovementThreshold` (20) |
+| `REBALANCE_IMPROVEMENT_THRESHOLD` | `dispatchMove`/`dispatchScale`'s guardrail — minimum `Improvement` to enact | `DefaultImprovementThreshold` (20) |
 | `REBALANCE_DECISION_STORE_TTL` | How long a `Move` decision biases `PlacementServer.score` (Go duration) | `placementserver.DefaultDecisionStoreTTL` (60s) |
 | `REBALANCE_MOVE_ACTION_TIMEOUT` | Max wait for a `Move`'s replacement pod to be scheduled (Go duration) | `DefaultMoveActionTimeout` (60s) |
 | `REBALANCE_MOVE_RATE_LIMIT` | Cluster-wide cap on Moves/minute across every profile (see [Cluster-wide Move rate limit](#cluster-wide-move-rate-limit)) | `DefaultMoveRateLimit` (5) |
+| `REBALANCE_SCALE_ACTION_TIMEOUT` | Max wait for an `AdjustReplicas` rollout to report ready (Go duration) | `DefaultScaleActionTimeout` (60s) |
+| `REBALANCE_MIN_REPLICAS` | `AdjustReplicas` fallback lower bound when no HPA targets the workload (see [Replica bounds](#replica-bounds--adjustreplicas)) | `DefaultMinReplicas` (1) |
+| `REBALANCE_MAX_REPLICAS` | `AdjustReplicas` fallback upper bound when no HPA targets the workload (see [Replica bounds](#replica-bounds--adjustreplicas)) | `DefaultMaxReplicas` (10) |
 
 Each default lives once, as a constant next to the type it configures — `main.go` doesn't
 duplicate the numbers, it just resolves "unset" to that constant before constructing anything,
@@ -830,6 +920,111 @@ flowchart LR
 - `hack/deploy_operator.sh` / `hack/deploy_full_stack.sh` print a component breakdown at
   deploy time so it's clear the rebalance engine isn't a separate opt-in piece — it starts
   the moment the operator pod is `Ready`.
+
+<a id="demo-walkthrough"></a>
+## 🎬 <u>Demo walkthrough</u>
+
+[`hack/demo_rebalance.sh`](../../hack/demo_rebalance.sh) drives all three lifecycle paths
+above against a live cluster, narrated pane-by-pane (see the script's own header comment for
+pane setup and usage: `hack/demo_rebalance.sh [noop|retry|move|cleanup]`).
+
+### Feature view — what each beat proves
+
+These show the capability being demonstrated — the before/after a viewer actually cares
+about — with no script or state-machine internals. The mechanics behind each one are in the
+next section.
+
+**Beat 1 — NoOp: it watches, but doesn't overreact**
+
+```mermaid
+flowchart LR
+    Pod["Running pod,<br/>well placed"] --> Watch["Engine evaluates<br/>continuously"]
+    Watch --> Decision{"Anything<br/>need to change?"}
+    Decision -- "No" --> Stable["Stays exactly<br/>where it is"]
+```
+
+**Beat 2 — Retry: self-heals around external constraints**
+
+```mermaid
+flowchart LR
+    subgraph Before["Before"]
+        P1["Pod: Pending<br/>blocked by an<br/>energy constraint"]
+    end
+    subgraph After["After the constraint clears"]
+        P2["Pod: Running<br/>auto-recovered,<br/>no one intervened"]
+    end
+    Before -->|"engine notices the<br/>instant it's unblocked"| After
+```
+
+**Beat 3 — Move: actively rebalances, safely and precisely**
+
+```mermaid
+flowchart LR
+    subgraph Before["Before"]
+        N1["Node A — busy<br/>🟥 Pod X"]
+        N2["Node B — idle"]
+    end
+    subgraph After["After the AI-driven Move"]
+        N1b["Node A"]
+        N2b["Node B<br/>🟩 Pod X"]
+    end
+    Before -->|"AI recommends relocating<br/>Pod X to Node B"| After
+```
+
+HIRO doesn't just place workloads intelligently once — it keeps watching, and can safely
+move things later if conditions change.
+
+### Mechanics — what the script actually does
+
+The diagrams above show the capability; these show the state-machine path and the
+`hack/demo_rebalance.sh` mechanics that get there for each beat.
+
+**Beat 1 — NoOp**
+
+```mermaid
+flowchart TD
+    Start(["noop()"]) --> Clear["clear_cooldown"]
+    Clear --> Wait["wait up to 30s<br/>(periodic tick)"]
+    Wait --> Cycle["Watching → Triggered →<br/>Evaluating → Watching<br/>(outcome: NoOp)"]
+    Cycle --> More{"round < 3?"}
+    More -- yes --> Clear
+    More -- no --> Done(["done"])
+```
+
+**Beat 2 — Retry (`RetryPendingSchedule`)**
+
+```mermaid
+flowchart TD
+    Start(["retry()"]) --> Clear["clear_cooldown"]
+    Clear --> Scale["scale nginx-deployment-2<br/>+1 replica"]
+    Scale --> WaitPending["wait up to 60s for<br/>new pod → Pending"]
+    WaitPending --> Reassert["reassert clear_cooldown +<br/>open_energy_window<br/>every 3s (up to 90s)"]
+    Reassert --> Trigger["EnergyThreshold case 3 matches<br/>(window open + pod Pending)"]
+    Trigger --> Cycle["Triggered → Evaluating (bypass,<br/>no AI) → Decided → Enacting →<br/>Watching (outcome: Enacted)"]
+    Cycle --> Gone["pending pod deleted,<br/>replacement schedules clean"]
+```
+
+**Beat 3 — Move**
+
+```mermaid
+flowchart TD
+    Start(["move()"]) --> Bump["bump_mock_agent<br/>(force guaranteed Move)"]
+    Bump --> CloseLoop["reassert clear_cooldown +<br/>close_energy_window<br/>every 2s (up to 150s)"]
+    CloseLoop --> Trigger["EnergyThreshold matches<br/>(window closed)"]
+    Trigger --> Cycle1["Triggered → Evaluating (AI call,<br/>Move accepted) → Decided →<br/>rate-limit gate → Enacting"]
+    Cycle1 --> Open["open_energy_window<br/>(replacement needs it open)"]
+    Open --> KeepOpen["move_keep_window_open loop<br/>every 3s for 60s window"]
+    KeepOpen --> Store["DecisionStore hit —<br/>replacement scored onto<br/>TargetNode, no 2nd AI call"]
+    Store --> Revert["revert_mock_agent"]
+    Revert --> Cycle2["Watching (outcome: Enacted)"]
+```
+
+Beats 2 and 3 both re-assert their patches on a loop instead of applying them once: a
+one-shot patch can lose a race against cooldown re-arming or against
+`eaoprofile-optional`'s own external controller reconciling a change back. The script
+captures that EAO's real pre-demo window state the first time it patches it and restores it
+on exit — see `capture_eao_original`/`revert_eao_window` in the script — rather than waiting
+out that external controller's own reconcile cadence.
 
 <a id="testing"></a>
 ## 🧪 <u>Testing</u>

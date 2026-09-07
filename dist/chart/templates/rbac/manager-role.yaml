@@ -37,8 +37,24 @@ rules:
         - apps
       resources:
         - deployments
-        - replicasets
         - statefulsets
+      verbs:
+        - get
+        - list
+        - update
+        - watch
+    - apiGroups:
+        - apps
+      resources:
+        - replicasets
+      verbs:
+        - get
+        - list
+        - watch
+    - apiGroups:
+        - autoscaling
+      resources:
+        - horizontalpodautoscalers
       verbs:
         - get
         - list
