@@ -8,7 +8,7 @@
 # of what each beat below actually does mechanically (Mermaid doesn't render
 # in a .sh comment, so it lives there, not here).
 #
-# Drives three beats against a live cluster (the full-stack deploy must
+# Drives four beats against a live cluster (the full-stack deploy must
 # already be running — see hack/deploy_full_stack.sh), all against the
 # existing orchestrationprofile-2 / nginx-deployment-2 / eaoprofile-optional:
 #   1. NoOp       — a normal cycle that decides nothing needs to change.
@@ -16,16 +16,22 @@
 #                   once the energy window opens (RetryPendingSchedule).
 #   3. Move       — an accepted Move recommendation evicts a pod and steers
 #                   its replacement onto a specific node via the DecisionStore.
+#   4. Scale      — an accepted AdjustReplicas recommendation patches the
+#                   Deployment's replica count directly (no eviction, no
+#                   DecisionStore — see the "Replica bounds" section of
+#                   internal/rebalance/README.md).
 #
-# Beat 3 needs the energy window CLOSED to fire the trigger (EnergyThreshold
-# only matches on insufficient/Delayed/Waiting) but OPEN for the replacement
-# pod to actually pass CheckEnergyGate and schedule — see the Move-vs-energy-
-# gate interaction documented in internal/rebalance/README.md. Same race as
-# beat 2: a one-shot patch can lose to a NoOp re-arming cooldown or to the
-# external EAO controller's own reconcile reverting it before our watch
-# reacts. So this script re-asserts clear-cooldown+close-window every few
-# seconds until the cycle leaves Watching, then re-asserts the open window
-# throughout the whole Enacting phase instead of patching either side once.
+# Beats 3 and 4 both need the energy window CLOSED to fire the trigger
+# (EnergyThreshold only matches on insufficient/Delayed/Waiting) but OPEN for
+# the new/replacement pod to actually pass CheckEnergyGate and schedule — see
+# the energy-gate interaction documented in internal/rebalance/README.md
+# (originally found for Move, confirmed to affect AdjustReplicas the same
+# way when scaling up). Same race as beat 2: a one-shot patch can lose to a
+# NoOp re-arming cooldown or to the external EAO controller's own reconcile
+# reverting it before our watch reacts. So this script re-asserts
+# clear-cooldown+close-window every few seconds until the cycle leaves
+# Watching, then re-asserts the open window throughout the whole Enacting
+# phase instead of patching either side once.
 #
 # This script does NOT stream logs itself — open these in separate terminal
 # panes before you start, so you (the presenter) can narrate over them while
@@ -51,10 +57,11 @@
 #     kubectl logs -f deployment/mock-decision-agent -n hiro-adaptive-orchestrator-system
 #
 # Usage:
-#   hack/demo_rebalance.sh              # run all three beats, in order
+#   hack/demo_rebalance.sh              # run all four beats, in order
 #   hack/demo_rebalance.sh noop         # run a single beat
 #   hack/demo_rebalance.sh retry
 #   hack/demo_rebalance.sh move
+#   hack/demo_rebalance.sh scale
 #   hack/demo_rebalance.sh cleanup      # revert the mock agent + restore
 #                                       # replica count, without running
 #                                       # anything else
@@ -99,7 +106,8 @@ profile_state() {
 
 # ─── Cleanup (always runs on exit, even Ctrl-C) ────────────────────────────
 
-MOCK_AGENT_BUMPED=false
+MOCK_AGENT_MOVE_BUMPED=false
+MOCK_AGENT_SCALE_BUMPED=false
 NGINX2_ORIGINAL_REPLICAS=""
 RETRY_PENDING_POD=""
 EAO_TOUCHED=false
@@ -110,8 +118,12 @@ EAO_ORIG_SUFFICIENT=""
 cleanup() {
   step "Cleanup"
 
-  if [ "$MOCK_AGENT_BUMPED" = true ]; then
+  if [ "$MOCK_AGENT_MOVE_BUMPED" = true ]; then
     revert_mock_agent
+  fi
+
+  if [ "$MOCK_AGENT_SCALE_BUMPED" = true ]; then
+    revert_mock_agent_scale
   fi
 
   if [ -n "$NGINX2_ORIGINAL_REPLICAS" ]; then
@@ -127,7 +139,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# ─── Mock agent tuning (beat 3 needs a guaranteed, above-threshold Move) ───
+# ─── Mock agent tuning (beats 3/4 need a guaranteed, above-threshold action) ─
 
 # Applies $MOCK_AGENT_YAML with a fresh redeployed-at timestamp piped in
 # (never written to disk — same non-destructive trick deploy_full_stack.sh
@@ -151,7 +163,7 @@ bump_mock_agent() {
     "$MOCK_AGENT_YAML"
   rm -f "$MOCK_AGENT_YAML.bak"
   apply_mock_agent
-  MOCK_AGENT_BUMPED=true
+  MOCK_AGENT_MOVE_BUMPED=true
 }
 
 revert_mock_agent() {
@@ -162,7 +174,29 @@ revert_mock_agent() {
     "$MOCK_AGENT_YAML"
   rm -f "$MOCK_AGENT_YAML.bak"
   apply_mock_agent
-  MOCK_AGENT_BUMPED=false
+  MOCK_AGENT_MOVE_BUMPED=false
+}
+
+bump_mock_agent_scale() {
+  step "Forcing the mock agent to always recommend an above-threshold AdjustReplicas"
+  sed -i.bak \
+    -e 's/^    SCALE_PROBABILITY  = 0.0$/    SCALE_PROBABILITY  = 1.0/' \
+    -e 's/^    IMPROVEMENT_MIN    = 10.0$/    IMPROVEMENT_MIN    = 30.0/' \
+    "$MOCK_AGENT_YAML"
+  rm -f "$MOCK_AGENT_YAML.bak"
+  apply_mock_agent
+  MOCK_AGENT_SCALE_BUMPED=true
+}
+
+revert_mock_agent_scale() {
+  echo "  Reverting mock agent to its default SCALE_PROBABILITY / IMPROVEMENT_MIN"
+  sed -i.bak \
+    -e 's/^    SCALE_PROBABILITY  = 1.0$/    SCALE_PROBABILITY  = 0.0/' \
+    -e 's/^    IMPROVEMENT_MIN    = 30.0$/    IMPROVEMENT_MIN    = 10.0/' \
+    "$MOCK_AGENT_YAML"
+  rm -f "$MOCK_AGENT_YAML.bak"
+  apply_mock_agent
+  MOCK_AGENT_SCALE_BUMPED=false
 }
 
 clear_cooldown() {
@@ -212,6 +246,17 @@ open_energy_window() {
     -p '{"status":{"decision":{"action":"DeployImmediately","reason":"demo: energy window open"},"energyMetrics":{"sufficient":true}}}' >/dev/null
 }
 
+# Captures $APP's real pre-demo replica count exactly once, the first time
+# any beat is about to change it — same idempotent-capture pattern as
+# capture_eao_original, so that whichever beat runs first (retry or scale)
+# is the one whose capture sticks, and cleanup() always restores the true
+# original regardless of how many beats touch replica count along the way.
+capture_original_replicas() {
+  [ -n "$NGINX2_ORIGINAL_REPLICAS" ] && return
+  NGINX2_ORIGINAL_REPLICAS=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
+    -o jsonpath='{.spec.replicas}')
+}
+
 # ─── Beat 1 — NoOp ──────────────────────────────────────────────────────────
 
 # NoOp arms cooldownSeconds same as any other terminal outcome (see
@@ -235,8 +280,7 @@ noop() {
 # Scales $APP up by one and waits (up to 60s) for the new pod to go Pending
 # behind the energy gate. Sets RETRY_PENDING_POD.
 retry_scale_and_wait_pending() {
-  NGINX2_ORIGINAL_REPLICAS=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.spec.replicas}')
+  capture_original_replicas
   narrate "Scaling $APP up by one to force a pod Pending behind the energy gate."
   run kubectl scale deployment "$APP" -n "$APP_NAMESPACE" \
     --replicas=$((NGINX2_ORIGINAL_REPLICAS + 1))
@@ -294,8 +338,10 @@ re-asserts every few seconds — the echoed patches double as progress."
 # directly for Enacting rather than "left Watching": a full NoOp cycle
 # (Watching->Triggered->Evaluating->Watching) completes in under a second,
 # so sampling for "not Watching" would alias right past it. Enacting is the
-# one state that actually holds still (moveEnactor's fixed 60s window).
-move_wait_for_enacting() {
+# one state that actually holds still (moveEnactor's / scaleEnactor's fixed
+# 60s window) — shared by beats 3 and 4, since both need the same
+# close-to-trigger / observe-Enacting pattern.
+wait_for_enacting() {
   local waited=0
   while [ "$waited" -lt 150 ]; do
     clear_cooldown
@@ -312,9 +358,11 @@ move_wait_for_enacting() {
   return 1
 }
 
-# Re-asserts the open window every 3s for the rest of moveEnactor's 60s
-# window, in case the external EAO controller reverts a single patch.
-move_keep_window_open() {
+# Re-asserts the open window every 3s for the rest of the enactor's 60s
+# window, in case the external EAO controller reverts a single patch. Shared
+# by beats 3 and 4 — moveEnactor and scaleEnactor use the same default
+# timeout, and both need the replacement/new pod to pass CheckEnergyGate.
+keep_window_open() {
   local waited=0
   while [ "$waited" -lt 60 ] && [ "$(profile_state)" = "Enacting" ]; do
     open_energy_window
@@ -332,13 +380,13 @@ schedule — same cooldown/kopf race as beat 2, handled the same way."
   bump_mock_agent
 
   step "Closing the energy window and re-asserting until Enacting is observed"
-  move_wait_for_enacting || return 1
+  wait_for_enacting || return 1
 
   step "Eviction is in flight — opening the energy window immediately"
   open_energy_window
   narrate "Re-asserting the open window for the rest of the enacting window."
   pause
-  move_keep_window_open
+  keep_window_open
 
   # Revert MOVE_PROBABILITY now rather than waiting for script exit: once the
   # move has resolved, nothing is holding the window open any more, so any
@@ -357,11 +405,50 @@ steered to the Move's target node instead of a fresh AI call."
   pause
 }
 
+# ─── Beat 4 — AdjustReplicas (Scale) ────────────────────────────────────────
+
+# Unlike Move, a real target replica count depends on how many pods $APP
+# currently has — the mock agent scales up by one from 1 (its steady state
+# after cleanup), so this beat is deterministic in practice even though the
+# mock agent picks a direction at random once above 1. capture_original_replicas
+# runs here too (idempotent) so cleanup() restores the true pre-demo count
+# even if this beat runs standalone, without retry() having captured it first.
+scale() {
+  step "Beat 4 — AdjustReplicas (Scale)"
+  narrate "Same energy-gate interaction as beat 3: needs the window CLOSED to
+trigger, OPEN for the new replica's pod to actually schedule."
+  capture_original_replicas
+
+  step "Forcing a guaranteed above-threshold AdjustReplicas"
+  bump_mock_agent_scale
+
+  step "Closing the energy window and re-asserting until Enacting is observed"
+  wait_for_enacting || return 1
+
+  step "Spec.Replicas is patched — opening the energy window immediately"
+  open_energy_window
+  narrate "Re-asserting the open window for the rest of the enacting window."
+  pause
+  keep_window_open
+
+  # Same reasoning as move(): revert now, not at script exit, so nothing
+  # forces another Scale recommendation while no one's watching the window.
+  revert_mock_agent_scale
+
+  step "Watching $APP pods (Ctrl-C once the new replica is Running)"
+  run kubectl get pods -n "$APP_NAMESPACE" -l app=nginx-2 -o wide --watch || true
+
+  step "Final state"
+  run kubectl describe orchestrationprofile "$PROFILE"
+  narrate "Replica count reverts to $NGINX2_ORIGINAL_REPLICAS on cleanup, same as beat 2."
+  pause
+}
+
 # ─── Main ───────────────────────────────────────────────────────────────────
 
 usage() {
-  echo "Usage: $0 [noop|retry|move|cleanup]"
-  echo "  (no argument) runs noop, retry, move in order"
+  echo "Usage: $0 [noop|retry|move|scale|cleanup]"
+  echo "  (no argument) runs noop, retry, move, scale in order"
 }
 
 main() {
@@ -369,11 +456,13 @@ main() {
     noop) noop ;;
     retry) retry ;;
     move) move ;;
+    scale) scale ;;
     cleanup) : ;; # cleanup runs unconditionally via the EXIT trap below
     all)
       noop
       retry
       move
+      scale
       ;;
     -h|--help) usage; trap - EXIT; exit 0 ;;
     *) usage >&2; trap - EXIT; exit 1 ;;

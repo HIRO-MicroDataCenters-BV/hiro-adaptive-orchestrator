@@ -924,9 +924,9 @@ flowchart LR
 <a id="demo-walkthrough"></a>
 ## 🎬 <u>Demo walkthrough</u>
 
-[`hack/demo_rebalance.sh`](../../hack/demo_rebalance.sh) drives all three lifecycle paths
+[`hack/demo_rebalance.sh`](../../hack/demo_rebalance.sh) drives all four lifecycle paths
 above against a live cluster, narrated pane-by-pane (see the script's own header comment for
-pane setup and usage: `hack/demo_rebalance.sh [noop|retry|move|cleanup]`).
+pane setup and usage: `hack/demo_rebalance.sh [noop|retry|move|scale|cleanup]`).
 
 ### Feature view — what each beat proves
 
@@ -971,8 +971,21 @@ flowchart LR
     Before -->|"AI recommends relocating<br/>Pod X to Node B"| After
 ```
 
+**Beat 4 — Scale: adjusts capacity directly, up or down**
+
+```mermaid
+flowchart LR
+    subgraph Before["Before"]
+        D1["Deployment: 1 replica"]
+    end
+    subgraph After["After the AI-driven AdjustReplicas"]
+        D2["Deployment: 2 replicas<br/>(or fewer, if demand dropped)"]
+    end
+    Before -->|"AI recommends a new<br/>target replica count"| After
+```
+
 HIRO doesn't just place workloads intelligently once — it keeps watching, and can safely
-move things later if conditions change.
+move things or resize capacity later if conditions change.
 
 ### Mechanics — what the script actually does
 
@@ -1013,18 +1026,36 @@ flowchart TD
     CloseLoop --> Trigger["EnergyThreshold matches<br/>(window closed)"]
     Trigger --> Cycle1["Triggered → Evaluating (AI call,<br/>Move accepted) → Decided →<br/>rate-limit gate → Enacting"]
     Cycle1 --> Open["open_energy_window<br/>(replacement needs it open)"]
-    Open --> KeepOpen["move_keep_window_open loop<br/>every 3s for 60s window"]
+    Open --> KeepOpen["keep_window_open loop<br/>every 3s for 60s window"]
     KeepOpen --> Store["DecisionStore hit —<br/>replacement scored onto<br/>TargetNode, no 2nd AI call"]
     Store --> Revert["revert_mock_agent"]
     Revert --> Cycle2["Watching (outcome: Enacted)"]
 ```
 
-Beats 2 and 3 both re-assert their patches on a loop instead of applying them once: a
+**Beat 4 — Scale**
+
+```mermaid
+flowchart TD
+    Start(["scale()"]) --> Capture["capture_original_replicas<br/>(idempotent)"]
+    Capture --> Bump["bump_mock_agent_scale<br/>(force guaranteed AdjustReplicas)"]
+    Bump --> CloseLoop["reassert clear_cooldown +<br/>close_energy_window<br/>every 2s (up to 150s)"]
+    CloseLoop --> Trigger["EnergyThreshold matches<br/>(window closed)"]
+    Trigger --> Cycle1["Triggered → Evaluating (AI call,<br/>AdjustReplicas accepted) → Decided<br/>→ Enacting"]
+    Cycle1 --> Open["open_energy_window<br/>(new replica needs it open)"]
+    Open --> KeepOpen["keep_window_open loop<br/>every 3s for 60s window"]
+    KeepOpen --> Patch["Spec.Replicas patched,<br/>ReadyReplicas polled"]
+    Patch --> Revert["revert_mock_agent_scale"]
+    Revert --> Cycle2["Watching (outcome: Enacted)"]
+```
+
+Beats 2, 3, and 4 all re-assert their patches on a loop instead of applying them once: a
 one-shot patch can lose a race against cooldown re-arming or against
 `eaoprofile-optional`'s own external controller reconciling a change back. The script
 captures that EAO's real pre-demo window state the first time it patches it and restores it
 on exit — see `capture_eao_original`/`revert_eao_window` in the script — rather than waiting
-out that external controller's own reconcile cadence.
+out that external controller's own reconcile cadence. Beats 2 and 4 similarly capture
+$APP's real pre-demo replica count exactly once (`capture_original_replicas`) so cleanup
+restores it correctly regardless of which beat runs, or in what order.
 
 <a id="testing"></a>
 ## 🧪 <u>Testing</u>
