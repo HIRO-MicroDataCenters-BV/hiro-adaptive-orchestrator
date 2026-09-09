@@ -25,6 +25,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 )
 
@@ -111,6 +112,7 @@ func dispatchMove(
 	cooldown time.Duration,
 ) {
 	logger := logf.FromContext(ctx)
+	metrics.RebalanceImprovementScore.WithLabelValues(string(resp.Action)).Observe(resp.Improvement)
 
 	threshold := r.ImprovementThreshold
 	if threshold <= 0 {
@@ -118,6 +120,7 @@ func dispatchMove(
 	}
 	if resp.Improvement < threshold {
 		reason := fmt.Sprintf("improvement %.2f below threshold %.2f: %s", resp.Improvement, threshold, resp.Reason)
+		metrics.RebalanceGuardrailRejectionsTotal.WithLabelValues(string(resp.Action), metrics.GuardrailThreshold).Inc()
 		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
 			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected) failed", "profile", profile.Name)
@@ -175,6 +178,7 @@ func dispatchMove(
 		// all — most waits succeed within the original call, without ever
 		// needing a second AI consultation.
 		reason := fmt.Sprintf("cluster-wide move rate limit: %v", err)
+		metrics.RebalanceRateLimitExhaustedTotal.WithLabelValues(string(resp.Action)).Inc()
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, reason,
 			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed}); tErr != nil {
 			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, rate limit) failed", "profile", profile.Name)
@@ -254,6 +258,7 @@ func dispatchScale(
 	cooldown time.Duration,
 ) {
 	logger := logf.FromContext(ctx)
+	metrics.RebalanceImprovementScore.WithLabelValues(string(resp.Action)).Observe(resp.Improvement)
 
 	threshold := r.ImprovementThreshold
 	if threshold <= 0 {
@@ -261,6 +266,7 @@ func dispatchScale(
 	}
 	if resp.Improvement < threshold {
 		reason := fmt.Sprintf("improvement %.2f below threshold %.2f: %s", resp.Improvement, threshold, resp.Reason)
+		metrics.RebalanceGuardrailRejectionsTotal.WithLabelValues(string(resp.Action), metrics.GuardrailThreshold).Inc()
 		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
 			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected) failed", "profile", profile.Name)
@@ -290,6 +296,7 @@ func dispatchScale(
 	if resp.TargetReplicas < bounds.Min || resp.TargetReplicas > bounds.Max {
 		reason := fmt.Sprintf("targetReplicas %d outside [%d, %d] (%s): %s",
 			resp.TargetReplicas, bounds.Min, bounds.Max, bounds.Source, resp.Reason)
+		metrics.RebalanceGuardrailRejectionsTotal.WithLabelValues(string(resp.Action), metrics.GuardrailBounds).Inc()
 		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
 			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected, out of bounds) failed", "profile", profile.Name)

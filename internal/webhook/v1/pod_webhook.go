@@ -23,6 +23,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 )
 
@@ -76,6 +77,7 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj *corev1.Pod) error
 	logger := logf.FromContext(ctx)
 
 	if obj.Spec.SchedulerName == d.schedulerName {
+		metrics.WebhookPodDefaultOutcomesTotal.WithLabelValues(metrics.PodDefaultAlreadySet).Inc()
 		return nil // already targeting the right scheduler
 	}
 
@@ -84,10 +86,12 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj *corev1.Pod) error
 		// Soft-fail: never block pod creation due to infrastructure errors.
 		logger.Error(err, "webhook: profile lookup failed, allowing pod unchanged",
 			"pod", obj.Name, "namespace", obj.Namespace)
+		metrics.WebhookPodDefaultOutcomesTotal.WithLabelValues(metrics.PodDefaultLookupError).Inc()
 		return nil
 	}
 
 	if profile == nil {
+		metrics.WebhookPodDefaultOutcomesTotal.WithLabelValues(metrics.PodDefaultNoProfile).Inc()
 		return nil // no OrchestrationProfile governs this pod
 	}
 
@@ -98,5 +102,6 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj *corev1.Pod) error
 		"profile", profile.Name,
 		"schedulerName", d.schedulerName,
 	)
+	metrics.WebhookPodDefaultOutcomesTotal.WithLabelValues(metrics.PodDefaultMutated).Inc()
 	return nil
 }

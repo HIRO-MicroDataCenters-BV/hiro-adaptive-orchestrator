@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
 )
@@ -302,6 +303,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl
 		if remaining := time.Until(rs.CooldownUntil.Time); remaining > 0 {
 			logger.V(1).Info("rebalance: still in cooldown, skipping AI consultation",
 				"profile", profile.Name, "remaining", remaining)
+			metrics.RebalanceCooldownSkipsTotal.Inc()
 			return ctrl.Result{RequeueAfter: remaining}, nil
 		}
 	}

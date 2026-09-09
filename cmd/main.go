@@ -37,12 +37,14 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/controller"
+	hirometrics "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/rebalance"
 	webhookv1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/webhook/v1"
@@ -531,6 +533,7 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "RebalanceDetection")
 		os.Exit(1)
 	}
+	crmetrics.Registry.MustRegister(hirometrics.NewRebalanceStateGaugeCollector(mgr.GetClient()))
 
 	// Create the PlacementServer with the context builder and decision client.
 	// The server will use these to handle incoming placement decision requests from the kube-scheduler plugin.

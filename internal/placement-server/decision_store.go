@@ -21,6 +21,7 @@ import (
 	"time"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 )
 
 // DefaultDecisionStoreTTL bounds how long a decision recorded by the
@@ -122,12 +123,15 @@ func (s *DecisionStore) Lookup(key string) (DecisionStoreEntry, bool) {
 	defer s.mu.Unlock()
 	entry, ok := s.entries[key]
 	if !ok {
+		metrics.PlacementDecisionStoreMissesTotal.Inc()
 		return DecisionStoreEntry{}, false
 	}
 	delete(s.entries, key)
 	if time.Now().After(entry.ExpiresAt) {
+		metrics.PlacementDecisionStoreMissesTotal.Inc()
 		return DecisionStoreEntry{}, false
 	}
+	metrics.PlacementDecisionStoreHitsTotal.Inc()
 	return entry, true
 }
 

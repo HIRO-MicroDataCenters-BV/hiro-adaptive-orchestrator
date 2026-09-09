@@ -21,12 +21,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 )
 
 // =============================================================================
@@ -179,24 +181,38 @@ func (s *PlacementServer) Start(ctx context.Context) error {
 // Used by:
 //   - handleScore             (plugin path: POST /api/v1/placement/score)
 //   - handleExtenderPrioritize (extender path: POST /extender/prioritize)
+//
+// path identifies which of those two callers this is ("plugin" or
+// "extender"), purely for the hiro_placement_score_* metrics — both callers
+// go through the exact same decision logic either way.
 func (s *PlacementServer) score(
 	ctx context.Context,
 	placementCtx PlacementContext,
 	requestID string,
+	path string,
 ) (*DecisionResponse, error) {
+	start := time.Now()
+	defer func() {
+		metrics.PlacementScoreDuration.WithLabelValues(path).Observe(time.Since(start).Seconds())
+	}()
+
 	if resp := s.decisionStoreResponse(ctx, placementCtx, requestID); resp != nil {
+		metrics.PlacementScoreRequestsTotal.WithLabelValues(path, metrics.ScoreResultStoreHit).Inc()
 		return resp, nil
 	}
 
 	req, err := s.builder.Build(ctx, placementCtx, requestID)
 	if err != nil {
+		metrics.PlacementScoreRequestsTotal.WithLabelValues(path, metrics.ScoreResultAIError).Inc()
 		return nil, err
 	}
 	resp, err := s.client.RequestDecision(ctx, req)
 	if err != nil {
+		metrics.PlacementScoreRequestsTotal.WithLabelValues(path, metrics.ScoreResultAIError).Inc()
 		return nil, err
 	}
 	logInitialPlacementDecision(ctx, req, resp)
+	metrics.PlacementScoreRequestsTotal.WithLabelValues(path, metrics.ScoreResultAISuccess).Inc()
 	return resp, nil
 }
 
@@ -266,8 +282,20 @@ func (s *PlacementServer) decisionStoreResponse(
 // Used by:
 //   - handleFilter        (plugin path: POST /api/v1/placement/filter)
 //   - handleExtenderFilter (extender path: POST /extender/filter)
-func (s *PlacementServer) filter(ctx context.Context, pod *corev1.Pod) (EnergyGateResponse, error) {
-	return s.builder.CheckEnergyGate(ctx, pod)
+//
+// path identifies which of those two callers this is, purely for metrics —
+// see score's doc comment for the same convention. An error here is always
+// soft-failed open by the caller (Allowed=true regardless), so it's counted
+// separately (PlacementFilterErrorsTotal) rather than as an "allowed"
+// request outcome.
+func (s *PlacementServer) filter(ctx context.Context, pod *corev1.Pod, path string) (EnergyGateResponse, error) {
+	gate, err := s.builder.CheckEnergyGate(ctx, pod)
+	if err != nil {
+		metrics.PlacementFilterErrorsTotal.WithLabelValues(path).Inc()
+		return gate, err
+	}
+	metrics.PlacementFilterRequestsTotal.WithLabelValues(path, strconv.FormatBool(gate.Allowed)).Inc()
+	return gate, nil
 }
 
 // =============================================================================
@@ -307,7 +335,7 @@ func (s *PlacementServer) handleScore(w http.ResponseWriter, r *http.Request) {
 		"candidateNodes", len(placementCtx.CandidateNodes),
 	)
 
-	decisionResp, err := s.score(ctx, placementCtx, requestID)
+	decisionResp, err := s.score(ctx, placementCtx, requestID, metrics.PathPlugin)
 	if err != nil {
 		logger.Error(err, "placement: score request failed",
 			"requestId", requestID,
@@ -371,7 +399,7 @@ func (s *PlacementServer) handleFilter(w http.ResponseWriter, r *http.Request) {
 		"namespace", req.Pod.Namespace,
 	)
 
-	gate, err := s.filter(ctx, req.Pod)
+	gate, err := s.filter(ctx, req.Pod, metrics.PathPlugin)
 	if err != nil {
 		logger.Error(err, "placement: filter check failed, allowing scheduling",
 			"requestId", requestID,

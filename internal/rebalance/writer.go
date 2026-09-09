@@ -31,6 +31,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 )
 
 // DefaultMaxRecentDecisions bounds the rolling history kept on profile
@@ -183,6 +184,9 @@ func (w *StateWriter) Transition(
 			"reason", reason, "decisionId", rs.DecisionID,
 		)
 		w.emitEvent(profile, from, to, opts.Outcome, reason, rs.DecisionID)
+		metrics.RebalanceTransitionsTotal.WithLabelValues(
+			string(emptyAsNone(from)), string(to), string(rs.Action), string(opts.Outcome),
+		).Inc()
 		result = profile.Status.RebalancingStatus
 		return nil
 	})
