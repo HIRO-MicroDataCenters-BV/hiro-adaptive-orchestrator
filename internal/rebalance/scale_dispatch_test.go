@@ -77,6 +77,20 @@ func testHPA(name string, minReplicas, maxReplicas int32) *autoscalingv2.Horizon
 	}
 }
 
+// testKEDAOwnedHPA is testHPA with an ownerReference back to a ScaledObject,
+// the same way KEDA's own generated HPA carries one — see
+// resolveReplicaBounds' doc comment on why that's what dispatchScale checks.
+func testKEDAOwnedHPA(name, scaledObjectName string, minReplicas, maxReplicas int32) *autoscalingv2.HorizontalPodAutoscaler {
+	hpa := testHPA(name, minReplicas, maxReplicas)
+	hpa.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "keda.sh/v1alpha1",
+		Kind:       "ScaledObject",
+		Name:       scaledObjectName,
+		UID:        "test-uid",
+	}}
+	return hpa
+}
+
 func ptrInt32(v int32) *int32 { return &v }
 
 func adjustReplicasResponse(targetReplicas int32, improvement float64) placementserver.RebalanceDecisionResponse {
@@ -216,6 +230,44 @@ func TestReconciler_ScaleHonoursHPABounds(t *testing.T) {
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
 	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeEnacted {
 		t.Fatalf("recentDecisions = %+v, want one Enacted-outcome entry (HPA bounds should have allowed 15)", rs.RecentDecisions)
+	}
+}
+
+// TestReconciler_ScaleDefersToKEDAManagedWorkload covers Story 36: a workload
+// whose HPA was created by a KEDA ScaledObject (identified by ownerReferences)
+// must never be patched directly — the cycle ends Deferred, and Spec.Replicas
+// is left untouched, regardless of how well the recommendation would
+// otherwise have cleared every other guardrail.
+func TestReconciler_ScaleDefersToKEDAManagedWorkload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(adjustReplicasResponse(3, 50))
+	}))
+	defer server.Close()
+
+	profile := testProfileWithConditions(TriggerScheduled)
+	deploy := testScalableDeployment(1)
+	hpa := testKEDAOwnedHPA("keda-hpa-my-scaledobject", "my-scaledobject", 1, 10)
+	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, hpa, profile)
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeDeferred {
+		t.Fatalf("recentDecisions = %+v, want one Deferred-outcome entry", rs.RecentDecisions)
+	}
+	if !strings.Contains(rs.RecentDecisions[0].Reason, "KEDA") || !strings.Contains(rs.RecentDecisions[0].Reason, "my-scaledobject") {
+		t.Errorf("reason = %q, want it to mention KEDA and the ScaledObject name", rs.RecentDecisions[0].Reason)
+	}
+
+	stillOne := &appsv1.Deployment{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "app-a", Namespace: "default"}, stillOne); err != nil {
+		t.Fatalf("Get deployment: %v", err)
+	}
+	if stillOne.Spec.Replicas == nil || *stillOne.Spec.Replicas != 1 {
+		t.Errorf("Spec.Replicas = %v, want unchanged at 1 (KEDA-managed workload must never be patched)", stillOne.Spec.Replicas)
 	}
 }
 

@@ -557,8 +557,10 @@ will need its own the same way.
 ```mermaid
 flowchart LR
     Resp(["AdjustReplicas response"]) --> Q{"HorizontalPodAutoscaler<br/>targeting this workload?"}
-    Q -- yes --> HPA["[hpa.Spec.MinReplicas,<br/>hpa.Spec.MaxReplicas]"]
+    Q -- yes --> Owner{"HPA owned by a<br/>KEDA ScaledObject?"}
     Q -- no --> Def["[Reconciler.MinReplicas,<br/>Reconciler.MaxReplicas]<br/>(env-configurable, default [1, 10])"]
+    Owner -- yes --> Deferred(["Watching + Deferred<br/>(never patches Spec.Replicas)"])
+    Owner -- no --> HPA["[hpa.Spec.MinReplicas,<br/>hpa.Spec.MaxReplicas]"]
     HPA --> Check{"TargetReplicas<br/>in range?"}
     Def --> Check
     Check -- no --> Rej(["Watching + Rejected"])
@@ -576,10 +578,17 @@ No matching HPA falls back to `Reconciler.MinReplicas`/`MaxReplicas` (`REBALANCE
 misbehaving or overly aggressive AI response from scaling to zero or to something absurd, not
 to express real capacity planning for any given workload.
 
-This only covers direct `Deployment`/`StatefulSet` scaling — a workload owned by a KEDA
-`ScaledObject` isn't detected or deferred to specially today, so `AdjustReplicas` and KEDA
-could both try to act on the same workload's replica count. Worth revisiting if that comes up
-in practice.
+**KEDA-managed workloads are deferred to entirely, not just bounded.** KEDA doesn't scale a
+workload's replicas directly — it creates and drives a real `HorizontalPodAutoscaler` of its
+own, fed by its custom metrics adapter instead of CPU/memory. That generated HPA's
+`ownerReferences` point back to the `ScaledObject` that created it, so a found HPA is checked
+for KEDA ownership (`Kind: ScaledObject, apiVersion: keda.sh/v1alpha1`) — no new RBAC or CRD
+scheme registration needed, since it only inspects an HPA object already fetched for bounds. If
+KEDA-owned, `dispatchScale` never calls `scaleEnactor` at all: the cycle ends `Watching` +
+`Deferred` with a reason naming the owning `ScaledObject`. Patching `Spec.Replicas` on a
+KEDA-managed workload would just compete with KEDA's own reconcile loop — whichever writes most
+recently wins, and they'd flap back and forth — so stepping back entirely, rather than trying to
+coexist, is the only safe option available without a deeper KEDA integration (not built).
 
 <a id="node-pressure-cpumemory"></a>
 ## 📊 <u>Node pressure (CPU/Memory)</u>

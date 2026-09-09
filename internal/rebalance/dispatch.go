@@ -237,7 +237,8 @@ func dispatchMoveDryRun(
 }
 
 // dispatchScale applies the same improvement-threshold guardrail as Move,
-// plus a replica-bounds guardrail (see resolveReplicaBounds — an existing
+// then defers entirely to KEDA if the workload is already KEDA-managed (see
+// resolveReplicaBounds), then a replica-bounds guardrail (an existing
 // HorizontalPodAutoscaler on the workload wins over the package/env
 // defaults), and for an accepted recommendation drives Decided -> Enacting ->
 // scaleEnactor -> Watching. Unlike Move, AdjustReplicas isn't gated by any
@@ -276,10 +277,19 @@ func dispatchScale(
 		return
 	}
 
-	min, max, boundsSource := resolveReplicaBounds(ctx, r.Client, profile, r.MinReplicas, r.MaxReplicas)
-	if resp.TargetReplicas < min || resp.TargetReplicas > max {
+	bounds := resolveReplicaBounds(ctx, r.Client, profile, r.MinReplicas, r.MaxReplicas)
+	if bounds.KEDAManaged {
+		reason := fmt.Sprintf("workload is managed by KEDA ScaledObject %s: deferring to its own autoscaling", bounds.KEDAOwner)
+		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeDeferred, Cooldown: cooldown}); err != nil {
+			logger.Error(err, "rebalance: dispatch transition to Watching (Deferred, KEDA-managed) failed", "profile", profile.Name)
+		}
+		return
+	}
+
+	if resp.TargetReplicas < bounds.Min || resp.TargetReplicas > bounds.Max {
 		reason := fmt.Sprintf("targetReplicas %d outside [%d, %d] (%s): %s",
-			resp.TargetReplicas, min, max, boundsSource, resp.Reason)
+			resp.TargetReplicas, bounds.Min, bounds.Max, bounds.Source, resp.Reason)
 		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
 			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected, out of bounds) failed", "profile", profile.Name)
@@ -288,7 +298,7 @@ func dispatchScale(
 	}
 
 	details := fmt.Sprintf("targetReplicas=%d improvement=%.2f bounds=[%d,%d] (%s)",
-		resp.TargetReplicas, resp.Improvement, min, max, boundsSource)
+		resp.TargetReplicas, resp.Improvement, bounds.Min, bounds.Max, bounds.Source)
 	if _, err := r.Writer.Transition(ctx, key, StateDecided, resp.Reason,
 		TransitionOptions{Action: resp.Action, Details: details}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Decided failed", "profile", profile.Name)
