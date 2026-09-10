@@ -49,4 +49,8 @@ limitations under the License.
 // request/error/duration metrics can't express — e.g. not just "how many
 // rebalance reconciles happened" but "how many were rejected by which
 // guardrail."
+//
+// See README.md in this directory for the full reference: every custom
+// metric with its labels and meaning, the complete list of free metrics
+// (controller-runtime / client-go / Go runtime), and every label value.
 package metrics

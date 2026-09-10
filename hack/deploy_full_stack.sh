@@ -53,6 +53,22 @@
 #                              Needed on kind/minikube/k3d; set false on
 #                              real clusters with valid kubelet certs.
 #
+# ─── Prometheus Operator (scrape this repo's own Prometheus metrics) ─────────
+#   DEPLOY_PROMETHEUS_OPERATOR     true|false                  (default: false)
+#                                  Installs kube-prometheus-stack as its own
+#                                  Helm release (see hack/install_prometheus_operator.sh)
+#                                  and enables config/prometheus (the ServiceMonitor
+#                                  scaffold) in the kustomize overlay. See
+#                                  internal/metrics/README.md for what gets exposed.
+#   PROMETHEUS_OPERATOR_NAMESPACE  namespace for that release   (default: hiro-monitoring)
+#   PROMETHEUS_OPERATOR_RELEASE    helm release name             (default: hiro-monitoring)
+#   PROMETHEUS_OPERATOR_CHART_VERSION  chart version to install  (default: latest)
+#   GRAFANA_ADMIN_PASSWORD        Grafana admin password to set. Unset → the
+#                                  Grafana subchart generates a random one into
+#                                  the <release>-grafana Secret. User "admin"
+#                                  either way. Note: a random password is
+#                                  regenerated on every uninstall/reinstall.
+#
 # ─── Rebalance Engine ─────────────────────────────────────────────────────────
 #   REBALANCE_MAX_RECENT_DECISIONS      decision-history length per profile (default: 10)
 #   REBALANCE_DETECTION_INTERVAL        periodic detection tick, Go duration (default: 30s)
@@ -70,20 +86,20 @@
 #                             Injected by the webhook into spec.schedulerName.
 #                             Must match the scheduler Deployment in config/scheduler/.
 #
-# ─── Webhook TLS (Phase 8 — pod scheduler MutatingAdmissionWebhook) ──────────
-#   When DEPLOY_SCHEDULER_PLUGIN=true, Phase 8 deploys the webhook that
+# ─── Webhook TLS (Phase 9 — pod scheduler MutatingAdmissionWebhook) ──────────
+#   When DEPLOY_SCHEDULER_PLUGIN=true, Phase 9 deploys the webhook that
 #   automatically sets spec.schedulerName = HIRO_SCHEDULER_NAME on pods governed
 #   by an OrchestrationProfile. TLS is required for Kubernetes admission webhooks.
 #
 #   This project uses cert-manager (free, open-source — CNCF project).
 #   Phase 2 installs cert-manager (idempotent) and waits for it to be ready.
 #   Phase 4 (make deploy) applies Issuer + Certificate via config/default.
-#   Phase 8 waits for the cert to be issued, enables the webhook, and restarts.
+#   Phase 9 waits for the cert to be issued, enables the webhook, and restarts.
 #
 #   CERT_MANAGER_VERSION      cert-manager version to install (default: v1.17.2)
 #   WEBHOOK_EXCLUDE_NAMESPACES  comma-separated namespaces the webhook will NOT intercept
 #                               (default: kube-system,kube-public,kube-node-lease)
-#                               Phase 8 patches the MWC with this list at deploy time.
+#                               Phase 9 patches the MWC with this list at deploy time.
 #                               Always keep system namespaces in any custom list.
 #
 # ─── Deploy options ──────────────────────────────────────────────────────────
@@ -185,7 +201,7 @@ export SCHED_K8S_VERSION=${SCHED_K8S_VERSION:-v1.35.0}
 export SCHED_VERSION=${SCHED_VERSION:-v0.1.0}
 export HIRO_SCHEDULER_NAME=${HIRO_SCHEDULER_NAME:-hiro-scheduler}
 export CERT_MANAGER_VERSION=${CERT_MANAGER_VERSION:-v1.17.2}
-# Namespaces the webhook will NOT intercept (applied by Phase 8 kubectl patch).
+# Namespaces the webhook will NOT intercept (applied by Phase 9 kubectl patch).
 # Kustomize applies the same defaults statically; this allows deploy-time override.
 WEBHOOK_EXCLUDE_NAMESPACES=${WEBHOOK_EXCLUDE_NAMESPACES:-kube-system,kube-public,kube-node-lease}
 
@@ -197,6 +213,18 @@ WEBHOOK_EXCLUDE_NAMESPACES=${WEBHOOK_EXCLUDE_NAMESPACES:-kube-system,kube-public
 export INSTALL_METRICS_SERVER=${INSTALL_METRICS_SERVER:-true}
 export METRICS_SERVER_VERSION=${METRICS_SERVER_VERSION:-latest}
 export METRICS_SERVER_INSECURE_TLS=${METRICS_SERVER_INSECURE_TLS:-true}
+
+# ---------------------------------------------------------------------------
+# Prometheus Operator — lets Prometheus scrape this repo's own metrics
+# (internal/metrics). See hack/install_prometheus_operator.sh.
+# ---------------------------------------------------------------------------
+
+export DEPLOY_PROMETHEUS_OPERATOR=${DEPLOY_PROMETHEUS_OPERATOR:-false}
+export PROMETHEUS_OPERATOR_NAMESPACE=${PROMETHEUS_OPERATOR_NAMESPACE:-hiro-monitoring}
+export PROMETHEUS_OPERATOR_RELEASE=${PROMETHEUS_OPERATOR_RELEASE:-hiro-monitoring}
+export PROMETHEUS_OPERATOR_CHART_VERSION=${PROMETHEUS_OPERATOR_CHART_VERSION:-latest}
+# Grafana admin password. Empty → the chart's own default ("prom-operator").
+export GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-}
 
 # ---------------------------------------------------------------------------
 # Rebalance Engine — all optional, mirroring the operator's own package
@@ -253,15 +281,29 @@ step() { printf '\n\033[36m===>\033[0m %s\n' "$*"; }
 
 sep()  { echo "  ──────────────────────────────────────────────────────────"; }
 
+# print_banner <text> <ansi-color-code>
+# Boxed, colored heading — used wherever a top-level section (a deploy
+# summary, the port-forward guide, the access-URL list) needs to visually
+# stand out from the plain log/command lines around it.
+print_banner() {
+  local text="$1" color="$2" width=58
+  local border pad left right
+  border=$(printf '═%.0s' $(seq 1 "$width"))
+  pad=$(( width - ${#text} ))
+  left=$(( (pad + 1) / 2 ))
+  right=$(( pad - left ))
+  echo -e "\033[${color}m  ╔${border}╗\033[0m"
+  printf "\033[%sm  ║%*s%s%*s║\033[0m\n" "$color" "$left" "" "$text" "$right" ""
+  echo -e "\033[${color}m  ╚${border}╝\033[0m"
+}
+
 # ---------------------------------------------------------------------------
 # Config summary
 # ---------------------------------------------------------------------------
 
 print_config() {
   echo ""
-  echo "  ╔══════════════════════════════════════════════════════════╗"
-  echo "  ║           HIRO Full-Stack Deploy — Configuration         ║"
-  echo "  ╚══════════════════════════════════════════════════════════╝"
+  print_banner "HIRO Full-Stack Deploy — Configuration" 0
   echo ""
   echo "  ── Operator (one Deployment bundles all four) ───────────"
   echo "    1. OrchestrationProfile controller — CR reconciliation, PlacementStatus"
@@ -302,6 +344,19 @@ print_config() {
   echo "    Install                : $INSTALL_METRICS_SERVER  (version: $METRICS_SERVER_VERSION)"
   echo "    Insecure kubelet TLS   : $METRICS_SERVER_INSECURE_TLS"
   echo ""
+  echo "  ── Prometheus Operator ───────────────────────────────────"
+  echo "    Deploy                 : $DEPLOY_PROMETHEUS_OPERATOR"
+  if [ "$DEPLOY_PROMETHEUS_OPERATOR" = "true" ]; then
+  echo "    Namespace              : $PROMETHEUS_OPERATOR_NAMESPACE"
+  echo "    Release                : $PROMETHEUS_OPERATOR_RELEASE"
+  echo "    Chart Version          : $PROMETHEUS_OPERATOR_CHART_VERSION"
+  if [ -n "$GRAFANA_ADMIN_PASSWORD" ]; then
+  echo "    Grafana admin password : (set via GRAFANA_ADMIN_PASSWORD)"
+  else
+  echo "    Grafana admin password : random (read from the <release>-grafana Secret)"
+  fi
+  fi
+  echo ""
   echo "  ── Rebalance Engine ──────────────────────────────────────"
   echo "    Max Recent Decisions   : $REBALANCE_MAX_RECENT_DECISIONS"
   echo "    Detection Interval     : $REBALANCE_DETECTION_INTERVAL"
@@ -319,7 +374,7 @@ print_config() {
   echo ""
   echo "  ── Webhook TLS ───────────────────────────────────────────"
   echo "    TLS Provider           : cert-manager ${CERT_MANAGER_VERSION}"
-  echo "    Webhook enabled        : $DEPLOY_SCHEDULER_PLUGIN  (Phase 8)"
+  echo "    Webhook enabled        : $DEPLOY_SCHEDULER_PLUGIN  (Phase 9)"
   echo "    Excluded Namespaces    : ${WEBHOOK_EXCLUDE_NAMESPACES}"
   echo ""
   echo "  ── Deploy Options ────────────────────────────────────────"
@@ -418,6 +473,15 @@ check_prerequisites() {
     fi
   done
 
+  if [ "$DEPLOY_PROMETHEUS_OPERATOR" = "true" ]; then
+    if ! command -v helm &>/dev/null; then
+      echo "  ERROR: 'helm' not found in PATH (required by DEPLOY_PROMETHEUS_OPERATOR=true)." >&2
+      errors=1
+    else
+      echo "  [ok] helm  →  $(command -v helm)"
+    fi
+  fi
+
   # ── Docker daemon ──────────────────────────────────────────────────────
   if command -v docker &>/dev/null; then
     if ! docker info &>/dev/null 2>&1; then
@@ -476,6 +540,9 @@ check_prerequisites() {
 #                   (internal/rebalance/pressure.go). Everything else works
 #                   fine without it; those two conditions just never fire.
 #                   See hack/install_metrics_server.sh.
+#   prometheus-operator (default off) — required for monitoring the cluster
+#                   components. Installs Prometheus, Alertmanager, and Grafana.
+#
 # ---------------------------------------------------------------------------
 
 install_prerequisites() {
@@ -521,6 +588,18 @@ install_prerequisites() {
     echo "                   rebalance triggers will never fire until it's installed."
   fi
 
+  # ── Prometheus Operator ─────────────────────────────────────────────────
+  # Lets a Prometheus instance actually pick up config/prometheus's
+  # ServiceMonitor. Idempotent — hack/install_prometheus_operator.sh skips
+  # if the release already exists.
+  if [ "$DEPLOY_PROMETHEUS_OPERATOR" = "true" ]; then
+    echo "  [prometheus-operator] DEPLOY_PROMETHEUS_OPERATOR=true — checking/installing..."
+    bash "$SCRIPT_DIR/install_prometheus_operator.sh" "$KUBECONFIG_PATH"
+  else
+    echo "  [prometheus-operator] Skipped (DEPLOY_PROMETHEUS_OPERATOR=false) —"
+    echo "                        internal/metrics won't be scraped by anything."
+  fi
+
   # ── Add future prerequisites here ───────────────────────────────────────
 }
 
@@ -534,7 +613,88 @@ deploy_oprator_with_samples() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 5 — Mock Decision Agent (when USE_MOCK_AGENT=true)
+# Phase 5 — Prometheus monitoring (opt-in: DEPLOY_PROMETHEUS_OPERATOR=true)
+#
+# config/prometheus/monitor.yaml (the ServiceMonitor for internal/metrics)
+# ships with this repo, kubebuilder-scaffolded, but is commented out of the
+# kustomize overlays by default. This phase enables it, re-applies the
+# overlay so it actually takes effect, and binds the metrics-reader
+# ClusterRole (created by Phase 4's `make deploy`) to the Prometheus Operator
+# installed in Phase 2 — its pod's own service account is what the
+# ServiceMonitor's bearer token comes from, not the operator's.
+# ---------------------------------------------------------------------------
+
+# active_overlay prints which kustomize overlay Phase 4 actually deployed —
+# needed here again since enabling config/prometheus edits that same file.
+active_overlay() {
+  if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
+    echo "config/default-with-webhook"
+  else
+    echo "config/default"
+  fi
+}
+
+enable_prometheus_scaffold() {
+  local overlay="$1"
+  if grep -q '^- \.\./prometheus' "$REPO_ROOT/$overlay/kustomization.yaml"; then
+    echo "  config/prometheus already enabled in $overlay/kustomization.yaml."
+    return
+  fi
+  sed -i.bak 's/^#- \.\.\/prometheus/- ..\/prometheus/' "$REPO_ROOT/$overlay/kustomization.yaml"
+  rm -f "$REPO_ROOT/$overlay/kustomization.yaml.bak"
+  echo "  Enabled config/prometheus in $overlay/kustomization.yaml."
+}
+
+apply_prometheus_overlay() {
+  local overlay="$1"
+  echo "  Re-applying $overlay (namespace/nameprefix/image already set by Phase 4)..."
+  kubectl apply -k "$REPO_ROOT/$overlay"
+}
+
+find_prometheus_service_account() {
+  kubectl get pod -n "$PROMETHEUS_OPERATOR_NAMESPACE" \
+    -l app.kubernetes.io/name=prometheus \
+    -o jsonpath='{.items[0].spec.serviceAccountName}' 2>/dev/null || true
+}
+
+bind_prometheus_metrics_rbac() {
+  echo "  Binding metrics-reader to the Prometheus Operator's service account..."
+  local sa
+  sa=$(find_prometheus_service_account)
+
+  if [ -z "$sa" ]; then
+    echo "  WARNING: could not find the Prometheus pod in namespace '$PROMETHEUS_OPERATOR_NAMESPACE'." >&2
+    echo "           Bind it manually once it's up:" >&2
+    echo "             kubectl create clusterrolebinding metrics-reader-prometheus \\" >&2
+    echo "               --clusterrole=metrics-reader --serviceaccount=$PROMETHEUS_OPERATOR_NAMESPACE:<sa-name>" >&2
+    return
+  fi
+
+  kubectl create clusterrolebinding metrics-reader-prometheus \
+    --clusterrole=metrics-reader \
+    --serviceaccount="$PROMETHEUS_OPERATOR_NAMESPACE:$sa" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  echo "  Bound metrics-reader → $PROMETHEUS_OPERATOR_NAMESPACE:$sa"
+}
+
+deploy_prometheus_monitoring() {
+  if [ "$DEPLOY_PROMETHEUS_OPERATOR" != "true" ]; then
+    step "Phase 5 — Skipping Prometheus monitoring   (DEPLOY_PROMETHEUS_OPERATOR=false)."
+    echo "  To deploy: DEPLOY_PROMETHEUS_OPERATOR=true hack/deploy_full_stack.sh"
+    return
+  fi
+
+  step "Phase 5 — Enabling Prometheus monitoring..."
+  local overlay
+  overlay="$(active_overlay)"
+
+  enable_prometheus_scaffold "$overlay"
+  apply_prometheus_overlay "$overlay"
+  bind_prometheus_metrics_rbac
+}
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Mock Decision Agent (when USE_MOCK_AGENT=true)
 #
 # The mock agent is a lightweight Python HTTP server that scores candidate
 # nodes randomly for initial placement, and recommends Move/NoOp randomly for
@@ -548,7 +708,7 @@ deploy_oprator_with_samples() {
 
 deploy_mock_agent() {
   if [ "$USE_MOCK_AGENT" = "true" ]; then
-    step "Phase 5 — Deploying mock decision agent..."
+    step "Phase 6 — Deploying mock decision agent..."
     # Stamping a fresh timestamp into the pod template's redeployed-at
     # annotation on every apply forces a new ReplicaSet even when nothing
     # else changed, so the pod always picks up the ConfigMap's latest script
@@ -561,18 +721,18 @@ deploy_mock_agent() {
     kubectl rollout status deployment/mock-decision-agent -n "$NAMESPACE" --timeout=120s
     echo "  Mock decision agent is ready."
   else
-    step "Phase 5 — Skipping mock agent              (USE_MOCK_AGENT=false)."
+    step "Phase 6 — Skipping mock agent              (USE_MOCK_AGENT=false)."
     echo "  Decision agent URL : $DECISION_AGENT_URL"
   fi
 }
 
 # ---------------------------------------------------------------------------
-# Phase 6 — PlacementServer health gate
+# Phase 7 — PlacementServer health gate
 # ---------------------------------------------------------------------------
 
 wait_for_placement_server() {
   local operator="${NAME_PREFIX}controller-manager"
-  step "Phase 6 — Waiting for PlacementServer to be reachable..."
+  step "Phase 7 — Waiting for PlacementServer to be reachable..."
   echo "  Service : ${PLACEMENT_SERVICE_NAME}.${NAMESPACE}.svc.cluster.local${PLACEMENT_SERVER_PORT}"
   echo "  Waiting for operator deployment rollout..."
 
@@ -584,15 +744,15 @@ wait_for_placement_server() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 7 — Scheduler plugin (opt-in: DEPLOY_SCHEDULER_PLUGIN=true)
+# Phase 8 — Scheduler plugin (opt-in: DEPLOY_SCHEDULER_PLUGIN=true)
 # ---------------------------------------------------------------------------
 
 deploy_scheduler_plugin() {
   if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
-    step "Phase 7 — Deploying HIRO scheduler plugin..."
+    step "Phase 8 — Deploying HIRO scheduler plugin..."
     bash "$SCRIPT_DIR/deploy_scheduler.sh" "$KUBECONFIG_PATH"
   else
-    step "Phase 7 — Skipping scheduler plugin        (DEPLOY_SCHEDULER_PLUGIN=false)."
+    step "Phase 8 — Skipping scheduler plugin        (DEPLOY_SCHEDULER_PLUGIN=false)."
     echo "  To deploy: DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_full_stack.sh"
     echo "  Standalone: hack/deploy_scheduler.sh"
   fi
@@ -602,7 +762,7 @@ deploy_scheduler_plugin() {
 # Webhook namespace exclusions — patches the MutatingWebhookConfiguration so
 # the webhook never intercepts pods in the specified namespaces.
 #
-# Called at the end of Phase 8 AFTER the MWC is live in the cluster.
+# Called at the end of Phase 9 AFTER the MWC is live in the cluster.
 # The kustomize overlay (mwc_namespace_patch.yaml) applies the same defaults
 # statically; this call lets WEBHOOK_EXCLUDE_NAMESPACES override them.
 # ---------------------------------------------------------------------------
@@ -628,7 +788,7 @@ configure_webhook_namespace_exclusions() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 8 — Enable pod scheduler webhook (DEPLOY_SCHEDULER_PLUGIN=true only)
+# Phase 9 — Enable pod scheduler webhook (DEPLOY_SCHEDULER_PLUGIN=true only)
 #
 # By this point Phase 2 has installed cert-manager and Phase 4 (make deploy)
 # has applied everything in config/default-with-webhook:
@@ -643,7 +803,7 @@ configure_webhook_namespace_exclusions() {
 
 deploy_scheduler_webhook() {
   if [ "$DEPLOY_SCHEDULER_PLUGIN" != "true" ]; then
-    step "Phase 8 — Skipping webhook                (DEPLOY_SCHEDULER_PLUGIN=false)."
+    step "Phase 9 — Skipping webhook                (DEPLOY_SCHEDULER_PLUGIN=false)."
     echo "  Webhook is only deployed with the scheduler plugin."
     return
   fi
@@ -651,7 +811,7 @@ deploy_scheduler_webhook() {
   local operator="${NAME_PREFIX}controller-manager"
   local cert="${NAME_PREFIX}serving-cert"
 
-  step "Phase 8 — Enabling pod scheduler webhook..."
+  step "Phase 9 — Enabling pod scheduler webhook..."
 
   # Wait for cert-manager to issue the TLS certificate before enabling the
   # webhook server — the operator crashes if ENABLE_WEBHOOKS=true and the
@@ -684,15 +844,15 @@ deploy_scheduler_webhook() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 9 — Extender (opt-in: DEPLOY_EXTENDER=true)
+# Phase 10 — Extender (opt-in: DEPLOY_EXTENDER=true)
 # ---------------------------------------------------------------------------
 
 deploy_extender() {
   if [ "$DEPLOY_EXTENDER" = "true" ]; then
-    step "Phase 9 — Deploying extender (patches kube-scheduler)..."
+    step "Phase 10 — Deploying extender (patches kube-scheduler)..."
     bash "$SCRIPT_DIR/deploy_extender.sh" "$KUBECONFIG_PATH"
   else
-    step "Phase 9 — Skipping extender                (DEPLOY_EXTENDER=false)."
+    step "Phase 10 — Skipping extender                (DEPLOY_EXTENDER=false)."
     echo "  To deploy: DEPLOY_EXTENDER=true hack/deploy_full_stack.sh"
     echo "  Standalone: hack/deploy_extender.sh"
   fi
@@ -704,9 +864,7 @@ deploy_extender() {
 
 print_summary() {
   echo ""
-  echo -e "\033[32m  ╔══════════════════════════════════════════════════════════╗\033[0m"
-  echo -e "\033[32m  ║              Full-stack deployment complete.             ║\033[0m"
-  echo -e "\033[32m  ╚══════════════════════════════════════════════════════════╝\033[0m"
+  print_banner "Full-stack deployment complete." 32
   echo ""
   echo -e "\033[32m  ── Components ────────────────────────────────────────────\033[0m"
   echo -e "\033[32m    Operator        : deployed  (namespace/$NAMESPACE)\033[0m"
@@ -722,6 +880,12 @@ print_summary() {
     echo -e "\033[32m    metrics-server  : installed  (powers CPU/Memory rebalance triggers)\033[0m"
   else
     echo -e "\033[33m    metrics-server  : not installed  (CPU/Memory triggers won't fire)\033[0m"
+  fi
+  if [ "$DEPLOY_PROMETHEUS_OPERATOR" = "true" ]; then
+    echo -e "\033[32m    Prometheus      : deployed  (release/$PROMETHEUS_OPERATOR_RELEASE, ns/$PROMETHEUS_OPERATOR_NAMESPACE)\033[0m"
+    echo -e "\033[32m      └─ scraping internal/metrics via config/prometheus ServiceMonitor\033[0m"
+  else
+    echo -e "\033[33m    Prometheus      : not deployed  (internal/metrics won't be scraped)\033[0m"
   fi
   if [ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ]; then
     echo -e "\033[32m    Scheduler Plugin: deployed  (opt-in: schedulerName=${HIRO_SCHEDULER_NAME})\033[0m"
@@ -739,6 +903,108 @@ print_summary() {
 }
 
 # ---------------------------------------------------------------------------
+# Port-forwarding + access URLs
+#
+# Only this deploy's own services — never anything pre-existing on the
+# cluster that this script didn't deploy (e.g. an unrelated Prometheus/Grafana
+# stack from another project).
+#
+# Local ports are the remote port with a "1" prefixed (8090 → 18090, etc.) —
+# distinct from the remote port so a local process already bound to the
+# remote port's number doesn't collide.
+#
+# The Prometheus/Grafana service names are resolved from the cluster by
+# label, not guessed — kube-prometheus-stack truncates them in a way that
+# varies by release name and chart version.
+# ---------------------------------------------------------------------------
+
+# Resolves to the Prometheus service name in PROMETHEUS_OPERATOR_NAMESPACE,
+# or empty if not found.
+prometheus_svc_name() {
+  kubectl get svc -n "$PROMETHEUS_OPERATOR_NAMESPACE" \
+    -l app=kube-prometheus-stack-prometheus \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+}
+
+# Resolves to the Grafana service name in PROMETHEUS_OPERATOR_NAMESPACE, or
+# empty if Grafana wasn't installed (a conflicting one already existed).
+grafana_svc_name() {
+  kubectl get svc -n "$PROMETHEUS_OPERATOR_NAMESPACE" \
+    -l app.kubernetes.io/name=grafana \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+}
+
+print_port_forward_guide() {
+  echo ""
+  print_banner "Port-forwarding (run manually)" 36
+  echo ""
+
+  local prom_svc="" graf_svc=""
+  if [ "$DEPLOY_PROMETHEUS_OPERATOR" = "true" ]; then
+    prom_svc="$(prometheus_svc_name)"
+    graf_svc="$(grafana_svc_name)"
+  fi
+
+  echo "  # 1. Kill any existing port-forwards for these services:"
+  echo "  pkill -f 'port-forward.*svc/$PLACEMENT_SERVICE_NAME' || true"
+  echo "  pkill -f 'port-forward.*svc/${NAME_PREFIX}controller-manager-metrics-service' || true"
+  if [ "$USE_MOCK_AGENT" = "true" ]; then
+    echo "  pkill -f 'port-forward.*svc/mock-decision-agent' || true"
+  fi
+  [ -n "$prom_svc" ] && echo "  pkill -f 'port-forward.*svc/$prom_svc' || true"
+  [ -n "$graf_svc" ] && echo "  pkill -f 'port-forward.*svc/$graf_svc' || true"
+  echo ""
+  echo "  # 2. Start the port-forwards:"
+  echo "  kubectl port-forward -n $NAMESPACE svc/$PLACEMENT_SERVICE_NAME 18090:8090 &"
+  echo "  kubectl port-forward -n $NAMESPACE svc/${NAME_PREFIX}controller-manager-metrics-service 18443:8443 &"
+  if [ "$USE_MOCK_AGENT" = "true" ]; then
+    echo "  kubectl port-forward -n $NAMESPACE svc/mock-decision-agent 18080:8080 &"
+  fi
+  [ -n "$prom_svc" ] && echo "  kubectl port-forward -n $PROMETHEUS_OPERATOR_NAMESPACE svc/$prom_svc 19090:9090 &"
+  [ -n "$graf_svc" ] && echo "  kubectl port-forward -n $PROMETHEUS_OPERATOR_NAMESPACE svc/$graf_svc 13000:80 &"
+  echo ""
+}
+
+print_access_urls() {
+  print_banner "Access URLs (after port-forwarding)" 36
+  echo ""
+
+  local prom_svc="" graf_svc=""
+  if [ "$DEPLOY_PROMETHEUS_OPERATOR" = "true" ]; then
+    prom_svc="$(prometheus_svc_name)"
+    graf_svc="$(grafana_svc_name)"
+  fi
+
+  printf "    %-26s %s\n" "PlacementServer health" "http://localhost:18090${PLACEMENT_SERVER_HEALTH_PATH}"
+  printf "    %-26s %s\n" "Operator metrics (raw)" "https://localhost:18443/metrics"
+  if [ -n "$prom_svc" ]; then
+    local prom_sa
+    prom_sa="$(find_prometheus_service_account)"
+    if [ -n "$prom_sa" ]; then
+      echo "      curl -sk -H \"Authorization: Bearer \$(kubectl create token $prom_sa -n $PROMETHEUS_OPERATOR_NAMESPACE)\" \\"
+      echo "        https://localhost:18443/metrics | grep '^hiro_'"
+    fi
+  else
+    echo "      (needs a bearer token from a SA with the metrics-reader ClusterRole)"
+  fi
+  if [ "$USE_MOCK_AGENT" = "true" ]; then
+    printf "    %-26s %s\n" "Mock decision agent" "http://localhost:18080"
+  fi
+  if [ -n "$prom_svc" ]; then
+    printf "    %-26s %s\n" "Prometheus UI" "http://localhost:19090"
+  fi
+  if [ -n "$graf_svc" ]; then
+    printf "    %-26s %s\n" "Grafana" "http://localhost:13000  (user: admin)"
+    if [ -n "$GRAFANA_ADMIN_PASSWORD" ]; then
+      echo "      password: the value you set in GRAFANA_ADMIN_PASSWORD"
+    else
+      echo "      password: kubectl get secret -n $PROMETHEUS_OPERATOR_NAMESPACE $graf_svc -o jsonpath='{.data.admin-password}' | base64 -d"
+    fi
+  fi
+  echo ""
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -750,6 +1016,7 @@ main() {
   install_prerequisites
   cleanup_conflicting_integration
   deploy_oprator_with_samples
+  deploy_prometheus_monitoring
   deploy_mock_agent
   wait_for_placement_server
   deploy_scheduler_plugin
@@ -757,6 +1024,8 @@ main() {
   deploy_extender
 
   print_summary
+  print_port_forward_guide
+  print_access_urls
 }
 
 main "$@"
