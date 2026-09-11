@@ -15,4 +15,4 @@ resources:
 images:
 - name: hiro-scheduler
   newName: ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/hiro-scheduler
-  newTag: v0.1.0-k8sv1.35.0-8ed6426
+  newTag: v0.1.0-k8sv1.35.0-bfe3469

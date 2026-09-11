@@ -26,7 +26,8 @@ resources:
 - ../manager
 - ../webhook
 - ../certmanager
-- ../prometheus
+# [PROMETHEUS] To enable prometheus monitor, uncomment the line below.
+#- ../prometheus
 
 # [METRICS] Shared component: adds metrics Service + enables HTTPS :8443 endpoint.
 # [WEBHOOK-PATCH] Adds cert volume mount, port 9443, and --webhook-cert-path arg to the Deployment.

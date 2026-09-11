@@ -14,12 +14,12 @@ namePrefix: hiro-adaptive-orchestrator-
 #  pairs:
 #    someName: someValue
 
-# [PROMETHEUS] To enable prometheus monitor, uncomment all sections with 'PROMETHEUS'.
-#- ../prometheus
 resources:
 - ../crd
 - ../rbac
 - ../manager
+# [PROMETHEUS] To enable prometheus monitor, uncomment the line below.
+#- ../prometheus
 # [WEBHOOK] Webhook + cert-manager resources are in config/default-with-webhook/.
 # Use that overlay when DEPLOY_SCHEDULER_PLUGIN=true (make deploy-scheduler).
 # [NETWORK POLICY] Protect the /metrics endpoint and Webhook Server with NetworkPolicy.

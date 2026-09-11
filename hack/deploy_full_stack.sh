@@ -54,12 +54,16 @@
 #                              real clusters with valid kubelet certs.
 #
 # ─── Prometheus Operator (scrape this repo's own Prometheus metrics) ─────────
-#   DEPLOY_PROMETHEUS_OPERATOR     true|false                  (default: false)
+#   DEPLOY_PROMETHEUS_OPERATOR     true|false                  (default: true)
 #                                  Installs kube-prometheus-stack as its own
 #                                  Helm release (see hack/install_prometheus_operator.sh)
 #                                  and enables config/prometheus (the ServiceMonitor
 #                                  scaffold) in the kustomize overlay. See
 #                                  internal/metrics/README.md for what gets exposed.
+#                                  Set false only if you already run your own
+#                                  Prometheus Operator (or don't want monitoring at
+#                                  all) — config/prometheus is then left disabled and
+#                                  Phase 5 is skipped, same as if it were never there.
 #   PROMETHEUS_OPERATOR_NAMESPACE  namespace for that release   (default: hiro-monitoring)
 #   PROMETHEUS_OPERATOR_RELEASE    helm release name             (default: hiro-monitoring)
 #   PROMETHEUS_OPERATOR_CHART_VERSION  chart version to install  (default: latest)
@@ -68,6 +72,13 @@
 #                                  the <release>-grafana Secret. User "admin"
 #                                  either way. Note: a random password is
 #                                  regenerated on every uninstall/reinstall.
+#   EXTERNAL_PROMETHEUS_SA          ServiceAccount name of an existing Prometheus
+#                                  you want to bind to this repo's metrics-reader
+#                                  ClusterRole instead of installing our own. Only
+#                                  used (and only printed) when
+#                                  DEPLOY_PROMETHEUS_OPERATOR=false. See "Using your
+#                                  own Prometheus?" in the script's final output.
+#   EXTERNAL_PROMETHEUS_NAMESPACE   namespace of that ServiceAccount.
 #
 # ─── Rebalance Engine ─────────────────────────────────────────────────────────
 #   REBALANCE_MAX_RECENT_DECISIONS      decision-history length per profile (default: 10)
@@ -219,12 +230,17 @@ export METRICS_SERVER_INSECURE_TLS=${METRICS_SERVER_INSECURE_TLS:-true}
 # (internal/metrics). See hack/install_prometheus_operator.sh.
 # ---------------------------------------------------------------------------
 
-export DEPLOY_PROMETHEUS_OPERATOR=${DEPLOY_PROMETHEUS_OPERATOR:-false}
+export DEPLOY_PROMETHEUS_OPERATOR=${DEPLOY_PROMETHEUS_OPERATOR:-true}
 export PROMETHEUS_OPERATOR_NAMESPACE=${PROMETHEUS_OPERATOR_NAMESPACE:-hiro-monitoring}
 export PROMETHEUS_OPERATOR_RELEASE=${PROMETHEUS_OPERATOR_RELEASE:-hiro-monitoring}
 export PROMETHEUS_OPERATOR_CHART_VERSION=${PROMETHEUS_OPERATOR_CHART_VERSION:-latest}
-# Grafana admin password. Empty → the chart's own default ("prom-operator").
+# Grafana admin password. Empty → the Grafana subchart generates a random one
+# into the <release>-grafana Secret.
 export GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-}
+# Bring-your-own Prometheus: only consulted (and only printed back) when
+# DEPLOY_PROMETHEUS_OPERATOR=false — see print_external_prometheus_guide().
+export EXTERNAL_PROMETHEUS_SA=${EXTERNAL_PROMETHEUS_SA:-}
+export EXTERNAL_PROMETHEUS_NAMESPACE=${EXTERNAL_PROMETHEUS_NAMESPACE:-}
 
 # ---------------------------------------------------------------------------
 # Rebalance Engine — all optional, mirroring the operator's own package
@@ -266,6 +282,15 @@ validate_inputs() {
     echo "         DEPLOY_SCHEDULER_PLUGIN=true  — custom scheduler pod (opt-in per pod)" >&2
     echo "         DEPLOY_EXTENDER=true          — patches default kube-scheduler (cluster-wide)" >&2
     errors=1
+  fi
+
+  # Non-fatal — only consulted (and only relevant) when DEPLOY_PROMETHEUS_OPERATOR=false.
+  if [ "$DEPLOY_PROMETHEUS_OPERATOR" != "true" ]; then
+    if [ -n "$EXTERNAL_PROMETHEUS_SA" ] && [ -z "$EXTERNAL_PROMETHEUS_NAMESPACE" ]; then
+      echo "WARNING: EXTERNAL_PROMETHEUS_SA is set but EXTERNAL_PROMETHEUS_NAMESPACE is not — set both, or neither." >&2
+    elif [ -z "$EXTERNAL_PROMETHEUS_SA" ] && [ -n "$EXTERNAL_PROMETHEUS_NAMESPACE" ]; then
+      echo "WARNING: EXTERNAL_PROMETHEUS_NAMESPACE is set but EXTERNAL_PROMETHEUS_SA is not — set both, or neither." >&2
+    fi
   fi
 
   if [ "$errors" -ne 0 ]; then
@@ -982,7 +1007,7 @@ print_access_urls() {
     prom_sa="$(find_prometheus_service_account)"
     if [ -n "$prom_sa" ]; then
       echo "      curl -sk -H \"Authorization: Bearer \$(kubectl create token $prom_sa -n $PROMETHEUS_OPERATOR_NAMESPACE)\" \\"
-      echo "        https://localhost:18443/metrics | grep '^hiro_'"
+      echo "        https://localhost:18443/metrics | grep 'hiro_'"
     fi
   else
     echo "      (needs a bearer token from a SA with the metrics-reader ClusterRole)"
@@ -1001,6 +1026,60 @@ print_access_urls() {
       echo "      password: kubectl get secret -n $PROMETHEUS_OPERATOR_NAMESPACE $graf_svc -o jsonpath='{.data.admin-password}' | base64 -d"
     fi
   fi
+  echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Bring-your-own Prometheus (only when DEPLOY_PROMETHEUS_OPERATOR=false)
+#
+# We didn't install or bind anything in this mode, but the metrics endpoint
+# and its RBAC (metrics-reader ClusterRole) are still there either way — see
+# internal/metrics/README.md. This just prints exactly what an existing,
+# unrelated Prometheus needs in order to reach it. Nothing here touches that
+# other Prometheus's install; it's all commands/values for the user to run or
+# adapt on their own.
+# ---------------------------------------------------------------------------
+
+print_external_prometheus_guide() {
+  if [ "$DEPLOY_PROMETHEUS_OPERATOR" = "true" ]; then
+    return
+  fi
+
+  local overlay
+  overlay="$(active_overlay)"
+
+  echo ""
+  print_banner "Using your own Prometheus?" 36
+  echo ""
+  echo "  internal/metrics is exposed either way (:8443/metrics), but nothing is"
+  echo "  scraping it right now (DEPLOY_PROMETHEUS_OPERATOR=false). To point an"
+  echo "  existing Prometheus in this cluster at it:"
+  echo ""
+  echo "  1. Grant it read access — same step whether it's Operator-managed or classic:"
+  if [ -n "$EXTERNAL_PROMETHEUS_SA" ] && [ -n "$EXTERNAL_PROMETHEUS_NAMESPACE" ]; then
+    echo "       kubectl create clusterrolebinding metrics-reader-external \\"
+    echo "         --clusterrole=metrics-reader \\"
+    echo "         --serviceaccount=$EXTERNAL_PROMETHEUS_NAMESPACE:$EXTERNAL_PROMETHEUS_SA"
+  else
+    echo "       kubectl create clusterrolebinding metrics-reader-external \\"
+    echo "         --clusterrole=metrics-reader \\"
+    echo "         --serviceaccount=<their-namespace>:<their-prometheus-sa>"
+    echo ""
+    echo "       (Set EXTERNAL_PROMETHEUS_SA and EXTERNAL_PROMETHEUS_NAMESPACE before"
+    echo "        running this script and the exact command prints here instead.)"
+  fi
+  echo ""
+  echo "  2. If it's Prometheus-Operator-managed (watches ServiceMonitor CRDs):"
+  echo "       - uncomment '- ../prometheus' in $overlay/kustomization.yaml"
+  echo "       - kubectl apply -k $overlay"
+  echo "       - make sure its serviceMonitorSelector / serviceMonitorNamespaceSelector"
+  echo "         actually matches namespace '$NAMESPACE' and label control-plane=controller-manager"
+  echo ""
+  echo "  3. If it's a classic (non-Operator) Prometheus, add a scrape job for:"
+  echo "       target : ${NAME_PREFIX}controller-manager-metrics-service.$NAMESPACE.svc:8443"
+  echo "       path   : /metrics"
+  echo "       scheme : https   (tls_config.insecure_skip_verify: true)"
+  echo "       auth   : bearer_token_file from its own pod's mounted SA token"
   echo ""
 }
 
@@ -1026,6 +1105,7 @@ main() {
   print_summary
   print_port_forward_guide
   print_access_urls
+  print_external_prometheus_guide
 }
 
 main "$@"
