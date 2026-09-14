@@ -29,6 +29,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -112,7 +113,8 @@ func newTestReconcilerWithAgent(t *testing.T, agentURL string, objs ...client.Ob
 	decisionStore := placementserver.NewDecisionStore(0)
 
 	return NewReconciler(c, writer, evaluator, testProfileIndexField, 30*time.Second,
-		contextBuilder, decisionClient, 200*time.Millisecond, 0, decisionStore, 0, 0, 0, 0, 0), c
+		contextBuilder, decisionClient, 200*time.Millisecond, 0, decisionStore, 0, 0, 0, 0, 0,
+		0, resource.Quantity{}, resource.Quantity{}, resource.Quantity{}, resource.Quantity{}), c
 }
 
 func getProfile(t *testing.T, c client.Client, name string) *orchestrationv1alpha1.OrchestrationProfile {

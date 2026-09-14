@@ -35,6 +35,12 @@ rules:
   verbs:
   - create
 - apiGroups:
+  - ""
+  resources:
+  - pods/resize
+  verbs:
+  - update
+- apiGroups:
   - apps
   resources:
   - deployments

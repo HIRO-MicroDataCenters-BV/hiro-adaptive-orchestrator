@@ -131,7 +131,11 @@ type RebalanceDecisionResponse struct {
 	// when Action == Move — the AI is shown the full current placement
 	// (every pod of the application), so it must say which one it means;
 	// TargetNode alone is ambiguous whenever more than one pod could move
-	// to the same node. Empty for actions that aren't pod-specific (NoOp).
+	// to the same node. For AdjustResources it's informational only (which
+	// pod the AI was looking at when it read ContainerName's current
+	// values) — the patch itself applies to the whole workload's template,
+	// not just this one pod instance. Empty for actions that aren't
+	// pod-specific (NoOp).
 	PodName string `json:"podName,omitempty"`
 
 	// TargetNode is populated when Action == Move — the node the AI
@@ -142,6 +146,23 @@ type RebalanceDecisionResponse struct {
 	// absolute replica count the AI recommends (not a delta), same
 	// convention as TargetNode for Move.
 	TargetReplicas int32 `json:"targetReplicas,omitempty"`
+
+	// ContainerName is populated when Action == AdjustResources — the name
+	// of the container (within PodName, and so within the workload's pod
+	// template) the AI's TargetCPU/TargetMemory apply to. Required: with a
+	// workload free to have any number of containers, there's no default to
+	// guess — the AI is shown each pod's container names (and current
+	// resources) via RebalanceContext.CurrentPlacements[].Containers
+	// specifically so it can name one back.
+	ContainerName string `json:"containerName,omitempty"`
+
+	// TargetCPU and TargetMemory are populated when Action ==
+	// AdjustResources — resource.Quantity strings (e.g. "500m", "512Mi"),
+	// same absolute-value convention as TargetReplicas. At least one must be
+	// set; either may be left empty to leave that resource unchanged. Applied
+	// to both requests and limits of the named container.
+	TargetCPU    string `json:"targetCpu,omitempty"`
+	TargetMemory string `json:"targetMemory,omitempty"`
 
 	// Improvement is the AI's estimate of how much this action improves the
 	// placement, used by the improvement-threshold guardrail .
@@ -248,6 +269,25 @@ type PodPlacement struct {
 
 	// Phase is the pod's current lifecycle phase (Running, Pending, Failed).
 	Phase string `json:"phase"`
+
+	// Containers lists this pod's containers with their current CPU/Memory
+	// configuration — populated for rebalance requests (buildCurrentPlacements)
+	// so the AI can recommend AdjustResources against a named container
+	// instead of guessing blind. Empty for initial-placement requests
+	// (buildCurrentPlacement), which have no use for it.
+	Containers []ContainerInfo `json:"containers,omitempty"`
+}
+
+// ContainerInfo is one container's name and current CPU/Memory requests and
+// limits (each omitted if unset on the container), shown to the AI so an
+// AdjustResources recommendation can name a specific container and reason
+// about its current values rather than proposing a change blind.
+type ContainerInfo struct {
+	Name          string `json:"name"`
+	CPURequest    string `json:"cpuRequest,omitempty"`
+	MemoryRequest string `json:"memoryRequest,omitempty"`
+	CPULimit      string `json:"cpuLimit,omitempty"`
+	MemoryLimit   string `json:"memoryLimit,omitempty"`
 }
 
 // RebalancingConfig carries the rebalancing configuration from the profile.

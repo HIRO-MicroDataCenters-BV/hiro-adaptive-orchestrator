@@ -48,9 +48,10 @@ type actionDispatcher func(
 // dispatchDecision. An action with no entry here is handled defensively —
 // see dispatchDecision.
 var actionDispatchers = map[orchestrationv1alpha1.RebalanceAction]actionDispatcher{
-	orchestrationv1alpha1.RebalanceActionNoOp:           dispatchNoOp,
-	orchestrationv1alpha1.RebalanceActionMove:           dispatchMove,
-	orchestrationv1alpha1.RebalanceActionAdjustReplicas: dispatchScale,
+	orchestrationv1alpha1.RebalanceActionNoOp:            dispatchNoOp,
+	orchestrationv1alpha1.RebalanceActionMove:            dispatchMove,
+	orchestrationv1alpha1.RebalanceActionAdjustReplicas:  dispatchScale,
+	orchestrationv1alpha1.RebalanceActionAdjustResources: dispatchResource,
 }
 
 // dispatchDecision applies actionDispatchers to a successful AI response.
@@ -362,6 +363,156 @@ func dispatchScaleDryRun(
 
 	details := fmt.Sprintf("[dry-run] would scale to %d replicas (improvement=%.2f): %s",
 		resp.TargetReplicas, resp.Improvement, resp.Reason)
+	if _, err := r.Writer.Transition(ctx, key, StateWatching, "dry-run: no side effects applied",
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeEnacted, Details: details, Cooldown: cooldown}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Watching (dry-run Enacted) failed", "profile", profile.Name)
+	}
+}
+
+// dispatchResource applies the same improvement-threshold guardrail as
+// Move/Scale, then a CPU/Memory bounds guardrail (env-var/default bounds —
+// see resourceEnactor's doc comment on why no cluster object like an HPA is
+// consulted here), and for an accepted recommendation drives
+// Decided -> Enacting -> resourceEnactor -> Watching. Like AdjustReplicas, not
+// gated by any cluster-wide rate limiter or DecisionStore.
+func dispatchResource(
+	r *Reconciler,
+	ctx context.Context,
+	key types.NamespacedName,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	resp *placementserver.RebalanceDecisionResponse,
+	cooldown time.Duration,
+) {
+	logger := logf.FromContext(ctx)
+	metrics.RebalanceImprovementScore.WithLabelValues(string(resp.Action)).Observe(resp.Improvement)
+
+	threshold := r.ImprovementThreshold
+	if threshold <= 0 {
+		threshold = DefaultImprovementThreshold
+	}
+	if resp.Improvement < threshold {
+		reason := fmt.Sprintf("improvement %.2f below threshold %.2f: %s", resp.Improvement, threshold, resp.Reason)
+		metrics.RebalanceGuardrailRejectionsTotal.WithLabelValues(string(resp.Action), metrics.GuardrailThreshold).Inc()
+		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
+			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected) failed", "profile", profile.Name)
+		}
+		return
+	}
+
+	if resp.ContainerName == "" || (resp.TargetCPU == "" && resp.TargetMemory == "") {
+		reason := fmt.Sprintf("AdjustResources response missing containerName and/or targetCpu/targetMemory: %s", resp.Reason)
+		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); err != nil {
+			logger.Error(err, "rebalance: dispatch transition to Watching (Failed, malformed AdjustResources) failed", "profile", profile.Name)
+		}
+		return
+	}
+
+	targetCPU, targetMemory, err := parseTargetResources(resp.TargetCPU, resp.TargetMemory)
+	if err != nil {
+		reason := fmt.Sprintf("AdjustResources response has an invalid quantity: %v: %s", err, resp.Reason)
+		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, reason,
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, unparsable AdjustResources) failed", "profile", profile.Name)
+		}
+		return
+	}
+
+	state, err := resolveResourceState(ctx, r.Client, profile, resp.ContainerName)
+	if err != nil {
+		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, err.Error(),
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, resolving resource state) failed", "profile", profile.Name)
+		}
+		return
+	}
+	if !state.Found {
+		reason := fmt.Sprintf("container %q not found in workload template: %s", resp.ContainerName, resp.Reason)
+		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, reason,
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, container not found) failed", "profile", profile.Name)
+		}
+		return
+	}
+	if !state.HasExistingLimits {
+		reason := fmt.Sprintf("container %q has no existing CPU/Memory requests or limits — already scales elastically, deferring rather than imposing new constraints", resp.ContainerName)
+		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, reason,
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeDeferred, Cooldown: cooldown}); tErr != nil {
+			logger.Error(tErr, "rebalance: dispatch transition to Watching (Deferred, no existing resources) failed", "profile", profile.Name)
+		}
+		return
+	}
+
+	bounds := r.resourceBounds()
+	if reason, ok := bounds.check(targetCPU, targetMemory); !ok {
+		reason = fmt.Sprintf("%s: %s", reason, resp.Reason)
+		metrics.RebalanceGuardrailRejectionsTotal.WithLabelValues(string(resp.Action), metrics.GuardrailBounds).Inc()
+		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
+			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected, out of bounds) failed", "profile", profile.Name)
+		}
+		return
+	}
+
+	details := fmt.Sprintf("container=%s targetCpu=%s targetMemory=%s improvement=%.2f",
+		resp.ContainerName, resp.TargetCPU, resp.TargetMemory, resp.Improvement)
+	if _, err := r.Writer.Transition(ctx, key, StateDecided, resp.Reason,
+		TransitionOptions{Action: resp.Action, Details: details}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Decided failed", "profile", profile.Name)
+		return
+	}
+
+	if profile.Spec.Rebalancing.DryRun {
+		dispatchResourceDryRun(r, ctx, key, profile, resp, cooldown)
+		return
+	}
+
+	if _, err := r.Writer.Transition(ctx, key, StateEnacting,
+		fmt.Sprintf("enacting resource adjustment on container=%s cpu=%s memory=%s", resp.ContainerName, resp.TargetCPU, resp.TargetMemory),
+		TransitionOptions{Action: resp.Action}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Enacting failed", "profile", profile.Name)
+		return
+	}
+
+	result, err := resourceEnactor(ctx, r.Client, profile, resp.ContainerName, targetCPU, targetMemory, resp.Reason, r.ResourceActionTimeout)
+	if err != nil {
+		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, err.Error(),
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, resource enactor error) failed", "profile", profile.Name)
+		}
+		return
+	}
+
+	if _, err := r.Writer.Transition(ctx, key, StateWatching, result.reason,
+		TransitionOptions{Action: resp.Action, Outcome: result.outcome, Cooldown: cooldown}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Watching failed",
+			"profile", profile.Name, "outcome", result.outcome)
+	}
+}
+
+// dispatchResourceDryRun mirrors dispatchScaleDryRun: Decided -> Enacting ->
+// Watching(Enacted), without ever calling resourceEnactor — no template
+// patch, so nothing to resize either.
+func dispatchResourceDryRun(
+	r *Reconciler,
+	ctx context.Context,
+	key types.NamespacedName,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	resp *placementserver.RebalanceDecisionResponse,
+	cooldown time.Duration,
+) {
+	logger := logf.FromContext(ctx)
+
+	if _, err := r.Writer.Transition(ctx, key, StateEnacting,
+		fmt.Sprintf("dry-run: would enact resource adjustment on container=%s cpu=%s memory=%s", resp.ContainerName, resp.TargetCPU, resp.TargetMemory),
+		TransitionOptions{Action: resp.Action}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Enacting (dry-run) failed", "profile", profile.Name)
+		return
+	}
+
+	details := fmt.Sprintf("[dry-run] would set container=%s cpu=%s memory=%s (improvement=%.2f): %s",
+		resp.ContainerName, resp.TargetCPU, resp.TargetMemory, resp.Improvement, resp.Reason)
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, "dry-run: no side effects applied",
 		TransitionOptions{Action: resp.Action, Outcome: OutcomeEnacted, Details: details, Cooldown: cooldown}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Watching (dry-run Enacted) failed", "profile", profile.Name)

@@ -57,6 +57,7 @@ Not numbered because they're continuous background wiring rather than steps in a
   - [Cluster-wide Move rate limit](#cluster-wide-move-rate-limit)
   - [Dry-run mode](#dry-run-mode)
   - [Replica bounds — `AdjustReplicas`](#replica-bounds--adjustreplicas)
+  - [AdjustResources — CPU/Memory](#adjustresources--cpumemory)
 - [Node pressure (CPU/Memory)](#node-pressure-cpumemory)
 - [`StateWriter` — the single-writer rule](#statewriter--the-single-writer-rule)
   - [Why the reader must be uncached](#why-the-reader-must-be-uncached)
@@ -116,6 +117,8 @@ graph LR
     triggers --> pressure[pressure.go]
     reconciler --> dispatch[dispatch.go]
     dispatch --> move[move_enactor.go]
+    dispatch --> scale[scale_enactor.go]
+    dispatch --> resource[resource_enactor.go]
     dispatch --> writer
     reconciler --> retry[retry_enactor.go]
     move --> store["placement-server /<br/>decision_store.go"]
@@ -131,6 +134,8 @@ graph LR
 | [`retry_enactor.go`](retry_enactor.go) | `retryPendingSchedule` — the mechanical enactor for `ActionRetryPendingSchedule` (see [Bypassing the AI for mechanical actions](#bypassing-the-ai-for-mechanical-actions)). |
 | [`dispatch.go`](dispatch.go) | `dispatchDecision` and the `actionDispatchers` registry — carries a successful AI response to a terminal transition (see [Dispatch](#dispatch--acting-on-the-ais-decision)). |
 | [`move_enactor.go`](move_enactor.go) | `moveEnactor` — evicts a pod and waits for its replacement, driving `Decided → Enacting → Watching` for an accepted `Move`. |
+| [`scale_enactor.go`](scale_enactor.go) | `scaleEnactor` — patches `Spec.Replicas` and waits for it to become ready, driving `Decided → Enacting → Watching` for an accepted `AdjustReplicas` (see [Replica bounds](#replica-bounds--adjustreplicas)). |
+| [`resource_enactor.go`](resource_enactor.go) | `resourceEnactor` — patches a named container's CPU/Memory and best-effort resizes running pods in place, driving `Decided → Enacting → Watching` for an accepted `AdjustResources` (see [AdjustResources](#adjustresources--cpumemory)). |
 | [`engine.go`](engine.go) | `Engine` — a `manager.Runnable` used to register the rebalance engine's lifecycle with the operator's Manager. |
 
 `internal/placement-server/decision_store.go` (not in this package) holds `DecisionStore`,
@@ -368,16 +373,20 @@ flowchart TD
     SE --> Out2{"outcome"}
     Out2 -- Enacted --> W4(["Watching + Enacted"])
     Out2 -- Failed --> W5(["Watching + Failed"])
+
+    Reg -- AdjustResources --> G3{"Improvement >= threshold<br/>AND ContainerName + target(s) set<br/>AND container found<br/>AND has existing limits<br/>AND within bounds?"}
+    G3 -- no --> Rej3(["Watching + Rejected / Failed / Deferred"])
+    G3 -- yes --> D3(["Decided"]) --> Enacting3(["Enacting"]) --> RE["resourceEnactor"]
+    RE --> Out3(["Watching + Enacted<br/>(in-place or next-rollout)"])
 ```
 
 [`dispatch.go`](dispatch.go) carries a successful `RebalanceDecisionResponse` the rest of the
 way to a terminal `Watching` write. It's a registry (`actionDispatchers`, keyed by
-`orchestrationv1alpha1.RebalanceAction`), not a hardcoded switch, so a future enactor
-(`AdjustResources`, `Defer`, `Escalate`) is a new map entry — `dispatchDecision` itself never
-changes. An action with no registered dispatcher (today: anything other than
-`Move`/`NoOp`/`AdjustReplicas`, including `Reject`/`Defer`, which exist as values but have no
-enactor yet) is treated as a processing error — `Watching` + outcome `Failed` — rather than
-guessed at.
+`orchestrationv1alpha1.RebalanceAction`), not a hardcoded switch, so a future enactor (`Defer`,
+`Escalate`) is a new map entry — `dispatchDecision` itself never changes. An action with no
+registered dispatcher (today: anything other than `Move`/`NoOp`/`AdjustReplicas`/
+`AdjustResources`, including `Reject`/`Defer`, which exist as values but have no enactor yet) is
+treated as a processing error — `Watching` + outcome `Failed` — rather than guessed at.
 
 - **`NoOp`** (`dispatchNoOp`) exits straight from `Evaluating` to `Watching` with outcome `NoOp`.
   No `Decided`/`Enacting` hop — both are valid direct exits from `Evaluating` in
@@ -407,6 +416,17 @@ guessed at.
   `Status.ReadyReplicas` to reach that count — matching is `Enacted`, timing out is `Failed`.
   Unlike `Move`, there's no cluster-wide rate limiter or `DecisionStore` entry: scaling a
   workload's replica count doesn't disrupt one specific running pod the way an eviction does.
+- **`AdjustResources`** (`dispatchResource`) applies the same improvement-threshold guardrail,
+  then requires `ContainerName` and at least one of `TargetCPU`/`TargetMemory` to be set and
+  parseable (`Failed` otherwise), then that named container to actually exist in the workload's
+  pod template (`Failed` if not), then that container to already have *some* CPU/Memory
+  requests or limits (`Deferred` if not — see [below](#adjustresources--cpumemory) for why), then
+  a CPU/Memory bounds guardrail (`Rejected` if outside). An accepted recommendation transitions
+  to `Decided`, then `Enacting`, and calls `resourceEnactor`
+  ([`resource_enactor.go`](resource_enactor.go)) — see
+  [AdjustResources — CPU/Memory](#adjustresources--cpumemory) for the full guardrail chain and
+  the in-place-resize-vs-next-rollout distinction. Like `AdjustReplicas`, no cluster-wide rate
+  limiter or `DecisionStore` entry.
 
 ### The decision store — how `Move` actually lands a pod on a specific node
 
@@ -589,6 +609,69 @@ KEDA-owned, `dispatchScale` never calls `scaleEnactor` at all: the cycle ends `W
 KEDA-managed workload would just compete with KEDA's own reconcile loop — whichever writes most
 recently wins, and they'd flap back and forth — so stepping back entirely, rather than trying to
 coexist, is the only safe option available without a deeper KEDA integration (not built).
+
+<a id="adjustresources--cpumemory"></a>
+### AdjustResources — CPU/Memory
+
+```mermaid
+flowchart TD
+    Resp(["AdjustResources response<br/>(containerName, targetCpu/targetMemory)"]) --> Named{"containerName<br/>+ at least one target set?"}
+    Named -- no --> Failed1(["Watching + Failed"])
+    Named -- yes --> Parse{"quantities parse?"}
+    Parse -- no --> Failed2(["Watching + Failed"])
+    Parse -- yes --> Found{"named container<br/>exists in template?"}
+    Found -- no --> Failed3(["Watching + Failed"])
+    Found -- yes --> Existing{"container already has<br/>CPU/Memory requests or limits?"}
+    Existing -- no --> Deferred(["Watching + Deferred<br/>(never patches — see below)"])
+    Existing -- yes --> Bounds{"target(s) within<br/>Reconciler.Min/MaxCPU,Min/MaxMemory?"}
+    Bounds -- no --> Rejected(["Watching + Rejected"])
+    Bounds -- yes --> Decided(["Decided → Enacting"])
+    Decided --> Patch["patch the pod template<br/>(always — durable across rollouts)"]
+    Patch --> Resize{"in-place resize<br/>('resize' subresource) works<br/>on running pods?"}
+    Resize -- yes --> Enacted1(["Watching + Enacted<br/>(resized now)"])
+    Resize -- no / unsupported --> Enacted2(["Watching + Enacted<br/>(effective next rollout)"])
+```
+
+Unlike Move and AdjustReplicas, the AI doesn't get to pick *which* container implicitly — a
+workload can have any number of containers, so `RebalanceDecisionResponse.ContainerName` names
+the exact one, matched by name (not position) in `resourceEnactor`
+([`resource_enactor.go`](resource_enactor.go)). The AI sees each pod's container names and
+current CPU/Memory (`RebalanceContext.CurrentPlacements[].Containers`, built by
+`buildContainerInfo` in `internal/placement-server/builder.go`) specifically so it can name one
+back and reason about its current values instead of proposing a change blind.
+
+**A container with no existing CPU/Memory requests or limits at all is deferred, not
+patched.** Such a container is deliberately left unconstrained by whoever wrote its spec — it
+already scales elastically within whatever the node has free, with no ceiling to adjust.
+Imposing brand-new requests/limits on it wouldn't be an *adjustment*, it would be a first-time
+resource constraint, and would silently flip its QoS class from `BestEffort` to `Guaranteed` — a
+bigger, different decision than this action is meant to make on its own. `dispatchResource`
+checks this (`resolveResourceState`) before ever reaching `Decided`, the same guardrail shape as
+the KEDA-managed check above.
+
+**Bounds** (`Reconciler.MinCPU/MaxCPU/MinMemory/MaxMemory`, env `REBALANCE_MIN_CPU` /
+`REBALANCE_MAX_CPU` / `REBALANCE_MIN_MEMORY` / `REBALANCE_MAX_MEMORY`, defaults `50m`–`2` CPU and
+`64Mi`–`2Gi` Memory) are env-var/default only — unlike replica bounds, no existing cluster object
+is consulted. A per-workload CPU/Memory autoscaler (VPA) is a separate CRD this module doesn't
+already depend on; pulling it in for this guardrail was deliberately out of scope.
+
+**In-place resize is best-effort, not guaranteed.** `resourceEnactor` always patches the
+workload's pod template first — that alone guarantees the target resources apply eventually (the
+next rollout), regardless of cluster support. It then attempts the Kubernetes 1.27+
+`InPlacePodVerticalScaling` `resize` subresource against every currently-running pod matching the
+workload's selector, so an already-running pod can pick up the change immediately where
+supported. A resize failure on a given pod (most commonly: the cluster doesn't support in-place
+resize at all) is **not** a `Failed` outcome — the template patch already durably applies, so the
+cycle still ends `Enacted`, just with a reason noting the change takes effect on the next
+rollout instead. This enactor does not poll for the resize to actually converge on a pod's
+`status` — the in-place request being accepted is treated as sufficient confirmation for this
+story's scope; verifying convergence is a possible future refinement, not built here.
+
+Only CPU and Memory are supported — every other resource type (GPU and other extended/device
+resources included) is immutable on a running pod regardless of `InPlacePodVerticalScaling`, so
+adjusting one always means a full pod replacement, the same disruption profile as `Move` rather
+than a variant of this enactor. Deliberately out of scope here; a future story would need its own
+design.
 
 <a id="node-pressure-cpumemory"></a>
 ## 📊 <u>Node pressure (CPU/Memory)</u>
@@ -796,6 +879,9 @@ flowchart LR
         V9["REBALANCE_SCALE_ACTION_TIMEOUT"]
         V10["REBALANCE_MIN_REPLICAS"]
         V11["REBALANCE_MAX_REPLICAS"]
+        V12["REBALANCE_RESOURCE_ACTION_TIMEOUT"]
+        V13["REBALANCE_MIN_CPU / REBALANCE_MAX_CPU"]
+        V14["REBALANCE_MIN_MEMORY / REBALANCE_MAX_MEMORY"]
     end
 
     Resolve{"main.go: resolve unset/invalid<br/>before constructing anything —<br/>bad value fails the operator at startup"}
@@ -811,6 +897,9 @@ flowchart LR
     V9 --> Resolve
     V10 --> Resolve
     V11 --> Resolve
+    V12 --> Resolve
+    V13 --> Resolve
+    V14 --> Resolve
 
     Resolve -->|"unset → DefaultMaxRecentDecisions (10)"| SW["StateWriter<br/>recentDecisions length"]
     Resolve -->|"unset → DefaultDetectionInterval (30s)"| Recon1["Reconciler<br/>periodic detection tick"]
@@ -822,6 +911,8 @@ flowchart LR
     Resolve -->|"unset → DefaultMoveRateLimit (5/min)"| RL["MoveRateLimiter<br/>cluster-wide Moves/minute"]
     Resolve -->|"unset → DefaultScaleActionTimeout (60s)"| SE["Scale enactor<br/>ready-replicas wait"]
     Resolve -->|"unset → DefaultMinReplicas (1)<br/>DefaultMaxReplicas (10)"| SB["dispatchScale<br/>fallback replica bounds"]
+    Resolve -->|"unset → DefaultResourceActionTimeout (60s)"| RE["Resource enactor<br/>in-place-resize attempt window"]
+    Resolve -->|"unset → DefaultMinCPU (50m) / DefaultMaxCPU (2)<br/>DefaultMinMemory (64Mi) / DefaultMaxMemory (2Gi)"| RB["dispatchResource<br/>CPU/Memory bounds"]
 ```
 
 | Environment variable | Overrides | Default |
@@ -837,6 +928,9 @@ flowchart LR
 | `REBALANCE_SCALE_ACTION_TIMEOUT` | Max wait for an `AdjustReplicas` rollout to report ready (Go duration) | `DefaultScaleActionTimeout` (60s) |
 | `REBALANCE_MIN_REPLICAS` | `AdjustReplicas` fallback lower bound when no HPA targets the workload (see [Replica bounds](#replica-bounds--adjustreplicas)) | `DefaultMinReplicas` (1) |
 | `REBALANCE_MAX_REPLICAS` | `AdjustReplicas` fallback upper bound when no HPA targets the workload (see [Replica bounds](#replica-bounds--adjustreplicas)) | `DefaultMaxReplicas` (10) |
+| `REBALANCE_RESOURCE_ACTION_TIMEOUT` | Max time `resourceEnactor` spends attempting in-place resize before falling back to the next-rollout path (Go duration) | `DefaultResourceActionTimeout` (60s) |
+| `REBALANCE_MIN_CPU` / `REBALANCE_MAX_CPU` | `AdjustResources` CPU bounds (see [AdjustResources](#adjustresources--cpumemory)) | `DefaultMinCPU` (50m) / `DefaultMaxCPU` (2) |
+| `REBALANCE_MIN_MEMORY` / `REBALANCE_MAX_MEMORY` | `AdjustResources` Memory bounds (see [AdjustResources](#adjustresources--cpumemory)) | `DefaultMinMemory` (64Mi) / `DefaultMaxMemory` (2Gi) |
 
 Each default lives once, as a constant next to the type it configures — `main.go` doesn't
 duplicate the numbers, it just resolves "unset" to that constant before constructing anything,
@@ -873,24 +967,32 @@ rate limiter's own blocking behavior rather than per-cluster business logic — 
 flowchart LR
     Role["ClusterRole<br/>(generated via make manifests)"] --> Nodes["nodes:<br/>get, list, watch"]
     Role --> Metrics["metrics.k8s.io/nodes:<br/>get"]
-    Role --> PodsDel["pods:<br/>delete<br/>(merged into existing rule)"]
+    Role --> Pods["pods:<br/>get, list, delete<br/>(merged into one rule)"]
     Role --> PodsEvict["pods/eviction:<br/>create"]
+    Role --> PodsResize["pods/resize:<br/>update"]
+    Role --> Workloads["apps/deployments,<br/>apps/statefulsets:<br/>update"]
+    Role --> HPA["autoscaling/<br/>horizontalpodautoscalers:<br/>get, list, watch"]
 ```
 
 Permissions added specifically for this package (`+kubebuilder:rbac` markers live in
-[`reconciler.go`](reconciler.go), [`retry_enactor.go`](retry_enactor.go), and
-[`move_enactor.go`](move_enactor.go)):
+[`reconciler.go`](reconciler.go), [`retry_enactor.go`](retry_enactor.go),
+[`move_enactor.go`](move_enactor.go), [`scale_enactor.go`](scale_enactor.go), and
+[`resource_enactor.go`](resource_enactor.go)):
 
 ```
 +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 +kubebuilder:rbac:groups=metrics.k8s.io,resources=nodes,verbs=get
 +kubebuilder:rbac:groups="",resources=pods,verbs=delete
 +kubebuilder:rbac:groups="",resources=pods/eviction,verbs=create
++kubebuilder:rbac:groups="apps",resources=deployments;statefulsets,verbs=update
++kubebuilder:rbac:groups="autoscaling",resources=horizontalpodautoscalers,verbs=get;list;watch
++kubebuilder:rbac:groups="",resources=pods,verbs=get;list
++kubebuilder:rbac:groups="",resources=pods/resize,verbs=update
 ```
 
-The `pods` `delete` verb merges into the same rule as the `get;list;watch` already granted
-by the `OrchestrationProfile` controller's own markers — `make manifests` produces one
-combined `pods` rule, not a duplicate.
+The two `pods` markers (`delete` here, `get;list` from `resource_enactor.go`) merge into the same
+rule as the `get;list;watch` already granted by the `OrchestrationProfile` controller's own
+markers — `make manifests` produces one combined `pods` rule, not three duplicates.
 
 Regenerate `config/rbac/role.yaml` with `make manifests` after changing these markers.
 

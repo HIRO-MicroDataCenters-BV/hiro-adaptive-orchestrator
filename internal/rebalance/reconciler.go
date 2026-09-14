@@ -24,6 +24,7 @@ import (
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -173,6 +174,17 @@ type Reconciler struct {
 	// DefaultMaxReplicas.
 	MinReplicas int32
 	MaxReplicas int32
+
+	// ResourceActionTimeout bounds how long the AdjustResources enactor
+	// spends attempting in-place resize before falling back to the
+	// next-rollout path. <= 0 uses DefaultResourceActionTimeout.
+	ResourceActionTimeout time.Duration
+
+	// MinCPU/MaxCPU/MinMemory/MaxMemory are dispatchResource's guardrail
+	// bounds (see resourceBounds). Zero value uses DefaultMinCPU/DefaultMaxCPU/
+	// DefaultMinMemory/DefaultMaxMemory.
+	MinCPU, MaxCPU       resource.Quantity
+	MinMemory, MaxMemory resource.Quantity
 }
 
 // NewReconciler creates a Reconciler. interval <= 0 uses
@@ -181,7 +193,9 @@ type Reconciler struct {
 // <= 0 uses DefaultMoveActionTimeout; moveRateLimit <= 0 uses
 // DefaultMoveRateLimit; scaleActionTimeout <= 0 uses
 // DefaultScaleActionTimeout; minReplicas/maxReplicas <= 0 use
-// DefaultMinReplicas/DefaultMaxReplicas.
+// DefaultMinReplicas/DefaultMaxReplicas; resourceActionTimeout <= 0 uses
+// DefaultResourceActionTimeout; minCPU/maxCPU/minMemory/maxMemory zero use
+// DefaultMinCPU/DefaultMaxCPU/DefaultMinMemory/DefaultMaxMemory.
 func NewReconciler(
 	c client.Client,
 	writer *StateWriter,
@@ -198,6 +212,9 @@ func NewReconciler(
 	scaleActionTimeout time.Duration,
 	minReplicas int32,
 	maxReplicas int32,
+	resourceActionTimeout time.Duration,
+	minCPU, maxCPU resource.Quantity,
+	minMemory, maxMemory resource.Quantity,
 ) *Reconciler {
 	if interval <= 0 {
 		interval = DefaultDetectionInterval
@@ -223,27 +240,47 @@ func NewReconciler(
 	if maxReplicas <= 0 {
 		maxReplicas = DefaultMaxReplicas
 	}
+	if resourceActionTimeout <= 0 {
+		resourceActionTimeout = DefaultResourceActionTimeout
+	}
+	if minCPU.IsZero() {
+		minCPU = DefaultMinCPU
+	}
+	if maxCPU.IsZero() {
+		maxCPU = DefaultMaxCPU
+	}
+	if minMemory.IsZero() {
+		minMemory = DefaultMinMemory
+	}
+	if maxMemory.IsZero() {
+		maxMemory = DefaultMaxMemory
+	}
 	// Burst equals the per-minute limit itself: a quiet fleet can absorb a
 	// full minute's budget worth of Moves immediately, then throttles to a
 	// steady trickle (one token every 60/moveRateLimit seconds) after that.
 	moveRateLimiter := rate.NewLimiter(rate.Limit(float64(moveRateLimit)/60.0), moveRateLimit)
 	return &Reconciler{
-		Client:               c,
-		Writer:               writer,
-		Evaluator:            evaluator,
-		ProfileIndexField:    profileIndexField,
-		DetectionInterval:    interval,
-		ContextBuilder:       contextBuilder,
-		DecisionClient:       decisionClient,
-		DecisionTimeout:      decisionTimeout,
-		ImprovementThreshold: improvementThreshold,
-		DecisionStore:        decisionStore,
-		MoveRateLimiter:      moveRateLimiter,
-		MoveRateWaitTimeout:  DefaultMoveRateWaitTimeout,
-		MoveActionTimeout:    moveActionTimeout,
-		ScaleActionTimeout:   scaleActionTimeout,
-		MinReplicas:          minReplicas,
-		MaxReplicas:          maxReplicas,
+		Client:                c,
+		Writer:                writer,
+		Evaluator:             evaluator,
+		ProfileIndexField:     profileIndexField,
+		DetectionInterval:     interval,
+		ContextBuilder:        contextBuilder,
+		DecisionClient:        decisionClient,
+		DecisionTimeout:       decisionTimeout,
+		ImprovementThreshold:  improvementThreshold,
+		DecisionStore:         decisionStore,
+		MoveRateLimiter:       moveRateLimiter,
+		MoveRateWaitTimeout:   DefaultMoveRateWaitTimeout,
+		MoveActionTimeout:     moveActionTimeout,
+		ScaleActionTimeout:    scaleActionTimeout,
+		MinReplicas:           minReplicas,
+		MaxReplicas:           maxReplicas,
+		ResourceActionTimeout: resourceActionTimeout,
+		MinCPU:                minCPU,
+		MaxCPU:                maxCPU,
+		MinMemory:             minMemory,
+		MaxMemory:             maxMemory,
 	}
 }
 

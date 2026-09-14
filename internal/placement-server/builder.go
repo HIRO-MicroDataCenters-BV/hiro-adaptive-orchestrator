@@ -519,12 +519,44 @@ func buildCurrentPlacements(pods []corev1.Pod) []PodPlacement {
 	placements := make([]PodPlacement, 0, len(pods))
 	for i := range pods {
 		placements = append(placements, PodPlacement{
-			PodName:  pods[i].Name,
-			NodeName: pods[i].Spec.NodeName,
-			Phase:    string(pods[i].Status.Phase),
+			PodName:    pods[i].Name,
+			NodeName:   pods[i].Spec.NodeName,
+			Phase:      string(pods[i].Status.Phase),
+			Containers: buildContainerInfo(pods[i].Spec.Containers),
 		})
 	}
 	return placements
+}
+
+// buildContainerInfo maps a pod's containers into the wire-format shown to
+// the AI — see ContainerInfo's doc comment on why (AdjustResources needs to
+// name a specific container and see its current values).
+func buildContainerInfo(containers []corev1.Container) []ContainerInfo {
+	if len(containers) == 0 {
+		return nil
+	}
+	infos := make([]ContainerInfo, 0, len(containers))
+	for _, c := range containers {
+		infos = append(infos, ContainerInfo{
+			Name:          c.Name,
+			CPURequest:    quantityString(c.Resources.Requests, corev1.ResourceCPU),
+			MemoryRequest: quantityString(c.Resources.Requests, corev1.ResourceMemory),
+			CPULimit:      quantityString(c.Resources.Limits, corev1.ResourceCPU),
+			MemoryLimit:   quantityString(c.Resources.Limits, corev1.ResourceMemory),
+		})
+	}
+	return infos
+}
+
+// quantityString returns list[name]'s string form, or "" if list is nil or
+// doesn't have that resource — a container commonly leaves CPU or Memory (or
+// both) unset.
+func quantityString(list corev1.ResourceList, name corev1.ResourceName) string {
+	q, ok := list[name]
+	if !ok {
+		return ""
+	}
+	return q.String()
 }
 
 // convertRecentDecisions maps the profile's CRD-level decision history into

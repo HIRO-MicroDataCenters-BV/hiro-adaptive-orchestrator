@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -106,6 +107,21 @@ func parseIntEnv(name string) int {
 		os.Exit(1)
 	}
 	return n
+}
+
+// parseQuantityEnv is parseDurationEnv's resource.Quantity counterpart
+// (e.g. "500m", "512Mi").
+func parseQuantityEnv(name string) resource.Quantity {
+	v := os.Getenv(name)
+	if v == "" {
+		return resource.Quantity{}
+	}
+	q, err := resource.ParseQuantity(v)
+	if err != nil {
+		setupLog.Error(err, "invalid resource.Quantity environment variable", "name", name, "value", v)
+		os.Exit(1)
+	}
+	return q
 }
 
 // nolint:gocyclo
@@ -416,6 +432,11 @@ func main() {
 	//   REBALANCE_SCALE_ACTION_TIMEOUT     — max wait for an AdjustReplicas rollout, e.g. "60s"
 	//   REBALANCE_MIN_REPLICAS             — fallback min replicas when no HPA exists, e.g. "1"
 	//   REBALANCE_MAX_REPLICAS             — fallback max replicas when no HPA exists, e.g. "10"
+	//   REBALANCE_RESOURCE_ACTION_TIMEOUT  — max time spent attempting in-place resize, e.g. "60s"
+	//   REBALANCE_MIN_CPU                  — AdjustResources guardrail lower bound, e.g. "50m"
+	//   REBALANCE_MAX_CPU                  — AdjustResources guardrail upper bound, e.g. "2"
+	//   REBALANCE_MIN_MEMORY               — AdjustResources guardrail lower bound, e.g. "64Mi"
+	//   REBALANCE_MAX_MEMORY               — AdjustResources guardrail upper bound, e.g. "2Gi"
 	// -------------------------------------------------------------------------
 	rebalanceMaxRecentDecisions := parseIntEnv("REBALANCE_MAX_RECENT_DECISIONS")
 	if rebalanceMaxRecentDecisions <= 0 {
@@ -461,6 +482,26 @@ func main() {
 	if rebalanceMaxReplicas <= 0 {
 		rebalanceMaxReplicas = rebalance.DefaultMaxReplicas
 	}
+	rebalanceResourceActionTimeout := parseDurationEnv("REBALANCE_RESOURCE_ACTION_TIMEOUT")
+	if rebalanceResourceActionTimeout <= 0 {
+		rebalanceResourceActionTimeout = rebalance.DefaultResourceActionTimeout
+	}
+	rebalanceMinCPU := parseQuantityEnv("REBALANCE_MIN_CPU")
+	if rebalanceMinCPU.IsZero() {
+		rebalanceMinCPU = rebalance.DefaultMinCPU
+	}
+	rebalanceMaxCPU := parseQuantityEnv("REBALANCE_MAX_CPU")
+	if rebalanceMaxCPU.IsZero() {
+		rebalanceMaxCPU = rebalance.DefaultMaxCPU
+	}
+	rebalanceMinMemory := parseQuantityEnv("REBALANCE_MIN_MEMORY")
+	if rebalanceMinMemory.IsZero() {
+		rebalanceMinMemory = rebalance.DefaultMinMemory
+	}
+	rebalanceMaxMemory := parseQuantityEnv("REBALANCE_MAX_MEMORY")
+	if rebalanceMaxMemory.IsZero() {
+		rebalanceMaxMemory = rebalance.DefaultMaxMemory
+	}
 	// Resolved above (not left at the parseXEnv zero-sentinel) so this log
 	// line — and everything downstream — reflects what's actually in
 	// effect, not "0" for anything the deployer left unset.
@@ -476,6 +517,11 @@ func main() {
 		"scaleActionTimeout", rebalanceScaleActionTimeout,
 		"minReplicas", rebalanceMinReplicas,
 		"maxReplicas", rebalanceMaxReplicas,
+		"resourceActionTimeout", rebalanceResourceActionTimeout,
+		"minCPU", rebalanceMinCPU.String(),
+		"maxCPU", rebalanceMaxCPU.String(),
+		"minMemory", rebalanceMinMemory.String(),
+		"maxMemory", rebalanceMaxMemory.String(),
 	)
 
 	// decisionStore is shared between the PlacementServer (reads it in
@@ -523,6 +569,11 @@ func main() {
 		rebalanceScaleActionTimeout,
 		rebalanceMinReplicas,
 		rebalanceMaxReplicas,
+		rebalanceResourceActionTimeout,
+		rebalanceMinCPU,
+		rebalanceMaxCPU,
+		rebalanceMinMemory,
+		rebalanceMaxMemory,
 	)
 	// eaoGVK above is the List kind (used for List() calls); Watches()/
 	// RESTMapper need the singular item kind, derived here rather than

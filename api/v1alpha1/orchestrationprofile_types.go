@@ -110,11 +110,12 @@ const (
 type RebalanceAction string
 
 const (
-	RebalanceActionMove           RebalanceAction = "Move"
-	RebalanceActionNoOp           RebalanceAction = "NoOp"
-	RebalanceActionReject         RebalanceAction = "Reject"
-	RebalanceActionDefer          RebalanceAction = "Defer"
-	RebalanceActionAdjustReplicas RebalanceAction = "AdjustReplicas"
+	RebalanceActionMove            RebalanceAction = "Move"
+	RebalanceActionNoOp            RebalanceAction = "NoOp"
+	RebalanceActionReject          RebalanceAction = "Reject"
+	RebalanceActionDefer           RebalanceAction = "Defer"
+	RebalanceActionAdjustReplicas  RebalanceAction = "AdjustReplicas"
+	RebalanceActionAdjustResources RebalanceAction = "AdjustResources"
 )
 
 // RebalanceDecision is a single terminal-outcome record kept in the profile's
