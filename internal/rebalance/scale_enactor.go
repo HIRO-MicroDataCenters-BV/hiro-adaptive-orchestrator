@@ -38,6 +38,14 @@ import (
 // +kubebuilder:rbac:groups="apps",resources=deployments;statefulsets,verbs=update
 // +kubebuilder:rbac:groups="autoscaling",resources=horizontalpodautoscalers,verbs=get;list;watch
 
+// kindDeployment/kindStatefulSet are the two ApplicationReference.Kind
+// values scaleEnactor and resourceEnactor know how to patch — shared here
+// since both switch on the same pair.
+const (
+	kindDeployment  = "Deployment"
+	kindStatefulSet = "StatefulSet"
+)
+
 // DefaultScaleActionTimeout bounds how long scaleEnactor waits, after
 // patching Spec.Replicas, for the workload to report that many ReadyReplicas.
 const DefaultScaleActionTimeout = 60 * time.Second
@@ -171,7 +179,7 @@ func scaleEnactor(
 	key := types.NamespacedName{Name: ref.Name, Namespace: ref.Namespace}
 
 	switch ref.Kind {
-	case "Deployment":
+	case kindDeployment:
 		obj := &appsv1.Deployment{}
 		if err := c.Get(ctx, key, obj); err != nil {
 			return scaleResult{}, fmt.Errorf("fetching Deployment %s/%s: %w", ref.Namespace, ref.Name, err)
@@ -182,7 +190,7 @@ func scaleEnactor(
 				ref.Namespace, ref.Name, targetReplicas, err)
 		}
 
-	case "StatefulSet":
+	case kindStatefulSet:
 		obj := &appsv1.StatefulSet{}
 		if err := c.Get(ctx, key, obj); err != nil {
 			return scaleResult{}, fmt.Errorf("fetching StatefulSet %s/%s: %w", ref.Namespace, ref.Name, err)
@@ -220,13 +228,13 @@ func awaitReadyReplicas(
 	pollErr := wait.PollUntilContextTimeout(ctx, scaleActionPollInterval, timeout, true,
 		func(ctx context.Context) (bool, error) {
 			switch kind {
-			case "Deployment":
+			case kindDeployment:
 				obj := &appsv1.Deployment{}
 				if err := c.Get(ctx, key, obj); err != nil {
 					return false, nil // transient list error — keep polling until timeout
 				}
 				lastReady = obj.Status.ReadyReplicas
-			case "StatefulSet":
+			case kindStatefulSet:
 				obj := &appsv1.StatefulSet{}
 				if err := c.Get(ctx, key, obj); err != nil {
 					return false, nil

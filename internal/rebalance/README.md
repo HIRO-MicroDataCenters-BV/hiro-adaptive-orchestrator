@@ -1035,9 +1035,9 @@ flowchart LR
 <a id="demo-walkthrough"></a>
 ## 🎬 <u>Demo walkthrough</u>
 
-[`hack/demo_rebalance.sh`](../../hack/demo_rebalance.sh) drives all four lifecycle paths
+[`hack/demo_rebalance.sh`](../../hack/demo_rebalance.sh) drives all five lifecycle paths
 above against a live cluster, narrated pane-by-pane (see the script's own header comment for
-pane setup and usage: `hack/demo_rebalance.sh [noop|retry|move|scale|cleanup]`).
+pane setup and usage: `hack/demo_rebalance.sh [noop|retry|move|scale|resources|cleanup]`).
 
 ### Feature view — what each beat proves
 
@@ -1095,8 +1095,21 @@ flowchart LR
     Before -->|"AI recommends a new<br/>target replica count"| After
 ```
 
+**Beat 5 — Resources: right-sizes a container without disrupting it**
+
+```mermaid
+flowchart LR
+    subgraph Before["Before"]
+        C1["Container: cpu=100m<br/>memory=128Mi"]
+    end
+    subgraph After["After the AI-driven AdjustResources"]
+        C2["Same pod, same identity<br/>cpu=150m memory=192Mi<br/>(in place, where supported)"]
+    end
+    Before -->|"AI recommends a new<br/>target CPU/Memory"| After
+```
+
 HIRO doesn't just place workloads intelligently once — it keeps watching, and can safely
-move things or resize capacity later if conditions change.
+move things, resize capacity, or right-size resource usage later if conditions change.
 
 ### Mechanics — what the script actually does
 
@@ -1137,7 +1150,7 @@ flowchart TD
     CloseLoop --> Trigger["EnergyThreshold matches<br/>(window closed)"]
     Trigger --> Cycle1["Triggered → Evaluating (AI call,<br/>Move accepted) → Decided →<br/>rate-limit gate → Enacting"]
     Cycle1 --> Open["open_energy_window<br/>(replacement needs it open)"]
-    Open --> KeepOpen["keep_window_open loop<br/>every 3s for 60s window"]
+    Open --> KeepOpen["keep_window_open enacting:<br/>reassert every 3s for<br/>60s window"]
     KeepOpen --> Store["DecisionStore hit —<br/>replacement scored onto<br/>TargetNode, no 2nd AI call"]
     Store --> Revert["revert_mock_agent"]
     Revert --> Cycle2["Watching (outcome: Enacted)"]
@@ -1153,20 +1166,46 @@ flowchart TD
     CloseLoop --> Trigger["EnergyThreshold matches<br/>(window closed)"]
     Trigger --> Cycle1["Triggered → Evaluating (AI call,<br/>AdjustReplicas accepted) → Decided<br/>→ Enacting"]
     Cycle1 --> Open["open_energy_window<br/>(new replica needs it open)"]
-    Open --> KeepOpen["keep_window_open loop<br/>every 3s for 60s window"]
+    Open --> KeepOpen["keep_window_open enacting:<br/>reassert every 3s for<br/>60s window"]
     KeepOpen --> Patch["Spec.Replicas patched,<br/>ReadyReplicas polled"]
     Patch --> Revert["revert_mock_agent_scale"]
     Revert --> Cycle2["Watching (outcome: Enacted)"]
 ```
 
-Beats 2, 3, and 4 all re-assert their patches on a loop instead of applying them once: a
+**Beat 5 — Resources**
+
+```mermaid
+flowchart TD
+    Start(["resources()"]) --> Capture["capture_original_resources<br/>(idempotent)"]
+    Capture --> Bump["bump_mock_agent_resources<br/>(force guaranteed AdjustResources)"]
+    Bump --> CloseLoop["wait_for_resources_applied:<br/>reassert clear_cooldown +<br/>close_energy_window every 2s,<br/>polling requests.cpu (up to 150s)"]
+    CloseLoop --> Trigger["EnergyThreshold matches<br/>(window closed)"]
+    Trigger --> Cycle1["Triggered → Evaluating (AI call,<br/>AdjustResources accepted) → Decided<br/>→ Enacting → Watching, all in<br/>one reconcile (template patched)"]
+    Cycle1 --> Open["open_energy_window<br/>(only matters if the fallback<br/>rollout path is taken)"]
+    Open --> KeepOpen["keep_window_open rollout:<br/>reassert every 3s until $APP's<br/>rollout finishes (up to 90s)"]
+    KeepOpen --> Resize["template patched, then<br/>in-place resize attempted<br/>on running pod(s)"]
+    Resize --> Revert["revert_mock_agent_resources"]
+    Revert --> Cycle2["Watching (outcome: Enacted)"]
+```
+
+Beat 5 can't poll for Enacting the way beats 3/4 do: resourceEnactor's fallback (template-
+patch) path patches and returns to Watching in the same reconcile, so Enacting never lingers
+long enough for a 2s poll to observe it. `wait_for_resources_applied` polls the Deployment's
+actual `requests.cpu` instead, and `keep_window_open rollout` polls `kubectl rollout status`
+instead of profile state — both race-free against how fast this particular enactor completes.
+
+Beats 2, 3, 4, and 5 all re-assert their patches on a loop instead of applying them once: a
 one-shot patch can lose a race against cooldown re-arming or against
 `eaoprofile-optional`'s own external controller reconciling a change back. The script
 captures that EAO's real pre-demo window state the first time it patches it and restores it
 on exit — see `capture_eao_original`/`revert_eao_window` in the script — rather than waiting
 out that external controller's own reconcile cadence. Beats 2 and 4 similarly capture
-$APP's real pre-demo replica count exactly once (`capture_original_replicas`) so cleanup
-restores it correctly regardless of which beat runs, or in what order.
+$APP's real pre-demo replica count exactly once (`capture_original_replicas`), and beat 5
+captures its real pre-demo container resources the same way (`capture_original_resources`),
+so cleanup restores them correctly regardless of which beat runs, or in what order. Because
+EAO's true pre-demo status can itself be a closed window, `revert_replicas`/`revert_resources`
+each open the window and wait out $APP's rollout before returning, so `cleanup()` only hands
+window control back to EAO's real status once nothing is still trying to schedule.
 
 <a id="testing"></a>
 ## 🧪 <u>Testing</u>

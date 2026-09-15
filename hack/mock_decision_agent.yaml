@@ -20,6 +20,8 @@
 #                                   RebalanceContext, randomly recommends
 #                                   Move (a running pod to a candidate node),
 #                                   AdjustReplicas (scale up or down by one),
+#                                   AdjustResources (resize a container with
+#                                   existing CPU/Memory to a fixed target),
 #                                   or NoOp, returns RebalanceDecisionResponse
 #   GET  /healthz                    → 200 ok
 #
@@ -45,14 +47,25 @@ data:
     PLACEMENT_SCORE_MIN = 0.0
     PLACEMENT_SCORE_MAX = 100.0
 
-    # Rebalance (Move / AdjustReplicas / NoOp) knobs. Both MOVE_PROBABILITY
-    # and SCALE_PROBABILITY default to 0.0 — keep NoOp dominant by default,
-    # bump one of them (see hack/demo_rebalance.sh's bump_mock_agent) when a
-    # test specifically wants to force that action.
+    # Rebalance (Move / AdjustReplicas / AdjustResources / NoOp) knobs. All
+    # three *_PROBABILITY knobs default to 0.0 — keep NoOp dominant by
+    # default, bump one of them (see hack/demo_rebalance.sh's
+    # bump_mock_agent / _scale / _resources) when a test specifically wants
+    # to force that action.
     MOVE_PROBABILITY   = 0.0
     SCALE_PROBABILITY  = 0.0
+    RESOURCE_PROBABILITY = 0.0
     IMPROVEMENT_MIN    = 10.0
     IMPROVEMENT_MAX    = 100.0
+
+    # Fixed AdjustResources target — deterministic on purpose (unlike Scale's
+    # random up/down), since this mock only needs one clearly-in-bounds,
+    # clearly-different-from-current value to demo the enactor, not
+    # realistic sizing logic. Comfortably inside the operator's default
+    # guardrail bounds ([50m, 2] CPU, [64Mi, 2Gi] Memory) and above the demo
+    # app's own starting values (see config/samples/nginx_deployment_2.yaml).
+    RESOURCE_TARGET_CPU    = "150m"
+    RESOURCE_TARGET_MEMORY = "192Mi"
 
     class Handler(BaseHTTPRequestHandler):
 
@@ -180,11 +193,35 @@ data:
                     "reason": f"mock: {'scaling up' if target_replicas > current_count else 'scaling down'} from {current_count} to {target_replicas}",
                 }
 
+            # AdjustResources: only a container the operator's own guardrail
+            # would actually act on — one that already has some CPU/Memory
+            # (requests or limits) — is eligible (see
+            # internal/rebalance/README.md's "AdjustResources" section for
+            # why a container with neither is deferred, not resized).
+            resizable = [
+                (p, c)
+                for p in current_placements
+                for c in p.get("containers", [])
+                if c.get("cpuRequest") or c.get("memoryRequest") or c.get("cpuLimit") or c.get("memoryLimit")
+            ]
+            if resizable and random.random() < RESOURCE_PROBABILITY:
+                pod, container = random.choice(resizable)
+                return {
+                    "requestId": request_id,
+                    "action": "AdjustResources",
+                    "podName": pod.get("podName", ""),
+                    "containerName": container.get("name", ""),
+                    "targetCpu": RESOURCE_TARGET_CPU,
+                    "targetMemory": RESOURCE_TARGET_MEMORY,
+                    "improvement": round(random.uniform(IMPROVEMENT_MIN, IMPROVEMENT_MAX), 2),
+                    "reason": f"mock: resizing {container.get('name', '')} to cpu={RESOURCE_TARGET_CPU} memory={RESOURCE_TARGET_MEMORY}",
+                }
+
             return {
                 "requestId": request_id,
                 "action": "NoOp",
                 "improvement": 0,
-                "reason": "mock: current placement already balanced",
+                "reason": "mock: current placement already optimized",
             }
 
         def do_GET(self):

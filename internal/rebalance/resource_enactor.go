@@ -117,13 +117,13 @@ func fetchPodTemplateContainers(
 	key := types.NamespacedName{Name: ref.Name, Namespace: ref.Namespace}
 
 	switch ref.Kind {
-	case "Deployment":
+	case kindDeployment:
 		obj := &appsv1.Deployment{}
 		if err := c.Get(ctx, key, obj); err != nil {
 			return nil, fmt.Errorf("fetching Deployment %s/%s: %w", ref.Namespace, ref.Name, err)
 		}
 		return obj.Spec.Template.Spec.Containers, nil
-	case "StatefulSet":
+	case kindStatefulSet:
 		obj := &appsv1.StatefulSet{}
 		if err := c.Get(ctx, key, obj); err != nil {
 			return nil, fmt.Errorf("fetching StatefulSet %s/%s: %w", ref.Namespace, ref.Name, err)
@@ -213,9 +213,6 @@ func parseTargetResources(cpu, memory string) (targetCPU, targetMemory resource.
 	return targetCPU, targetMemory, nil
 }
 
-// resourceActionPollInterval mirrors scaleActionPollInterval.
-const resourceActionPollInterval = 2 * time.Second
-
 // resourceEnactor patches profile's workload (Deployment or StatefulSet) so
 // its named container's CPU and/or Memory requests+limits match
 // targetCPU/targetMemory (either may be zero to leave that resource
@@ -252,7 +249,7 @@ func resourceEnactor(
 	var selector *metav1.LabelSelector
 
 	switch ref.Kind {
-	case "Deployment":
+	case kindDeployment:
 		obj := &appsv1.Deployment{}
 		if err := c.Get(ctx, key, obj); err != nil {
 			return scaleResult{}, fmt.Errorf("fetching Deployment %s/%s: %w", ref.Namespace, ref.Name, err)
@@ -267,7 +264,7 @@ func resourceEnactor(
 		}
 		selector = obj.Spec.Selector
 
-	case "StatefulSet":
+	case kindStatefulSet:
 		obj := &appsv1.StatefulSet{}
 		if err := c.Get(ctx, key, obj); err != nil {
 			return scaleResult{}, fmt.Errorf("fetching StatefulSet %s/%s: %w", ref.Namespace, ref.Name, err)
