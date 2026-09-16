@@ -437,6 +437,7 @@ func main() {
 	//   REBALANCE_MAX_CPU                  — AdjustResources guardrail upper bound, e.g. "2"
 	//   REBALANCE_MIN_MEMORY               — AdjustResources guardrail lower bound, e.g. "64Mi"
 	//   REBALANCE_MAX_MEMORY               — AdjustResources guardrail upper bound, e.g. "2Gi"
+	//   REBALANCE_WATCHDOG_STALE_THRESHOLD — max time stuck mid-cycle before force-recovery, e.g. "15m"
 	// -------------------------------------------------------------------------
 	rebalanceMaxRecentDecisions := parseIntEnv("REBALANCE_MAX_RECENT_DECISIONS")
 	if rebalanceMaxRecentDecisions <= 0 {
@@ -502,6 +503,10 @@ func main() {
 	if rebalanceMaxMemory.IsZero() {
 		rebalanceMaxMemory = rebalance.DefaultMaxMemory
 	}
+	rebalanceWatchdogStaleThreshold := parseDurationEnv("REBALANCE_WATCHDOG_STALE_THRESHOLD")
+	if rebalanceWatchdogStaleThreshold <= 0 {
+		rebalanceWatchdogStaleThreshold = rebalance.DefaultWatchdogStaleThreshold
+	}
 	// Resolved above (not left at the parseXEnv zero-sentinel) so this log
 	// line — and everything downstream — reflects what's actually in
 	// effect, not "0" for anything the deployer left unset.
@@ -522,6 +527,7 @@ func main() {
 		"maxCPU", rebalanceMaxCPU.String(),
 		"minMemory", rebalanceMinMemory.String(),
 		"maxMemory", rebalanceMaxMemory.String(),
+		"watchdogStaleThreshold", rebalanceWatchdogStaleThreshold,
 	)
 
 	// decisionStore is shared between the PlacementServer (reads it in
@@ -574,6 +580,7 @@ func main() {
 		rebalanceMaxCPU,
 		rebalanceMinMemory,
 		rebalanceMaxMemory,
+		rebalanceWatchdogStaleThreshold,
 	)
 	// eaoGVK above is the List kind (used for List() calls); Watches()/
 	// RESTMapper need the singular item kind, derived here rather than

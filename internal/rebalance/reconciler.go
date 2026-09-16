@@ -89,6 +89,15 @@ const DefaultMoveRateWaitTimeout = 5 * time.Minute
 // throughput, not by how many profiles exist.
 const DefaultMaxConcurrentReconciles = 10
 
+// DefaultWatchdogStaleThreshold bounds how long a profile may sit in a
+// non-Watching state (Triggered/Evaluating/Decided/Enacting) before the
+// watchdog considers the cycle abandoned — most plausibly by an operator
+// crash mid-cycle — and force-recovers it back to Watching. Set comfortably
+// above every other in-cycle wait this engine can legitimately be blocked on
+// (DefaultMoveRateWaitTimeout's 5 minutes being the longest) so the watchdog
+// never fires on a cycle that's merely slow.
+const DefaultWatchdogStaleThreshold = 15 * time.Minute
+
 // Never Ever delete this comments as they are used by kubebuilder to generate RBAC permissions for the controller.
 // If you need to change the permissions,
 // modify the verbs and resources in the comments below and then run "make generate" to update the generated code.
@@ -185,6 +194,11 @@ type Reconciler struct {
 	// DefaultMinMemory/DefaultMaxMemory.
 	MinCPU, MaxCPU       resource.Quantity
 	MinMemory, MaxMemory resource.Quantity
+
+	// WatchdogStaleThreshold bounds how long a profile may remain in a
+	// non-Watching state before recoverStuckCycle force-recovers it. <= 0
+	// uses DefaultWatchdogStaleThreshold.
+	WatchdogStaleThreshold time.Duration
 }
 
 // NewReconciler creates a Reconciler. interval <= 0 uses
@@ -195,7 +209,8 @@ type Reconciler struct {
 // DefaultScaleActionTimeout; minReplicas/maxReplicas <= 0 use
 // DefaultMinReplicas/DefaultMaxReplicas; resourceActionTimeout <= 0 uses
 // DefaultResourceActionTimeout; minCPU/maxCPU/minMemory/maxMemory zero use
-// DefaultMinCPU/DefaultMaxCPU/DefaultMinMemory/DefaultMaxMemory.
+// DefaultMinCPU/DefaultMaxCPU/DefaultMinMemory/DefaultMaxMemory;
+// watchdogStaleThreshold <= 0 uses DefaultWatchdogStaleThreshold.
 func NewReconciler(
 	c client.Client,
 	writer *StateWriter,
@@ -215,6 +230,7 @@ func NewReconciler(
 	resourceActionTimeout time.Duration,
 	minCPU, maxCPU resource.Quantity,
 	minMemory, maxMemory resource.Quantity,
+	watchdogStaleThreshold time.Duration,
 ) *Reconciler {
 	if interval <= 0 {
 		interval = DefaultDetectionInterval
@@ -255,32 +271,36 @@ func NewReconciler(
 	if maxMemory.IsZero() {
 		maxMemory = DefaultMaxMemory
 	}
+	if watchdogStaleThreshold <= 0 {
+		watchdogStaleThreshold = DefaultWatchdogStaleThreshold
+	}
 	// Burst equals the per-minute limit itself: a quiet fleet can absorb a
 	// full minute's budget worth of Moves immediately, then throttles to a
 	// steady trickle (one token every 60/moveRateLimit seconds) after that.
 	moveRateLimiter := rate.NewLimiter(rate.Limit(float64(moveRateLimit)/60.0), moveRateLimit)
 	return &Reconciler{
-		Client:                c,
-		Writer:                writer,
-		Evaluator:             evaluator,
-		ProfileIndexField:     profileIndexField,
-		DetectionInterval:     interval,
-		ContextBuilder:        contextBuilder,
-		DecisionClient:        decisionClient,
-		DecisionTimeout:       decisionTimeout,
-		ImprovementThreshold:  improvementThreshold,
-		DecisionStore:         decisionStore,
-		MoveRateLimiter:       moveRateLimiter,
-		MoveRateWaitTimeout:   DefaultMoveRateWaitTimeout,
-		MoveActionTimeout:     moveActionTimeout,
-		ScaleActionTimeout:    scaleActionTimeout,
-		MinReplicas:           minReplicas,
-		MaxReplicas:           maxReplicas,
-		ResourceActionTimeout: resourceActionTimeout,
-		MinCPU:                minCPU,
-		MaxCPU:                maxCPU,
-		MinMemory:             minMemory,
-		MaxMemory:             maxMemory,
+		Client:                 c,
+		Writer:                 writer,
+		Evaluator:              evaluator,
+		ProfileIndexField:      profileIndexField,
+		DetectionInterval:      interval,
+		ContextBuilder:         contextBuilder,
+		DecisionClient:         decisionClient,
+		DecisionTimeout:        decisionTimeout,
+		ImprovementThreshold:   improvementThreshold,
+		DecisionStore:          decisionStore,
+		MoveRateLimiter:        moveRateLimiter,
+		MoveRateWaitTimeout:    DefaultMoveRateWaitTimeout,
+		MoveActionTimeout:      moveActionTimeout,
+		ScaleActionTimeout:     scaleActionTimeout,
+		MinReplicas:            minReplicas,
+		MaxReplicas:            maxReplicas,
+		ResourceActionTimeout:  resourceActionTimeout,
+		MinCPU:                 minCPU,
+		MaxCPU:                 maxCPU,
+		MinMemory:              minMemory,
+		MaxMemory:              maxMemory,
+		WatchdogStaleThreshold: watchdogStaleThreshold,
 	}
 }
 
@@ -307,9 +327,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl
 	if rs.State != "" && rs.State != StateWatching {
 		// A cycle is already past Triggered (Evaluating/Decided/Enacting) —
 		// this Reconciler's job (Detection) is done for now; let it run back
-		// to Watching before considering a new one. Later stories extend
-		// this method to act on these in-flight states rather than skip them.
-		return ctrl.Result{}, nil
+		// to Watching before considering a new one. recoverStuckCycle guards
+		// against it never doing so (e.g. the operator crashed mid-cycle).
+		r.recoverStuckCycle(ctx, req.NamespacedName, profile, rs)
+		return ctrl.Result{RequeueAfter: r.DetectionInterval}, nil
 	}
 
 	matched, result, err := r.Evaluator.Evaluate(ctx, profile)
@@ -407,6 +428,42 @@ func (r *Reconciler) enactBypassAction(
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
 		TransitionOptions{Action: bypassAction, Outcome: OutcomeEnacted, Cooldown: cooldown}); err != nil {
 		logger.Error(err, "rebalance: bypass transition to Watching (Enacted) failed", "profile", profile.Name)
+	}
+}
+
+// recoverStuckCycle force-recovers a profile that has sat in a non-Watching
+// state for longer than WatchdogStaleThreshold, most plausibly because the
+// operator crashed mid-cycle and nothing ever drove it back to Watching. A
+// still-progressing cycle is left alone — this only fires once the elapsed
+// time since the last transition clears the threshold.
+//
+// The forced transition carries the same Cooldown a normal Failed outcome
+// would: without it, a profile whose trigger condition is still true would
+// re-enter Triggered on the very next reconcile and could crash-loop through
+// the same failure again.
+func (r *Reconciler) recoverStuckCycle(
+	ctx context.Context,
+	key types.NamespacedName,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	rs orchestrationv1alpha1.RebalancingStatus,
+) {
+	threshold := r.WatchdogStaleThreshold
+	if threshold <= 0 {
+		threshold = DefaultWatchdogStaleThreshold
+	}
+	stuckFor := time.Since(rs.LastTransitionAt.Time)
+	if stuckFor < threshold {
+		return
+	}
+
+	logger := logf.FromContext(ctx)
+	cooldown := time.Duration(profile.Spec.Rebalancing.CooldownSeconds) * time.Second
+	reason := fmt.Sprintf("watchdog: recovered after being stuck in %s for %s, likely an operator restart mid-cycle",
+		rs.State, stuckFor.Round(time.Second))
+
+	if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
+		TransitionOptions{Outcome: OutcomeFailed, Cooldown: cooldown}); err != nil {
+		logger.Error(err, "rebalance: watchdog recovery transition to Watching failed", "profile", profile.Name)
 	}
 }
 

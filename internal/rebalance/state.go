@@ -60,9 +60,12 @@ const (
 // in RecentDecisions, not as a `state` value. stateNone and StateWatching
 // are equivalent resting positions.
 var validTransitions = map[orchestrationv1alpha1.RebalancingStateType][]orchestrationv1alpha1.RebalancingStateType{
-	stateNone:       {StateTriggered},
-	StateWatching:   {StateTriggered},
-	StateTriggered:  {StateEvaluating},
+	stateNone:     {StateTriggered},
+	StateWatching: {StateTriggered},
+	// Triggered -> Watching (in addition to the normal Triggered ->
+	// Evaluating) lets a watchdog recover a cycle that never advanced past
+	// Triggered — e.g. the operator crashed before AI evaluation began.
+	StateTriggered:  {StateEvaluating, StateWatching},
 	StateEvaluating: {StateDecided, StateWatching},
 	// Decided -> Watching (in addition to the normal Decided -> Enacting)
 	// covers dispatchMove's cluster-wide rate-limit wait: an

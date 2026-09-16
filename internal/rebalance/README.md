@@ -62,7 +62,7 @@ Not numbered because they're continuous background wiring rather than steps in a
 - [Node pressure (CPU/Memory)](#node-pressure-cpumemory)
 - [`StateWriter` — the single-writer rule](#statewriter--the-single-writer-rule)
   - [Why the reader must be uncached](#why-the-reader-must-be-uncached)
-  - [A profile can get permanently stuck in a non-Watching state](#a-profile-can-get-permanently-stuck-in-a-non-watching-state)
+  - [Watchdog for a profile stuck in a non-Watching state](#watchdog-for-a-profile-stuck-in-a-non-watching-state)
 - [Wiring into the system](#wiring-into-the-system)
   - [Configuration](#configuration)
   - [RBAC](#rbac)
@@ -85,6 +85,7 @@ stateDiagram-v2
     [*] --> Watching
     Watching --> Triggered: trigger fires
     Triggered --> Evaluating: AI call
+    Triggered --> Watching: watchdog (stuck mid-cycle)
     Evaluating --> Watching: NoOp / Rejected / Failed
     Evaluating --> Decided: Move accepted
     Decided --> Enacting
@@ -100,12 +101,15 @@ The transition table lives in [`state.go`](state.go) (`validTransitions`,
 `IsValidTransition`). From `Watching` (or the unset initial state — the two are equivalent),
 the only legal move is into `Triggered` — starting a fresh cycle. Every other edge in the
 diagram above is the only path the state machine allows; anything else is rejected by the
-writer (see below). `Evaluating`, `Decided`, and `Enacting` are the states that can transition
+writer (see below). `Triggered`, `Evaluating`, `Decided`, and `Enacting` can all transition
 straight back to `Watching` — every such write must carry an outcome (`TransitionOptions.Outcome`),
-enforced by `StateWriter.Transition` itself. `Decided → Watching` is the newest of these edges
-(Story 31's cluster-wide Move rate limit — see
-[below](#cluster-wide-move-rate-limit)): an accepted Move can fail before ever reaching
-`Enacting` if the fleet-wide throughput budget isn't available in time.
+enforced by `StateWriter.Transition` itself. `Decided → Watching` covers dispatchMove's
+cluster-wide rate-limit wait (see [below](#cluster-wide-move-rate-limit)): an accepted Move can
+fail before ever reaching `Enacting` if the fleet-wide throughput budget isn't available in
+time. `Triggered → Watching` exists solely for `recoverStuckCycle` (see
+[Watchdog for a profile stuck in a non-Watching state](#watchdog-for-a-profile-stuck-in-a-non-watching-state)) —
+nothing in the normal cycle flow ever takes that edge, since a normal `Triggered` cycle always
+proceeds to `Evaluating` next.
 
 <a id="package-layout"></a>
 ## 📁 <u>Package layout</u>
@@ -842,25 +846,29 @@ client isn't cache-based, so writes are immediately visible to the next `Get()`,
 exactly the behavior that masked this in testing. Catching it required a real cluster with
 the real manager cache.
 
-### A profile can get permanently stuck in a non-Watching state
+### Watchdog for a profile stuck in a non-Watching state
 
 `Reconcile` skips detection entirely whenever `state != Watching` (`Triggered`, `Evaluating`,
 `Decided`, `Enacting`) — deliberately, so it doesn't re-trigger a cycle that's still in flight.
-Every path that can enter the state machine now also has a defined way back to `Watching` —
+Every path that can enter the state machine also has a defined way back to `Watching` —
 AI-unreachable (`failEvaluation`), guardrail-rejected/unrecognized-action/malformed-Move
-(`dispatchDecision`), and a `Move`'s eviction/replacement outcome (`moveEnactor`), each ending in
-a terminal `Watching` write with an outcome.
+(`dispatchDecision`), and an enactor's outcome (`moveEnactor`/`scaleEnactor`/`resourceEnactor`),
+each ending in a terminal `Watching` write with an outcome.
 
-What isn't fully closed: `enactBypassAction` and `dispatchMove` each drive several `Transition`
+The gap is `enactBypassAction` and `dispatchMove` (and friends) driving several `Transition`
 calls sequentially *within a single `Reconcile` call*. If the operator process dies exactly
-between two of those calls (e.g. mid-rollout), the profile is abandoned wherever it was —
-`Reconcile`'s in-flight guard then skips it forever, since nothing else ever revisits a non-
-`Watching` state on its own. The only way out today is a manual status patch back to `Watching`
-(e.g. `kubectl patch ... --subresource=status -p
-'{"status":{"rebalancingStatus":{"state":"Watching"}}}'`), which itself immediately re-triggers
-a reconcile via the primary watch. Closing this fully would need a stuck-state watchdog (revert
-anything stuck past some max cycle duration) — not built, noted here so it isn't rediscovered
-from scratch.
+between two of those calls (e.g. mid-rollout), the profile is abandoned wherever it was — and
+`Reconcile`'s in-flight guard would otherwise skip it forever, since nothing else revisits a
+non-`Watching` state on its own.
+
+`recoverStuckCycle` (called from that same in-flight guard, on every reconcile of a non-Watching
+profile) closes this: once `time.Since(LastTransitionAt)` clears `WatchdogStaleThreshold`
+(default 15 minutes — comfortably above every legitimate in-cycle wait, `MoveRateWaitTimeout`'s 5
+minutes being the longest), it force-transitions the profile straight to `Watching` with outcome
+`Failed` and the profile's own cooldown applied, so a still-true trigger condition doesn't
+immediately re-enter `Triggered` and crash-loop through the same failure. A cycle that's still
+genuinely progressing — `LastTransitionAt` recent — is left alone.
+
 
 <a id="wiring-into-the-system"></a>
 ## 🔌 <u>Wiring into the system</u>
@@ -953,6 +961,7 @@ flowchart LR
         V12["REBALANCE_RESOURCE_ACTION_TIMEOUT"]
         V13["REBALANCE_MIN_CPU / REBALANCE_MAX_CPU"]
         V14["REBALANCE_MIN_MEMORY / REBALANCE_MAX_MEMORY"]
+        V15["REBALANCE_WATCHDOG_STALE_THRESHOLD"]
     end
 
     Resolve{"main.go: resolve unset/invalid<br/>before constructing anything —<br/>bad value fails the operator at startup"}
@@ -971,6 +980,7 @@ flowchart LR
     V12 --> Resolve
     V13 --> Resolve
     V14 --> Resolve
+    V15 --> Resolve
 
     Resolve -->|"unset → DefaultMaxRecentDecisions (10)"| SW["StateWriter<br/>recentDecisions length"]
     Resolve -->|"unset → DefaultDetectionInterval (30s)"| Recon1["Reconciler<br/>periodic detection tick"]
@@ -984,6 +994,7 @@ flowchart LR
     Resolve -->|"unset → DefaultMinReplicas (1)<br/>DefaultMaxReplicas (10)"| SB["dispatchScale<br/>fallback replica bounds"]
     Resolve -->|"unset → DefaultResourceActionTimeout (60s)"| RE["Resource enactor<br/>in-place-resize attempt window"]
     Resolve -->|"unset → DefaultMinCPU (50m) / DefaultMaxCPU (2)<br/>DefaultMinMemory (64Mi) / DefaultMaxMemory (2Gi)"| RB["dispatchResource<br/>CPU/Memory bounds"]
+    Resolve -->|"unset → DefaultWatchdogStaleThreshold (15m)"| WD["recoverStuckCycle<br/>stale-cycle recovery"]
 ```
 
 | Environment variable | Overrides | Default |
@@ -1002,6 +1013,7 @@ flowchart LR
 | `REBALANCE_RESOURCE_ACTION_TIMEOUT` | Max time `resourceEnactor` spends attempting in-place resize before falling back to the next-rollout path (Go duration) | `DefaultResourceActionTimeout` (60s) |
 | `REBALANCE_MIN_CPU` / `REBALANCE_MAX_CPU` | `AdjustResources` CPU bounds (see [AdjustResources](#adjustresources--cpumemory)) | `DefaultMinCPU` (50m) / `DefaultMaxCPU` (2) |
 | `REBALANCE_MIN_MEMORY` / `REBALANCE_MAX_MEMORY` | `AdjustResources` Memory bounds (see [AdjustResources](#adjustresources--cpumemory)) | `DefaultMinMemory` (64Mi) / `DefaultMaxMemory` (2Gi) |
+| `REBALANCE_WATCHDOG_STALE_THRESHOLD` | How long a profile may sit in a non-Watching state before force-recovery (see [Watchdog for a profile stuck in a non-Watching state](#watchdog-for-a-profile-stuck-in-a-non-watching-state)) | `DefaultWatchdogStaleThreshold` (15m) |
 
 Each default lives once, as a constant next to the type it configures — `main.go` doesn't
 duplicate the numbers, it just resolves "unset" to that constant before constructing anything,

@@ -114,7 +114,7 @@ func newTestReconcilerWithAgent(t *testing.T, agentURL string, objs ...client.Ob
 
 	return NewReconciler(c, writer, evaluator, testProfileIndexField, 30*time.Second,
 		contextBuilder, decisionClient, 200*time.Millisecond, 0, decisionStore, 0, 0, 0, 0, 0,
-		0, resource.Quantity{}, resource.Quantity{}, resource.Quantity{}, resource.Quantity{}), c
+		0, resource.Quantity{}, resource.Quantity{}, resource.Quantity{}, resource.Quantity{}, 0), c
 }
 
 func getProfile(t *testing.T, c client.Client, name string) *orchestrationv1alpha1.OrchestrationProfile {
@@ -173,19 +173,82 @@ func TestReconciler_InCooldownSkipsAndRequeuesAtExpiry(t *testing.T) {
 func TestReconciler_CycleInFlightSkipsDetection(t *testing.T) {
 	profile := testProfileWithConditions(TriggerScheduled)
 	profile.Status.RebalancingStatus.State = StateEvaluating // already past Triggered
+	profile.Status.RebalancingStatus.LastTransitionAt = metav1.Now()
 	r, c := newTestReconciler(t, testDeployment(), profile)
 
 	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}})
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if res.RequeueAfter != 0 {
-		t.Errorf("RequeueAfter = %v, want 0 when a cycle is already in flight", res.RequeueAfter)
+	if res.RequeueAfter != 30*time.Second {
+		t.Errorf("RequeueAfter = %v, want DetectionInterval (30s) even when a cycle is already in flight", res.RequeueAfter)
 	}
 
 	got := getProfile(t, c, profile.Name)
 	if got.Status.RebalancingStatus.State != StateEvaluating {
-		t.Errorf("state = %q, want unchanged Evaluating", got.Status.RebalancingStatus.State)
+		t.Errorf("state = %q, want unchanged Evaluating (not stale yet)", got.Status.RebalancingStatus.State)
+	}
+}
+
+// TestReconciler_StaleCycleRecoveredByWatchdog covers recoverStuckCycle: a
+// profile left in a non-Watching state well past WatchdogStaleThreshold
+// (simulating an operator crash mid-cycle) is force-recovered back to
+// Watching with Outcome Failed and a cooldown, instead of being skipped
+// forever.
+func TestReconciler_StaleCycleRecoveredByWatchdog(t *testing.T) {
+	profile := testProfileWithConditions(TriggerScheduled)
+	profile.Spec.Rebalancing.CooldownSeconds = 60
+	profile.Status.RebalancingStatus.State = StateEnacting
+	profile.Status.RebalancingStatus.LastTransitionAt = metav1.NewTime(time.Now().Add(-1 * time.Hour))
+	r, c := newTestReconciler(t, testDeployment(), profile)
+	r.WatchdogStaleThreshold = 100 * time.Millisecond
+
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.RequeueAfter != 30*time.Second {
+		t.Errorf("RequeueAfter = %v, want DetectionInterval (30s)", res.RequeueAfter)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if rs.State != StateWatching {
+		t.Fatalf("state = %q, want Watching after watchdog recovery", rs.State)
+	}
+	if len(rs.RecentDecisions) == 0 || rs.RecentDecisions[len(rs.RecentDecisions)-1].Outcome != OutcomeFailed {
+		t.Errorf("recovery outcome = %+v, want the latest decision recorded as Failed", rs.RecentDecisions)
+	}
+	if rs.CooldownUntil.IsZero() {
+		t.Error("CooldownUntil unset, want the watchdog recovery to apply the profile's cooldown")
+	}
+	if !strings.Contains(rs.Reason, "watchdog") {
+		t.Errorf("reason = %q, want it to mention the watchdog recovery", rs.Reason)
+	}
+}
+
+// TestReconciler_RecentStuckCycleLeftAlone is the negative counterpart to
+// TestReconciler_StaleCycleRecoveredByWatchdog: a profile that's only
+// recently entered a non-Watching state (still plausibly progressing) must
+// not be force-recovered.
+func TestReconciler_RecentStuckCycleLeftAlone(t *testing.T) {
+	profile := testProfileWithConditions(TriggerScheduled)
+	profile.Status.RebalancingStatus.State = StateDecided
+	profile.Status.RebalancingStatus.LastTransitionAt = metav1.Now()
+	r, c := newTestReconciler(t, testDeployment(), profile)
+	r.WatchdogStaleThreshold = 1 * time.Hour
+
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.RequeueAfter != 30*time.Second {
+		t.Errorf("RequeueAfter = %v, want DetectionInterval (30s)", res.RequeueAfter)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	if got.Status.RebalancingStatus.State != StateDecided {
+		t.Errorf("state = %q, want unchanged Decided", got.Status.RebalancingStatus.State)
 	}
 }
 
