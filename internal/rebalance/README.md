@@ -723,9 +723,20 @@ workload's selector, so an already-running pod can pick up the change immediatel
 supported. A resize failure on a given pod (most commonly: the cluster doesn't support in-place
 resize at all) is **not** a `Failed` outcome — the template patch already durably applies, so the
 cycle still ends `Enacted`, just with a reason noting the change takes effect on the next
-rollout instead. This enactor does not poll for the resize to actually converge on a pod's
-`status` — the in-place request being accepted is treated as sufficient confirmation for this
-story's scope; verifying convergence is a possible future refinement, not built here.
+rollout instead.
+
+**A pod only counts as resized once its status actually confirms it** — submitting the resize
+request successfully only means the API server accepted the write, not that the kubelet applied
+it. `awaitResizeConvergence` polls the pod (every `resizeActionPollInterval` = 2s, within the
+same shared `timeout` budget the whole batch of pods shares) for one of three outcomes:
+`ContainerStatus.Resources` (what's actually enacted, not merely requested or allocated) matches
+the target — converged; a `PodResizePending`/`Infeasible` or `PodResizeInProgress`/`Error`
+condition appears — the kubelet has definitively rejected it, no point waiting further;
+otherwise the shared budget eventually runs out — unconfirmed, not a rejection, just "don't know
+yet." Only the first case counts toward `resized`; the other two both fall back to the same
+next-rollout guarantee the template patch already provides. A `PodResizePending`/`Deferred`
+condition (feasible, just not possible on this node *right now*) is deliberately not treated as
+a rejection — it may still resolve within the shared budget.
 
 Only CPU and Memory are supported — every other resource type (GPU and other extended/device
 resources included) is immutable on a running pod regardless of `InPlacePodVerticalScaling`, so

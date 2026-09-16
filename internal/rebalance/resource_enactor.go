@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
@@ -44,6 +45,11 @@ import (
 // effect on the next rollout" — the same outcome as if in-place resize
 // weren't supported at all.
 const DefaultResourceActionTimeout = 60 * time.Second
+
+// resizeActionPollInterval is how often awaitResizeConvergence re-reads a
+// pod while waiting for its in-place resize to actually take effect —
+// mirrors moveActionPollInterval/scaleActionPollInterval.
+const resizeActionPollInterval = 2 * time.Second
 
 // DefaultMinCPU/MaxCPU/MinMemory/MaxMemory are dispatchResource's fallback
 // guardrail bounds — conservative defaults meant to stop a misbehaving AI
@@ -226,10 +232,10 @@ func parseTargetResources(cpu, memory string) (targetCPU, targetMemory resource.
 // side effect). Unlike scaleEnactor, an in-place-resize failure is not a
 // Failed outcome by itself: the template patch has already durably applied,
 // so the workload gets the target resources on its next rollout either way.
-// This enactor does not poll for the resize to actually converge on running
-// pods — the in-place request being accepted is treated as sufficient
-// confirmation for this story's scope; verifying convergence is a possible
-// future refinement, not built here.
+// A pod only counts as resized once its actual status confirms the resize
+// took (see awaitResizeConvergence) — a pod the API server accepted the
+// resize request for but that never converges, or that the kubelet
+// explicitly rejects, still falls back to "effective on next rollout".
 func resourceEnactor(
 	ctx context.Context,
 	c client.Client,
@@ -323,11 +329,14 @@ func applyTargetResources(container *corev1.Container, targetCPU, targetMemory r
 
 // resizeRunningPods lists the pods currently matching selector in namespace
 // and attempts an in-place resize (the "resize" subresource) on each,
-// applying the same target resources the template was just patched with.
-// Returns how many succeeded out of how many were attempted. A pod-level
-// resize error (most commonly: the cluster doesn't support in-place resize
-// at all) is not returned as an error here — it's reflected in the
-// resized-vs-attempted counts for the caller to turn into a reason string.
+// applying the same target resources the template was just patched with,
+// then waits (within the shared budget in timeout) for each pod's status to
+// actually confirm the resize took. Returns how many genuinely converged
+// out of how many were attempted. A pod-level resize error (most commonly:
+// the cluster doesn't support in-place resize at all), a kubelet-rejected
+// resize, or one that never converges within the shared budget are all
+// reflected in the resized-vs-attempted counts for the caller to turn into
+// a reason string, not returned as an error.
 func resizeRunningPods(
 	ctx context.Context,
 	c client.Client,
@@ -362,11 +371,94 @@ func resizeRunningPods(
 		attempted++
 		applyTargetResources(container, targetCPU, targetMemory)
 		if err := c.SubResource("resize").Update(resizeCtx, pod); err == nil {
-			resized++
+			key := types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}
+			if converged, _ := awaitResizeConvergence(resizeCtx, c, key, containerName, targetCPU, targetMemory); converged {
+				resized++
+			}
 		}
 		if resizeCtx.Err() != nil {
-			break // timed out partway through — remaining pods fall back to the template's next-rollout path
+			break // shared budget spent — remaining pods fall back to the template's next-rollout path
 		}
 	}
 	return resized, attempted, nil
+}
+
+// awaitResizeConvergence polls key's pod (re-Get — pod is a stale listed
+// copy by the time this is called) until one of three things happens:
+// containerName's actual ContainerStatus.Resources matches
+// targetCPU/targetMemory (converged), a PodResizePending/Infeasible or
+// PodResizeInProgress/Error condition appears (rejected — the kubelet has
+// decided this resize will never take, no point waiting further), or ctx's
+// deadline is reached (unconfirmed — the caller's shared timeout budget ran
+// out, not a rejection). rejectReason is only ever non-empty in the
+// rejected case, so a caller can't confuse "still don't know" with
+// "confirmed rejected".
+func awaitResizeConvergence(
+	ctx context.Context,
+	c client.Client,
+	key types.NamespacedName,
+	containerName string,
+	targetCPU, targetMemory resource.Quantity,
+) (converged bool, rejectReason string) {
+	_ = wait.PollUntilContextCancel(ctx, resizeActionPollInterval, true, func(ctx context.Context) (bool, error) {
+		pod := &corev1.Pod{}
+		if err := c.Get(ctx, key, pod); err != nil {
+			return false, nil // transient — keep polling until the shared budget runs out
+		}
+		if reason, rejected := resizeRejectedReason(pod); rejected {
+			rejectReason = reason
+			return true, nil
+		}
+		if containerResourcesConverged(pod, containerName, targetCPU, targetMemory) {
+			converged = true
+			return true, nil
+		}
+		return false, nil
+	})
+	return converged, rejectReason
+}
+
+// resizeRejectedReason reports whether pod's status carries a condition
+// indicating the kubelet has definitively rejected a pending resize — as
+// opposed to still working on it (PodResizeInProgress with no Error reason)
+// or having it queued for later (PodResizePending/Deferred, which may still
+// succeed once the node has headroom).
+func resizeRejectedReason(pod *corev1.Pod) (string, bool) {
+	for _, cond := range pod.Status.Conditions {
+		switch {
+		case cond.Type == corev1.PodResizePending && cond.Reason == corev1.PodReasonInfeasible:
+			return cond.Message, true
+		case cond.Type == corev1.PodResizeInProgress && cond.Reason == corev1.PodReasonError:
+			return cond.Message, true
+		}
+	}
+	return "", false
+}
+
+// containerResourcesConverged reports whether containerName's
+// ContainerStatus.Resources — what the kubelet has actually enacted on the
+// running container, not merely allocated or requested — matches whichever
+// of targetCPU/targetMemory is non-zero (the other was left unchanged by
+// applyTargetResources, so it's not part of what "converged" means here).
+func containerResourcesConverged(pod *corev1.Pod, containerName string, targetCPU, targetMemory resource.Quantity) bool {
+	for i := range pod.Status.ContainerStatuses {
+		cs := &pod.Status.ContainerStatuses[i]
+		if cs.Name != containerName || cs.Resources == nil {
+			continue
+		}
+		if !targetCPU.IsZero() {
+			cur, ok := cs.Resources.Requests[corev1.ResourceCPU]
+			if !ok || cur.Cmp(targetCPU) != 0 {
+				return false
+			}
+		}
+		if !targetMemory.IsZero() {
+			cur, ok := cs.Resources.Requests[corev1.ResourceMemory]
+			if !ok || cur.Cmp(targetMemory) != 0 {
+				return false
+			}
+		}
+		return true
+	}
+	return false // no matching container status yet
 }
