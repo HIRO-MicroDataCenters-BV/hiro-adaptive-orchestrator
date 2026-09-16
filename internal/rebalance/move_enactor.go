@@ -25,6 +25,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -71,7 +72,11 @@ type moveResult struct {
 // Returns a moveResult describing the terminal outcome to record — never an
 // error for anything that happened *after* the store write succeeded, since
 // every one of those cases (PDB refusal, wrong node, timeout) is a defined
-// outcome the caller writes to status, not a Go error. A non-nil error means
+// outcome the caller writes to status, not a Go error. A timeout waiting for
+// the replacement to schedule is reclassified Deferred instead of Failed
+// when this operator's own energy gate is confirmed closed at that moment
+// (see classifyScheduleTimeout) — the wrong-node case is not, since it's a
+// real logic problem unrelated to scheduling delay. A non-nil error means
 // the store write itself couldn't even be attempted (the target pod no
 // longer exists) or the pre-eviction pod list couldn't be read — eviction
 // was never attempted either way.
@@ -79,6 +84,7 @@ func moveEnactor(
 	ctx context.Context,
 	c client.Client,
 	store *placementserver.DecisionStore,
+	eaoGVK schema.GroupVersionKind,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
 	podName, targetNode, reason, decisionID string,
 	replacementTimeout time.Duration,
@@ -123,7 +129,8 @@ func moveEnactor(
 	replacement, err := awaitReplacement(ctx, c, profile, beforeNames, replacementTimeout)
 	if err != nil {
 		store.Delete(key)
-		return moveResult{outcome: OutcomeFailed, reason: err.Error()}, nil
+		outcome, reason := classifyScheduleTimeout(ctx, c, eaoGVK, profile, err.Error())
+		return moveResult{outcome: outcome, reason: reason}, nil
 	}
 
 	// No-op if PlacementServer.score already consumed the entry when it

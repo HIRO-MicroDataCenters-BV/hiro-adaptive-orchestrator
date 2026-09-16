@@ -345,16 +345,16 @@ func TestReconciler_NoOpDispatchedDirectly(t *testing.T) {
 }
 
 // TestReconciler_UnrecognizedActionFailsDirectly covers an AI response whose
-// Action has no registered dispatcher (e.g. Reject/Defer, which exist as
-// values but have no enactor yet, or anything genuinely unrecognized): the
-// cycle is treated as a processing error, not guessed at.
+// Action has no registered dispatcher at all (genuinely unrecognized, not
+// one of the known RebalanceAction values): the cycle is treated as a
+// processing error, not guessed at.
 func TestReconciler_UnrecognizedActionFailsDirectly(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
 			RequestID: "test",
-			Action:    orchestrationv1alpha1.RebalanceActionReject,
-			Reason:    "AI declined",
+			Action:    orchestrationv1alpha1.RebalanceAction("SomeFutureAction"),
+			Reason:    "AI returned an action this build doesn't know about",
 		})
 	}))
 	defer server.Close()
@@ -376,13 +376,80 @@ func TestReconciler_UnrecognizedActionFailsDirectly(t *testing.T) {
 	}
 }
 
+// TestReconciler_RejectDispatchedDirectly covers a Reject AI response: like
+// NoOp, it exits straight from Evaluating to Watching, but records outcome
+// Rejected — the AI actively chose not to act, which is not a processing
+// error.
+func TestReconciler_RejectDispatchedDirectly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+			RequestID: "test",
+			Action:    orchestrationv1alpha1.RebalanceActionReject,
+			Reason:    "no viable target improves balance enough to justify the disruption",
+		})
+	}))
+	defer server.Close()
+
+	profile := testProfileWithConditions(TriggerScheduled)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), profile)
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if rs.State != StateWatching {
+		t.Fatalf("state = %q, want Watching", rs.State)
+	}
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeRejected {
+		t.Errorf("recentDecisions = %+v, want one Rejected-outcome entry", rs.RecentDecisions)
+	}
+}
+
+// TestReconciler_DeferDispatchedDirectly covers a Defer AI response: like
+// NoOp, it exits straight from Evaluating to Watching, but records outcome
+// Deferred and still applies cooldown — no enactor, no other side effect.
+func TestReconciler_DeferDispatchedDirectly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+			RequestID: "test",
+			Action:    orchestrationv1alpha1.RebalanceActionDefer,
+			Reason:    "conditions may improve shortly, revisit next cycle",
+		})
+	}))
+	defer server.Close()
+
+	profile := testProfileWithConditions(TriggerScheduled)
+	profile.Spec.Rebalancing.CooldownSeconds = 60
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), profile)
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if rs.State != StateWatching {
+		t.Fatalf("state = %q, want Watching", rs.State)
+	}
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeDeferred {
+		t.Errorf("recentDecisions = %+v, want one Deferred-outcome entry", rs.RecentDecisions)
+	}
+	if rs.CooldownUntil.IsZero() {
+		t.Errorf("cooldownUntil = zero, want a cooldown to be applied after Defer")
+	}
+}
+
 // TestReconciler_MoveAboveThresholdReachesEnacting covers an accepted Move
 // recommendation: the cycle reaches Decided and Enacting (verified via the
 // Warning event the terminal write emits) before the enactor's eviction
 // call — unsupported by the fake client — fails it back to Watching with
 // Outcome Failed. This still proves dispatchMove drives the cycle all the
-// way to the enactor instead of stopping at Decided, which is what Story
-// 28's own guardrail work is responsible for; actual eviction success is
+// way to the enactor instead of stopping at Decided, which is what the
+// guardrail chain itself is responsible for; actual eviction success is
 // exercised on a live cluster, not here.
 func TestReconciler_MoveAboveThresholdReachesEnacting(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -423,7 +490,148 @@ func TestReconciler_MoveAboveThresholdReachesEnacting(t *testing.T) {
 	}
 }
 
-// TestReconciler_MoveRateLimitedFailsCleanly covers Story 31's cluster-wide
+// TestReconciler_MoveTimeoutWithClosedEnergyGateIsDeferred: awaitReplacement
+// times out (no replacement pod will ever appear against a fake client)
+// against an energy-aware workload whose EAO reports insufficient energy
+// right now — classifyScheduleTimeout should reclassify the timeout
+// Deferred instead of Failed.
+func TestReconciler_MoveTimeoutWithClosedEnergyGateIsDeferred(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+			RequestID: "test", Action: orchestrationv1alpha1.RebalanceActionMove,
+			PodName: "app-a-1", TargetNode: "node-b", Improvement: 50, Reason: "better spread",
+		})
+	}))
+	defer server.Close()
+
+	profile := testEnergyAwareProfile()
+	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
+	eao := testEAO("Waiting", "demo: energy window closed", boolPtr(false))
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao)
+	r.MoveActionTimeout = 50 * time.Millisecond
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeDeferred {
+		t.Fatalf("recentDecisions = %+v, want one Deferred-outcome entry", rs.RecentDecisions)
+	}
+	if !strings.Contains(rs.RecentDecisions[0].Reason, "energy gate closed") {
+		t.Errorf("reason = %q, want it to mention the energy gate", rs.RecentDecisions[0].Reason)
+	}
+}
+
+// TestReconciler_MoveTimeoutWithoutEnergyAwarenessStaysFailed covers the
+// negative case: the same stuck-scheduling timeout, but the workload isn't
+// energy-aware at all (Awareness.Energy: false) — classifyScheduleTimeout
+// must not reclassify it, even though a (misleadingly) closed EAO exists.
+func TestReconciler_MoveTimeoutWithoutEnergyAwarenessStaysFailed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+			RequestID: "test", Action: orchestrationv1alpha1.RebalanceActionMove,
+			PodName: "app-a-1", TargetNode: "node-b", Improvement: 50, Reason: "better spread",
+		})
+	}))
+	defer server.Close()
+
+	profile := testProfileWithConditions(TriggerScheduled) // Awareness.Energy: false
+	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
+	eao := testEAO("Waiting", "demo: energy window closed", boolPtr(false))
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao)
+	r.MoveActionTimeout = 50 * time.Millisecond
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
+		t.Fatalf("recentDecisions = %+v, want one Failed-outcome entry", rs.RecentDecisions)
+	}
+}
+
+// TestReconciler_MoveTimeoutWithOpenEnergyGateStaysFailed covers the other
+// negative case: energy awareness is on and an EAO exists, but it reports
+// sufficient energy — the timeout is genuinely unexplained, so it must stay
+// Failed.
+func TestReconciler_MoveTimeoutWithOpenEnergyGateStaysFailed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+			RequestID: "test", Action: orchestrationv1alpha1.RebalanceActionMove,
+			PodName: "app-a-1", TargetNode: "node-b", Improvement: 50, Reason: "better spread",
+		})
+	}))
+	defer server.Close()
+
+	profile := testEnergyAwareProfile()
+	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
+	eao := testEAO("DeployImmediately", "window open", boolPtr(true))
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao)
+	r.MoveActionTimeout = 50 * time.Millisecond
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
+		t.Fatalf("recentDecisions = %+v, want one Failed-outcome entry", rs.RecentDecisions)
+	}
+}
+
+// TestReconciler_MoveWrongNodeStaysFailedEvenWithClosedEnergyGate proves
+// classifyScheduleTimeout is only ever applied to the timeout branch, not
+// the "replacement landed on the wrong node" branch: a replacement pod
+// appears (so awaitReplacement doesn't time out at all) but on the wrong
+// node, with the energy gate closed — must still be Failed, not Deferred.
+// The replacement is created 300ms after Reconcile starts (well under
+// moveActionPollInterval's 2s cadence, so it's reliably missed by the
+// immediate first poll and picked up by the second) to deterministically
+// exercise the "replacement found" path rather than the timeout path.
+func TestReconciler_MoveWrongNodeStaysFailedEvenWithClosedEnergyGate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+			RequestID: "test", Action: orchestrationv1alpha1.RebalanceActionMove,
+			PodName: "app-a-1", TargetNode: "node-b", Improvement: 50, Reason: "better spread",
+		})
+	}))
+	defer server.Close()
+
+	profile := testEnergyAwareProfile()
+	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
+	eao := testEAO("Waiting", "demo: energy window closed", boolPtr(false))
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao)
+	r.MoveActionTimeout = 5 * time.Second
+
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_ = c.Create(context.Background(), testPod("app-a-2", "node-c", corev1.PodRunning)) // wrong node
+	}()
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
+		t.Fatalf("recentDecisions = %+v, want one Failed-outcome entry (wrong node, not a timeout)", rs.RecentDecisions)
+	}
+	if !strings.Contains(rs.RecentDecisions[0].Reason, "intent not honoured") {
+		t.Errorf("reason = %q, want the wrong-node reason, not a timeout/energy-gate one", rs.RecentDecisions[0].Reason)
+	}
+}
+
+// TestReconciler_MoveRateLimitedFailsCleanly covers dispatchMove's cluster-wide
 // rate limit: an accepted, above-threshold Move still reaches Decided, but
 // with MoveRateLimiter exhausted (burst 0 — any Wait fails immediately, no
 // timing dependency) it must not proceed to Enacting. It should fail
@@ -466,7 +674,7 @@ func TestReconciler_MoveRateLimitedFailsCleanly(t *testing.T) {
 	}
 }
 
-// TestReconciler_MoveDryRunSkipsSideEffectsAndRateLimit covers Story 32: an
+// TestReconciler_MoveDryRunSkipsSideEffectsAndRateLimit covers dry-run: an
 // accepted, above-threshold Move on a spec.rebalancing.dryRun: true profile
 // must still reach Enacting and resolve Watching+Enacted, but without
 // actually evicting the pod and without waiting on MoveRateLimiter (exhausted

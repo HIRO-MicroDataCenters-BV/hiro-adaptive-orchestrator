@@ -54,6 +54,7 @@ Not numbered because they're continuous background wiring rather than steps in a
 - [Decision — how `Evaluating` calls the AI](#decision--how-evaluating-calls-the-ai)
 - [Dispatch — acting on the AI's decision](#dispatch--acting-on-the-ais-decision)
   - [The decision store — how `Move` actually lands a pod on a specific node](#the-decision-store--how-move-actually-lands-a-pod-on-a-specific-node)
+  - [Energy-gate-aware timeout classification](#energy-gate-aware-timeout-classification)
   - [Cluster-wide Move rate limit](#cluster-wide-move-rate-limit)
   - [Dry-run mode](#dry-run-mode)
   - [Replica bounds — `AdjustReplicas`](#replica-bounds--adjustreplicas)
@@ -354,8 +355,10 @@ initial-placement scoring, not a second HTTP path:
 ```mermaid
 flowchart TD
     Resp(["RebalanceDecisionResponse"]) --> Reg{"actionDispatchers[Action]?"}
-    Reg -- "no entry<br/>(Reject / Defer / unknown)" --> F1(["Watching + Failed"])
+    Reg -- "no entry<br/>(genuinely unrecognized)" --> F1(["Watching + Failed"])
     Reg -- NoOp --> N1(["Watching + NoOp"])
+    Reg -- Reject --> N2(["Watching + Rejected"])
+    Reg -- Defer --> N3(["Watching + Deferred"])
     Reg -- Move --> G{"Improvement >= threshold<br/>AND PodName / TargetNode set?"}
     G -- no --> Rej(["Watching + Rejected / Failed"])
     G -- yes --> D(["Decided"])
@@ -382,15 +385,19 @@ flowchart TD
 
 [`dispatch.go`](dispatch.go) carries a successful `RebalanceDecisionResponse` the rest of the
 way to a terminal `Watching` write. It's a registry (`actionDispatchers`, keyed by
-`orchestrationv1alpha1.RebalanceAction`), not a hardcoded switch, so a future enactor (`Defer`,
-`Escalate`) is a new map entry — `dispatchDecision` itself never changes. An action with no
-registered dispatcher (today: anything other than `Move`/`NoOp`/`AdjustReplicas`/
-`AdjustResources`, including `Reject`/`Defer`, which exist as values but have no enactor yet) is
-treated as a processing error — `Watching` + outcome `Failed` — rather than guessed at.
+`orchestrationv1alpha1.RebalanceAction`), not a hardcoded switch, so a future enactor
+(`Escalate`) is a new map entry — `dispatchDecision` itself never changes. An action with no
+registered dispatcher — genuinely unrecognized, not one of the known values — is treated as a
+processing error — `Watching` + outcome `Failed` — rather than guessed at.
 
 - **`NoOp`** (`dispatchNoOp`) exits straight from `Evaluating` to `Watching` with outcome `NoOp`.
   No `Decided`/`Enacting` hop — both are valid direct exits from `Evaluating` in
   `validTransitions`.
+- **`Reject`** (`dispatchReject`) and **`Defer`** (`dispatchDefer`) mirror `NoOp` exactly, just
+  with outcome `Rejected`/`Deferred` instead of `NoOp` — the AI actively chose not to act (as
+  opposed to NoOp's "nothing needs to change"), so recording that as `Failed` via the
+  no-dispatcher fallthrough would misreport a deliberate decision as a processing error. `Defer`
+  still applies the profile's cooldown, same as every other terminal `Watching` write.
 - **`Move`** (`dispatchMove`) first applies the improvement-threshold guardrail
   (`Reconciler.ImprovementThreshold`, default `DefaultImprovementThreshold` — a single global
   value for now, not per-trigger-reason). Below threshold, or missing `PodName`/`TargetNode`,
@@ -404,7 +411,10 @@ treated as a processing error — `Watching` + outcome `Failed` — rather than 
      A `429` (PDB refused) maps to outcome `Deferred`.
   3. Polls (`Reconciler.MoveActionTimeout`, default `DefaultMoveActionTimeout` = 60s) for a
      replacement pod — one not present before eviction, now scheduled to a node. Landing on
-     `TargetNode` is outcome `Enacted`; landing elsewhere or timing out is outcome `Failed`.
+     `TargetNode` is outcome `Enacted`; landing elsewhere is outcome `Failed`. A timeout is
+     `Failed` too, *unless* `classifyScheduleTimeout` (see
+     [below](#energy-gate-aware-timeout-classification)) confirms this operator's own energy
+     gate is closed right now, in which case it's reclassified `Deferred`.
   4. The `DecisionStore` entry is cleared on every path out, regardless of outcome.
 - **`AdjustReplicas`** (`dispatchScale`) applies the same improvement-threshold guardrail as
   `Move`, then a replica-bounds guardrail (see [below](#replica-bounds--adjustreplicas)).
@@ -413,7 +423,8 @@ treated as a processing error — `Watching` + outcome `Failed` — rather than 
   then `Enacting`, and calls `scaleEnactor` ([`scale_enactor.go`](scale_enactor.go)): patches
   the workload's (`Deployment` or `StatefulSet`) `Spec.Replicas` to `TargetReplicas`, then polls
   (`Reconciler.ScaleActionTimeout`, default `DefaultScaleActionTimeout` = 60s) for
-  `Status.ReadyReplicas` to reach that count — matching is `Enacted`, timing out is `Failed`.
+  `Status.ReadyReplicas` to reach that count — matching is `Enacted`; timing out is `Failed`,
+  same `classifyScheduleTimeout` reclassification-to-`Deferred` as `Move`'s timeout above.
   Unlike `Move`, there's no cluster-wide rate limiter or `DecisionStore` entry: scaling a
   workload's replica count doesn't disrupt one specific running pod the way an eviction does.
 - **`AdjustResources`** (`dispatchResource`) applies the same improvement-threshold guardrail,
@@ -480,6 +491,55 @@ AI can recommend the next one. `recentDecisions` accumulates the history across 
 in the schema currently supports batching several decisions into one response, and the state
 machine (one active decision per profile at a time) isn't shaped for concurrent per-pod cycles
 either.
+
+### Energy-gate-aware timeout classification
+
+`moveEnactor` and `scaleEnactor` both end in a poll loop waiting for a scheduling-dependent
+end-state: a replacement pod scheduled, or a target `ReadyReplicas` count reached. When that
+poll times out, the cause is ambiguous by default — a defined outcome (`Failed`) the caller
+writes to status, but one that can't distinguish "genuinely broken, needs investigation" from
+"would have succeeded, this operator's own energy gate just happens to be closed right now."
+That ambiguity was confirmed live, independently, for both `Move` and `AdjustReplicas`: a
+workload's energy-aware profile had its energy window closed right as a replacement/new pod
+tried to schedule, the enactor's poll saw nothing and reported `Failed`, and manually reopening
+the window let the same pod schedule within seconds — proving the recommendation itself was
+sound, only the timing was unlucky.
+
+[`energy_gate.go`](energy_gate.go)'s `classifyScheduleTimeout` is called at the exact moment
+either enactor's poll gives up, and only there — never on `Move`'s separate "replacement landed
+on the wrong node" outcome, which is a real logic problem unrelated to scheduling delay, not a
+timing issue:
+
+```mermaid
+flowchart TD
+    Timeout(["Poll timed out"]) --> Aware{"profile.Spec.Placement<br/>.Awareness.Energy?"}
+    Aware -- no --> Failed(["Failed<br/>(unchanged)"])
+    Aware -- yes --> Lookup["FindEAOForApp<br/>(fresh read, not the<br/>Evaluating-stage snapshot)"]
+    Lookup -- "not found / lookup error" --> Failed
+    Lookup -- found --> Sufficient{"status.energyMetrics<br/>.sufficient?"}
+    Sufficient -- "field absent" --> Failed
+    Sufficient -- "true" --> Failed
+    Sufficient -- "false" --> Deferred(["Deferred<br/>(energy gate closed: reason)"])
+```
+
+Two things worth calling out:
+
+- **The EAO is read fresh, at the moment of timeout** — not reused from the snapshot already
+  sent to the AI during `Evaluating`. That snapshot is taken before the decision is even made;
+  the gate can flip open or closed well within an enactor's own timeout window (default 60s), so
+  only a read taken right here is trustworthy.
+- **It mirrors `CheckEnergyGate`'s own gating precisely** (`internal/placement-server/
+  builder.go`): `Awareness.Energy` is checked first, exactly like the gate itself does, so a
+  workload the gate would never have blocked in the first place isn't misclassified just
+  because some unrelated `EnergyAwareOrchestration` happens to exist and happens to report
+  insufficient energy. Every "can't confirm" case falls back to the original `Failed` — this
+  only ever reclassifies toward `Deferred` on a positive, direct signal, never guesses.
+
+Out of scope: `resourceEnactor`'s best-effort in-place resize never goes through the
+scheduler at all (it's a direct kubelet-level operation on an already-running pod), so the
+energy gate can't explain a timeout there even in principle — and today `resourceEnactor`
+doesn't wait for or track anything after submitting a resize request anyway, so it has no
+timeout/`Failed` path to reclassify in the first place.
 
 ### Cluster-wide Move rate limit
 

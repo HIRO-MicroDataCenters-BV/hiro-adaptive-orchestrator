@@ -24,6 +24,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -160,12 +161,15 @@ func kedaScaledObjectOwner(owners []metav1.OwnerReference) string {
 // Returns a scaleResult describing the terminal outcome to record — never an
 // error for anything that happened *after* the patch succeeded, mirroring
 // moveEnactor: a timeout waiting for ready replicas is a defined outcome
-// (Failed) the caller writes to status, not a Go error. A non-nil error means
+// the caller writes to status, not a Go error — reclassified Deferred
+// instead of Failed when this operator's own energy gate is confirmed
+// closed at that moment (see classifyScheduleTimeout). A non-nil error means
 // the workload couldn't even be fetched, or its kind isn't one this enactor
 // knows how to scale — the patch was never attempted.
 func scaleEnactor(
 	ctx context.Context,
 	c client.Client,
+	eaoGVK schema.GroupVersionKind,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
 	targetReplicas int32,
 	reason string,
@@ -206,7 +210,8 @@ func scaleEnactor(
 	}
 
 	if err := awaitReadyReplicas(ctx, c, ref.Kind, key, targetReplicas, timeout); err != nil {
-		return scaleResult{outcome: OutcomeFailed, reason: err.Error()}, nil
+		outcome, reason := classifyScheduleTimeout(ctx, c, eaoGVK, profile, err.Error())
+		return scaleResult{outcome: outcome, reason: reason}, nil
 	}
 	return scaleResult{
 		outcome: OutcomeEnacted,

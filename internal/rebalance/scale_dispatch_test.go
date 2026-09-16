@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -139,6 +140,96 @@ func TestReconciler_ScaleAboveThresholdReachesEnacted(t *testing.T) {
 	}
 }
 
+// TestReconciler_ScaleTimeoutWithClosedEnergyGateIsDeferred: the deployment
+// never reports the target ReadyReplicas against a fake client, so
+// awaitReadyReplicas times out. Against an energy-aware workload whose EAO
+// reports insufficient energy right now, classifyScheduleTimeout should
+// reclassify that timeout Deferred instead of Failed. scaleEnactor has only
+// one Failed path (this one), so there's no wrong-outcome case to check
+// separately the way Move's wrong-node case needed.
+func TestReconciler_ScaleTimeoutWithClosedEnergyGateIsDeferred(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(adjustReplicasResponse(3, 50))
+	}))
+	defer server.Close()
+
+	profile := testEnergyAwareProfile()
+	deploy := testScalableDeployment(0) // never reaches 3 ready — fake client, no real rollout
+	eao := testEAO("Waiting", "demo: energy window closed", boolPtr(false))
+	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile, eao)
+	r.ScaleActionTimeout = 50 * time.Millisecond
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeDeferred {
+		t.Fatalf("recentDecisions = %+v, want one Deferred-outcome entry", rs.RecentDecisions)
+	}
+	if !strings.Contains(rs.RecentDecisions[0].Reason, "energy gate closed") {
+		t.Errorf("reason = %q, want it to mention the energy gate", rs.RecentDecisions[0].Reason)
+	}
+}
+
+// TestReconciler_ScaleTimeoutWithoutEnergyAwarenessStaysFailed covers the
+// negative case: the same stuck-ReadyReplicas timeout, but the workload
+// isn't energy-aware at all — classifyScheduleTimeout must not reclassify
+// it, even though a (misleadingly) closed EAO exists.
+func TestReconciler_ScaleTimeoutWithoutEnergyAwarenessStaysFailed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(adjustReplicasResponse(3, 50))
+	}))
+	defer server.Close()
+
+	profile := testProfileWithConditions(TriggerScheduled) // Awareness.Energy: false
+	deploy := testScalableDeployment(0)
+	eao := testEAO("Waiting", "demo: energy window closed", boolPtr(false))
+	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile, eao)
+	r.ScaleActionTimeout = 50 * time.Millisecond
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
+		t.Fatalf("recentDecisions = %+v, want one Failed-outcome entry", rs.RecentDecisions)
+	}
+}
+
+// TestReconciler_ScaleTimeoutWithOpenEnergyGateStaysFailed covers the other
+// negative case: energy awareness is on and an EAO exists, but it reports
+// sufficient energy — the timeout is genuinely unexplained, so it must stay
+// Failed.
+func TestReconciler_ScaleTimeoutWithOpenEnergyGateStaysFailed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(adjustReplicasResponse(3, 50))
+	}))
+	defer server.Close()
+
+	profile := testEnergyAwareProfile()
+	deploy := testScalableDeployment(0)
+	eao := testEAO("DeployImmediately", "window open", boolPtr(true))
+	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile, eao)
+	r.ScaleActionTimeout = 50 * time.Millisecond
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
+		t.Fatalf("recentDecisions = %+v, want one Failed-outcome entry", rs.RecentDecisions)
+	}
+}
+
 func TestReconciler_ScaleBelowThresholdRejected(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -233,8 +324,8 @@ func TestReconciler_ScaleHonoursHPABounds(t *testing.T) {
 	}
 }
 
-// TestReconciler_ScaleDefersToKEDAManagedWorkload covers Story 36: a workload
-// whose HPA was created by a KEDA ScaledObject (identified by ownerReferences)
+// TestReconciler_ScaleDefersToKEDAManagedWorkload covers KEDA deferral: a
+// workload whose HPA was created by a KEDA ScaledObject (identified by ownerReferences)
 // must never be patched directly — the cycle ends Deferred, and Spec.Replicas
 // is left untouched, regardless of how well the recommendation would
 // otherwise have cleared every other guardrail.

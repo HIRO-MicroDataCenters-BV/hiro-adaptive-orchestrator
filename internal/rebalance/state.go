@@ -65,7 +65,7 @@ var validTransitions = map[orchestrationv1alpha1.RebalancingStateType][]orchestr
 	StateTriggered:  {StateEvaluating},
 	StateEvaluating: {StateDecided, StateWatching},
 	// Decided -> Watching (in addition to the normal Decided -> Enacting)
-	// covers dispatchMove's cluster-wide rate-limit wait (Story 31): an
+	// covers dispatchMove's cluster-wide rate-limit wait: an
 	// accepted Move is recorded in Decided, but if MoveRateLimiter can't
 	// grant a token before MoveRateWaitTimeout, the cycle never actually
 	// attempts enactment — it fails straight back to Watching (Outcome

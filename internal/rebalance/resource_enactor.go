@@ -48,7 +48,7 @@ const DefaultResourceActionTimeout = 60 * time.Second
 // DefaultMinCPU/MaxCPU/MinMemory/MaxMemory are dispatchResource's fallback
 // guardrail bounds — conservative defaults meant to stop a misbehaving AI
 // response from asking for something absurd, not to express real capacity
-// planning for any given workload. Unlike replica bounds (Story 35), no
+// planning for any given workload. Unlike replica bounds, no
 // existing cluster object (an HPA, say) is consulted for these — a
 // per-workload autoscaler for CPU/memory (VPA) is a separate CRD this module
 // doesn't already depend on, so these are env-var/default bounds only.

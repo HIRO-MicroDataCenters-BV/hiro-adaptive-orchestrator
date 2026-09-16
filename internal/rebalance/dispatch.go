@@ -49,17 +49,18 @@ type actionDispatcher func(
 // see dispatchDecision.
 var actionDispatchers = map[orchestrationv1alpha1.RebalanceAction]actionDispatcher{
 	orchestrationv1alpha1.RebalanceActionNoOp:            dispatchNoOp,
+	orchestrationv1alpha1.RebalanceActionReject:          dispatchReject,
+	orchestrationv1alpha1.RebalanceActionDefer:           dispatchDefer,
 	orchestrationv1alpha1.RebalanceActionMove:            dispatchMove,
 	orchestrationv1alpha1.RebalanceActionAdjustReplicas:  dispatchScale,
 	orchestrationv1alpha1.RebalanceActionAdjustResources: dispatchResource,
 }
 
-// dispatchDecision applies actionDispatchers to a successful AI response.
-// An action with no registered dispatcher (including today's Reject/Defer,
-// which exist as values but have no enactor yet, and anything genuinely
-// unrecognized) is treated as a processing error rather than guessed at —
-// Watching + Outcome Failed, same as enact's default case for an unknown
-// bypass action.
+// dispatchDecision applies actionDispatchers to a successful AI response. An
+// action with no registered dispatcher — genuinely unrecognized, not one of
+// the values above — is treated as a processing error rather than guessed
+// at: Watching + Outcome Failed, same as enact's default case for an
+// unknown bypass action.
 func (r *Reconciler) dispatchDecision(
 	ctx context.Context,
 	key types.NamespacedName,
@@ -96,6 +97,45 @@ func dispatchNoOp(
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, resp.Reason,
 		TransitionOptions{Action: resp.Action, Outcome: OutcomeNoOp, Cooldown: cooldown}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Watching (NoOp) failed", "profile", profile.Name)
+	}
+}
+
+// dispatchReject mirrors dispatchNoOp — the AI actively chose not to act
+// (as opposed to NoOp's "nothing needs to change"), so this just records
+// that as outcome Rejected instead of falling through to the generic
+// no-dispatcher Failed path, which would misreport a deliberate decision as
+// a processing error.
+func dispatchReject(
+	r *Reconciler,
+	ctx context.Context,
+	key types.NamespacedName,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	resp *placementserver.RebalanceDecisionResponse,
+	cooldown time.Duration,
+) {
+	logger := logf.FromContext(ctx)
+	if _, err := r.Writer.Transition(ctx, key, StateWatching, resp.Reason,
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Watching (Rejected) failed", "profile", profile.Name)
+	}
+}
+
+// dispatchDefer mirrors dispatchNoOp — the AI chose to defer rather than
+// act now (as opposed to Reject's "not a good idea at all"), so this
+// records that as outcome Deferred instead of falling through to the
+// generic no-dispatcher Failed path.
+func dispatchDefer(
+	r *Reconciler,
+	ctx context.Context,
+	key types.NamespacedName,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	resp *placementserver.RebalanceDecisionResponse,
+	cooldown time.Duration,
+) {
+	logger := logf.FromContext(ctx)
+	if _, err := r.Writer.Transition(ctx, key, StateWatching, resp.Reason,
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeDeferred, Cooldown: cooldown}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Watching (Deferred) failed", "profile", profile.Name)
 	}
 }
 
@@ -194,7 +234,7 @@ func dispatchMove(
 		return
 	}
 
-	result, err := moveEnactor(ctx, r.Client, r.DecisionStore, profile,
+	result, err := moveEnactor(ctx, r.Client, r.DecisionStore, r.Evaluator.eaoGVK, profile,
 		resp.PodName, resp.TargetNode, resp.Reason, decided.DecisionID, r.MoveActionTimeout)
 	if err != nil {
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, err.Error(),
@@ -325,7 +365,7 @@ func dispatchScale(
 		return
 	}
 
-	result, err := scaleEnactor(ctx, r.Client, profile, resp.TargetReplicas, resp.Reason, r.ScaleActionTimeout)
+	result, err := scaleEnactor(ctx, r.Client, r.Evaluator.eaoGVK, profile, resp.TargetReplicas, resp.Reason, r.ScaleActionTimeout)
 	if err != nil {
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, err.Error(),
 			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
