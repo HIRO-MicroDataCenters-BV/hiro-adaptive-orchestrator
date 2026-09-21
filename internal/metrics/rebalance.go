@@ -90,14 +90,16 @@ func init() {
 // intervals (15-30s) and keeps this always correct instead of eventually
 // correct.
 type stateGaugeCollector struct {
-	reader client.Reader
-	desc   *prometheus.Desc
+	reader        client.Reader
+	desc          *prometheus.Desc
+	escalatedDesc *prometheus.Desc
 }
 
 // NewRebalanceStateGaugeCollector creates a Collector reporting
-// hiro_rebalance_profiles_by_state. The caller (cmd/main.go) must register
-// it with metrics.Registry.MustRegister — not done automatically here, since
-// it needs a reader that only exists once the manager is constructed.
+// hiro_rebalance_profiles_by_state and hiro_rebalance_profiles_escalated.
+// The caller (cmd/main.go) must register it with
+// metrics.Registry.MustRegister — not done automatically here, since it
+// needs a reader that only exists once the manager is constructed.
 func NewRebalanceStateGaugeCollector(reader client.Reader) prometheus.Collector {
 	return &stateGaugeCollector{
 		reader: reader,
@@ -106,16 +108,25 @@ func NewRebalanceStateGaugeCollector(reader client.Reader) prometheus.Collector 
 			"Current number of OrchestrationProfiles in each rebalancing state.",
 			[]string{"state"}, nil,
 		),
+		escalatedDesc: prometheus.NewDesc(
+			"hiro_rebalance_profiles_escalated",
+			"Current number of OrchestrationProfiles with the rebalance loop paused by escalation.",
+			nil, nil,
+		),
 	}
 }
 
 func (c *stateGaugeCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.desc
+	ch <- c.escalatedDesc
 }
 
-// Collect lists every OrchestrationProfile and counts them by state. An
-// unset state (never triggered yet) is counted as Watching — the same
-// resting/idle meaning, just prior to ever being touched.
+// Collect lists every OrchestrationProfile once and reports two live counts
+// off that single List: by state (an unset state, never triggered yet, is
+// counted as Watching — the same resting/idle meaning, just prior to ever
+// being touched), and currently escalated (a status flag orthogonal to
+// state — an escalated profile still shows state Watching, since the pause
+// happens only after its terminal write back there).
 func (c *stateGaugeCollector) Collect(ch chan<- prometheus.Metric) {
 	logger := logf.Log.WithName("rebalance-metrics")
 
@@ -132,15 +143,21 @@ func (c *stateGaugeCollector) Collect(ch chan<- prometheus.Metric) {
 		orchestrationv1alpha1.RebalancingStateDecided:    0,
 		orchestrationv1alpha1.RebalancingStateEnacting:   0,
 	}
+	var escalated float64
 	for i := range list.Items {
-		state := list.Items[i].Status.RebalancingStatus.State
+		rs := list.Items[i].Status.RebalancingStatus
+		state := rs.State
 		if state == "" {
 			state = orchestrationv1alpha1.RebalancingStateWatching
 		}
 		counts[state]++
+		if rs.Escalated {
+			escalated++
+		}
 	}
 
 	for state, count := range counts {
 		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, count, string(state))
 	}
+	ch <- prometheus.MustNewConstMetric(c.escalatedDesc, prometheus.GaugeValue, escalated)
 }

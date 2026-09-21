@@ -22,7 +22,8 @@
 #                                   AdjustReplicas (scale up or down by one),
 #                                   AdjustResources (resize a container with
 #                                   existing CPU/Memory to a fixed target),
-#                                   or NoOp, returns RebalanceDecisionResponse
+#                                   Escalate (needs a human), or NoOp,
+#                                   returns RebalanceDecisionResponse
 #   GET  /healthz                    → 200 ok
 #
 # Deploy:  kubectl apply -f hack/mock_decision_agent.yaml
@@ -47,14 +48,15 @@ data:
     PLACEMENT_SCORE_MIN = 0.0
     PLACEMENT_SCORE_MAX = 100.0
 
-    # Rebalance (Move / AdjustReplicas / AdjustResources / NoOp) knobs. All
-    # three *_PROBABILITY knobs default to 0.0 — keep NoOp dominant by
+    # Rebalance (Move / AdjustReplicas / AdjustResources / Escalate / NoOp)
+    # knobs. All *_PROBABILITY knobs default to 0.0 — keep NoOp dominant by
     # default, bump one of them (see hack/demo_rebalance.sh's
-    # bump_mock_agent / _scale / _resources) when a test specifically wants
-    # to force that action.
+    # bump_mock_agent / _scale / _resources / _escalate) when a test
+    # specifically wants to force that action.
     MOVE_PROBABILITY   = 0.0
     SCALE_PROBABILITY  = 0.0
     RESOURCE_PROBABILITY = 0.0
+    ESCALATE_PROBABILITY = 0.0
     IMPROVEMENT_MIN    = 10.0
     IMPROVEMENT_MAX    = 100.0
 
@@ -147,6 +149,18 @@ data:
                 for n in candidate_nodes
                 if n.get("metadata", {}).get("name") and schedulable(n)
             ]
+
+            # Escalate: checked first and unconditionally (no Improvement
+            # field — dispatchEscalate, like dispatchNoOp/Reject/Defer,
+            # never applies the improvement-threshold guardrail) so bumping
+            # this knob alone is enough to force it regardless of what
+            # movable/resizable pods happen to be around.
+            if random.random() < ESCALATE_PROBABILITY:
+                return {
+                    "requestId": request_id,
+                    "action": "Escalate",
+                    "reason": "mock: repeated conflicting signals, needs a human to look",
+                }
 
             movable = [p for p in current_placements if p.get("phase") == "Running"]
 

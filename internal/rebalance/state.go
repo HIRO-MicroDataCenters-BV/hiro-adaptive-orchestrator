@@ -47,11 +47,12 @@ const (
 
 // Outcome type aliases for readability at call sites.
 const (
-	OutcomeEnacted  = orchestrationv1alpha1.RebalanceOutcomeEnacted
-	OutcomeNoOp     = orchestrationv1alpha1.RebalanceOutcomeNoOp
-	OutcomeRejected = orchestrationv1alpha1.RebalanceOutcomeRejected
-	OutcomeDeferred = orchestrationv1alpha1.RebalanceOutcomeDeferred
-	OutcomeFailed   = orchestrationv1alpha1.RebalanceOutcomeFailed
+	OutcomeEnacted   = orchestrationv1alpha1.RebalanceOutcomeEnacted
+	OutcomeNoOp      = orchestrationv1alpha1.RebalanceOutcomeNoOp
+	OutcomeRejected  = orchestrationv1alpha1.RebalanceOutcomeRejected
+	OutcomeDeferred  = orchestrationv1alpha1.RebalanceOutcomeDeferred
+	OutcomeFailed    = orchestrationv1alpha1.RebalanceOutcomeFailed
+	OutcomeEscalated = orchestrationv1alpha1.RebalanceOutcomeEscalated
 )
 
 // validTransitions is the authoritative transition table for the decision

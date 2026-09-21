@@ -93,6 +93,7 @@ What the free request/error/duration metrics above can't express — the domain-
 | `hiro_rebalance_cooldown_skips_total` | Counter | — | A reconcile that skipped AI consultation because the profile is still in cooldown. |
 | `hiro_rebalance_improvement_score` | Histogram | `action` | Distribution of `Improvement` scores the AI returns, regardless of guardrail outcome. Buckets: `0, 10, …, 100`. |
 | `hiro_rebalance_profiles_by_state` | Gauge | `state` | Live count of profiles per rebalancing state, recomputed on every scrape by a custom collector (not incrementally maintained — see `rebalance.go`'s doc comment on why). |
+| `hiro_rebalance_profiles_escalated` | Gauge | — | Live count of profiles currently paused by escalation (`status.rebalancingStatus.escalated == true`). Off the same List call as `hiro_rebalance_profiles_by_state` — an escalated profile still shows `state=Watching`, since the pause is a status flag orthogonal to `state`, not a 6th state value. |
 
 ### Placement server (`placement.go`)
 
@@ -128,8 +129,8 @@ path (`/extender/*`) in one place — both protocols share the same underlying `
 | Label | Where | Values |
 |---|---|---|
 | `action` | `hiro_rebalance_improvement_score`, `_guardrail_rejections_total`, `_rate_limit_exhausted_total` | `Move`, `AdjustReplicas` |
-| `action` | `hiro_rebalance_transitions_total` | same, plus `""` before a decision is made, and `NoOp` / `Defer` / `Reject` when that's the recorded decision |
-| `outcome` | `hiro_rebalance_transitions_total` | `Enacted`, `NoOp`, `Rejected`, `Deferred`, `Failed`, or `""` (non-terminal) |
+| `action` | `hiro_rebalance_transitions_total` | same, plus `""` before a decision is made, and `NoOp` / `Defer` / `Reject` / `Escalate` when that's the recorded decision |
+| `outcome` | `hiro_rebalance_transitions_total` | `Enacted`, `NoOp`, `Rejected`, `Deferred`, `Failed`, `Escalated`, or `""` (non-terminal) |
 | `from` / `to` / `state` | rebalance metrics | `Watching`, `Triggered`, `Evaluating`, `Decided`, `Enacting` |
 | `guardrail` | `hiro_rebalance_guardrail_rejections_total` | `threshold`, `bounds` |
 | `path` | placement metrics | `plugin`, `extender` |

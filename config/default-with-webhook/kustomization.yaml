@@ -20,13 +20,13 @@ namespace: hiro-adaptive-orchestrator-system
 namePrefix: hiro-adaptive-orchestrator-
 
 #- ../network-policy
+# [PROMETHEUS] To enable prometheus monitor, uncomment the line below.
 resources:
 - ../crd
 - ../rbac
 - ../manager
 - ../webhook
 - ../certmanager
-# [PROMETHEUS] To enable prometheus monitor, uncomment the line below.
 - ../prometheus
 
 # [METRICS] Shared component: adds metrics Service + enables HTTPS :8443 endpoint.

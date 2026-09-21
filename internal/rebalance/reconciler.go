@@ -324,6 +324,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl
 
 	rs := profile.Status.RebalancingStatus
 
+	if rs.Escalated {
+		// Paused until a human clears it (see StateWriter.Transition's
+		// escalation promotion) — no self-requeue, same posture as Enabled
+		// being false. The primary watch already wakes this reconcile the
+		// moment status/spec changes, including a human clearing the flag.
+		return ctrl.Result{}, nil
+	}
+
 	if rs.State != "" && rs.State != StateWatching {
 		// A cycle is already past Triggered (Evaluating/Decided/Enacting) —
 		// this Reconciler's job (Detection) is done for now; let it run back

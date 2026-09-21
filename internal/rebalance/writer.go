@@ -42,6 +42,11 @@ const DefaultMaxRecentDecisions = 10
 // every rebalance state transition.
 const EventReasonRebalanceTransition = "RebalanceTransition"
 
+// DefaultEscalationThreshold is how many consecutive Failed/Deferred
+// terminal outcomes a profile may accumulate before Transition promotes the
+// current cycle's outcome to Escalated and pauses the rebalance loop for it.
+const DefaultEscalationThreshold = 3
+
 // TransitionOptions carries the extra fields a transition may set. All are
 // optional — zero values are simply not written.
 type TransitionOptions struct {
@@ -156,17 +161,46 @@ func (w *StateWriter) Transition(
 			rs.Details = opts.Details
 		}
 
+		effectiveOutcome := opts.Outcome
+
 		if to == StateWatching {
 			if opts.Outcome == "" {
 				return fmt.Errorf("rebalance writer: transition to Watching for profile %s requires an Outcome",
 					key.Name)
 			}
+
+			// Track the Failed/Deferred streak, and escalate — pausing the
+			// rebalance loop for this profile until a human clears it — once
+			// it crosses the profile's threshold. A direct AI-requested
+			// Escalate (opts.Outcome already Escalated) bypasses the streak
+			// check entirely: the AI's own judgment is honored immediately,
+			// not gated on a repeat-failure count.
+			switch opts.Outcome {
+			case OutcomeFailed, OutcomeDeferred:
+				rs.ConsecutiveFailures++
+			default:
+				rs.ConsecutiveFailures = 0
+			}
+			threshold := profile.Spec.Rebalancing.EscalationThreshold
+			if threshold <= 0 {
+				threshold = DefaultEscalationThreshold
+			}
+			if opts.Outcome != OutcomeEscalated && rs.ConsecutiveFailures >= threshold {
+				effectiveOutcome = OutcomeEscalated
+				rs.Escalated = true
+				rs.EscalatedReason = fmt.Sprintf("%d consecutive Failed/Deferred outcomes, latest: %s",
+					rs.ConsecutiveFailures, reason)
+			} else if opts.Outcome == OutcomeEscalated {
+				rs.Escalated = true
+				rs.EscalatedReason = reason
+			}
+
 			if opts.Cooldown > 0 {
 				rs.CooldownUntil = metav1.NewTime(now.Add(opts.Cooldown))
 			}
 			rs.RecentDecisions = w.prependDecision(rs.RecentDecisions, orchestrationv1alpha1.RebalanceDecision{
 				DecisionID:       rs.DecisionID,
-				Outcome:          opts.Outcome,
+				Outcome:          effectiveOutcome,
 				Action:           rs.Action,
 				Reason:           reason,
 				Details:          rs.Details,
@@ -196,8 +230,8 @@ func (w *StateWriter) Transition(
 
 // emitEvent records a Kubernetes Event describing the transition. A terminal
 // write (to == StateWatching) surfaces as Warning when the outcome is
-// Failed, Rejected, or Deferred, so it stands out in `kubectl describe`;
-// every other transition is Normal.
+// Failed, Rejected, Deferred, or Escalated, so it stands out in `kubectl
+// describe`; every other transition is Normal.
 func (w *StateWriter) emitEvent(
 	profile *orchestrationv1alpha1.OrchestrationProfile,
 	from, to orchestrationv1alpha1.RebalancingStateType,
@@ -209,7 +243,7 @@ func (w *StateWriter) emitEvent(
 	}
 	eventType := corev1.EventTypeNormal
 	switch outcome {
-	case OutcomeFailed, OutcomeRejected, OutcomeDeferred:
+	case OutcomeFailed, OutcomeRejected, OutcomeDeferred, OutcomeEscalated:
 		eventType = corev1.EventTypeWarning
 	}
 	w.recorder.Eventf(profile, eventType, EventReasonRebalanceTransition,

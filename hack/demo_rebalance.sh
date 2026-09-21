@@ -8,7 +8,7 @@
 # of what each beat below actually does mechanically (Mermaid doesn't render
 # in a .sh comment, so it lives there, not here).
 #
-# Drives five beats against a live cluster (the full-stack deploy must
+# Drives six beats against a live cluster (the full-stack deploy must
 # already be running — see hack/deploy_full_stack.sh), all against the
 # existing orchestrationprofile-2 / nginx-deployment-2 / eaoprofile-optional:
 #   1. NoOp       — a normal cycle that decides nothing needs to change.
@@ -25,6 +25,10 @@
 #                   pod where the cluster supports it, or via the pod
 #                   template (next rollout) otherwise — see the
 #                   "AdjustResources" section of internal/rebalance/README.md.
+#   6. Escalate   — two ways the rebalance loop pauses itself and waits for a
+#                   human: the AI directly recommending Escalate, and the
+#                   engine auto-escalating after repeated Failed cycles — see
+#                   the "Escalation" section of internal/rebalance/README.md.
 #
 # Beats 3 and 4 both need the energy window CLOSED to fire the trigger
 # (EnergyThreshold only matches on insufficient/Delayed/Waiting) but OPEN for
@@ -82,15 +86,16 @@
 #     kubectl logs -f deployment/mock-decision-agent -n hiro-adaptive-orchestrator-system
 #
 # Usage:
-#   hack/demo_rebalance.sh              # run all five beats, in order
+#   hack/demo_rebalance.sh              # run all six beats, in order
 #   hack/demo_rebalance.sh noop         # run a single beat
 #   hack/demo_rebalance.sh retry
 #   hack/demo_rebalance.sh move
 #   hack/demo_rebalance.sh scale
 #   hack/demo_rebalance.sh resources
+#   hack/demo_rebalance.sh escalate
 #   hack/demo_rebalance.sh cleanup      # revert the mock agent + restore
-#                                       # replica count/resources, without
-#                                       # running anything else
+#                                       # replica count/resources/escalation,
+#                                       # without running anything else
 #
 # Every beat pauses for Enter before continuing, so you control pacing while
 # talking. Ctrl-C at any point still triggers cleanup (trap below).
@@ -147,6 +152,7 @@ profile_state() {
 MOCK_AGENT_MOVE_BUMPED=false
 MOCK_AGENT_SCALE_BUMPED=false
 MOCK_AGENT_RESOURCE_BUMPED=false
+MOCK_AGENT_ESCALATE_BUMPED=false
 APP_ORIGINAL_REPLICAS=""
 RETRY_PENDING_POD=""
 EAO_TOUCHED=false
@@ -159,9 +165,18 @@ APP_ORIGINAL_CPU_REQUEST=""
 APP_ORIGINAL_MEMORY_REQUEST=""
 APP_ORIGINAL_CPU_LIMIT=""
 APP_ORIGINAL_MEMORY_LIMIT=""
+ESCALATION_THRESHOLD_TOUCHED=false
+APP_ORIGINAL_ESCALATION_THRESHOLD=""
+MOCK_AGENT_SCALED_DOWN=false
 
 cleanup() {
   step "Cleanup"
+
+  # First, always: if the profile ended up escalated (this beat interrupted
+  # mid-way, or — in principle — a real repeated failure elsewhere during the
+  # demo), unpause it before anything else runs. A live check, not a
+  # beat-scoped flag, since escalation isn't only reachable from beat 6.
+  ensure_not_escalated
 
   if [ "$MOCK_AGENT_MOVE_BUMPED" = true ]; then
     revert_mock_agent
@@ -173,6 +188,18 @@ cleanup() {
 
   if [ "$MOCK_AGENT_RESOURCE_BUMPED" = true ]; then
     revert_mock_agent_resources
+  fi
+
+  if [ "$MOCK_AGENT_ESCALATE_BUMPED" = true ]; then
+    revert_mock_agent_escalate
+  fi
+
+  if [ "$MOCK_AGENT_SCALED_DOWN" = true ]; then
+    restore_mock_agent_replicas
+  fi
+
+  if [ "$ESCALATION_THRESHOLD_TOUCHED" = true ]; then
+    revert_escalation_threshold
   fi
 
   if [ -n "$APP_ORIGINAL_REPLICAS" ]; then
@@ -683,11 +710,189 @@ effective on next rollout' (a new pod appears below instead)."
   pause
 }
 
+# ─── Beat 6 — Escalate ──────────────────────────────────────────────────────
+
+profile_escalated() {
+  kubectl get orchestrationprofile "$PROFILE" -o jsonpath='{.status.rebalancingStatus.escalated}' 2>/dev/null
+}
+
+# The documented unpause (see internal/rebalance/README.md's "Escalation"
+# section) — a plain status patch, nothing operator-specific. Resetting
+# consecutiveFailures alongside escalated avoids an immediate re-escalation
+# off a single subsequent failure.
+clear_escalation() {
+  run kubectl patch orchestrationprofile "$PROFILE" --type=merge --subresource=status \
+    -p '{"status":{"rebalancingStatus":{"escalated":false,"consecutiveFailures":0}}}' >/dev/null
+}
+
+# Safety net called unconditionally from cleanup(), not gated by a
+# beat-scoped flag: escalation is reachable from any beat's own repeated
+# failures, not just this one, so cleanup should never leave the real
+# profile paused regardless of which beat ran or where it was interrupted.
+ensure_not_escalated() {
+  if [ "$(profile_escalated)" = "true" ]; then
+    echo "  $PROFILE is escalated — clearing it so the loop isn't left paused."
+    clear_escalation
+  fi
+}
+
+# Re-asserts clear-cooldown + close-window every 2s (up to 90s) until the
+# profile's escalated flag flips true. $PROFILE's only trigger condition is
+# EnergyThreshold, which only matches while the window is closed — without
+# re-closing it, the external EAO controller can flip it back open between
+# cycles and the streak stalls short of the threshold.
+wait_for_escalated() {
+  local waited=0
+  while [ "$waited" -lt 90 ]; do
+    clear_cooldown
+    close_energy_window
+    if [ "$(profile_escalated)" = "true" ]; then
+      echo "  Escalated after ${waited}s — check Pane A/B for the reason."
+      return 0
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  echo "  Did not observe escalation after ${waited}s — check Pane B."
+  return 1
+}
+
+bump_mock_agent_escalate() {
+  step "Forcing the mock agent to always recommend Escalate"
+  sed -i.bak \
+    -e 's/^    ESCALATE_PROBABILITY = 0.0$/    ESCALATE_PROBABILITY = 1.0/' \
+    "$MOCK_AGENT_YAML"
+  rm -f "$MOCK_AGENT_YAML.bak"
+  apply_mock_agent
+  MOCK_AGENT_ESCALATE_BUMPED=true
+}
+
+revert_mock_agent_escalate() {
+  echo "  Reverting mock agent to its default ESCALATE_PROBABILITY"
+  sed -i.bak \
+    -e 's/^    ESCALATE_PROBABILITY = 1.0$/    ESCALATE_PROBABILITY = 0.0/' \
+    "$MOCK_AGENT_YAML"
+  rm -f "$MOCK_AGENT_YAML.bak"
+  apply_mock_agent
+  MOCK_AGENT_ESCALATE_BUMPED=false
+}
+
+# Simulates "the AI agent is unreachable" for the auto-escalation half of
+# this beat — scaling to 0 makes every consult fail fast (bounded by
+# DecisionTimeout, default 5s) rather than waiting out a much longer enactor
+# timeout, so the Failed streak needed to auto-escalate builds quickly.
+scale_mock_agent_down() {
+  step "Scaling mock-decision-agent to 0 (simulating the AI agent being unreachable)"
+  narrate "This also briefly affects initial placement scoring, which shares
+the same mock agent — fine for this short a window."
+  run kubectl scale deployment mock-decision-agent -n "$NAMESPACE" --replicas=0
+  run kubectl rollout status deployment mock-decision-agent -n "$NAMESPACE" --timeout=60s || true
+  MOCK_AGENT_SCALED_DOWN=true
+}
+
+restore_mock_agent_replicas() {
+  echo "  Restoring mock-decision-agent to 1 replica"
+  run kubectl scale deployment mock-decision-agent -n "$NAMESPACE" --replicas=1
+  run kubectl rollout status deployment mock-decision-agent -n "$NAMESPACE" --timeout=60s || true
+  MOCK_AGENT_SCALED_DOWN=false
+}
+
+# Captures $PROFILE's real pre-demo escalationThreshold exactly once, same
+# idempotent-capture pattern as capture_original_replicas/capture_eao_original.
+# Empty capture means the field was genuinely unset (uses
+# DefaultEscalationThreshold), so revert_escalation_threshold patches it back
+# with JSON null rather than a literal value.
+capture_original_escalation_threshold() {
+  [ "$ESCALATION_THRESHOLD_TOUCHED" = true ] && return
+  APP_ORIGINAL_ESCALATION_THRESHOLD=$(kubectl get orchestrationprofile "$PROFILE" \
+    -o jsonpath='{.spec.rebalancing.escalationThreshold}' 2>/dev/null)
+  ESCALATION_THRESHOLD_TOUCHED=true
+}
+
+set_escalation_threshold() {
+  run kubectl patch orchestrationprofile "$PROFILE" --type=merge \
+    -p "{\"spec\":{\"rebalancing\":{\"escalationThreshold\":$1}}}" >/dev/null
+}
+
+revert_escalation_threshold() {
+  echo "  Restoring escalationThreshold to its pre-demo value"
+  local val_json
+  val_json=$([ -n "$APP_ORIGINAL_ESCALATION_THRESHOLD" ] && echo "$APP_ORIGINAL_ESCALATION_THRESHOLD" || echo null)
+  run kubectl patch orchestrationprofile "$PROFILE" --type=merge \
+    -p "{\"spec\":{\"rebalancing\":{\"escalationThreshold\":${val_json}}}}" >/dev/null
+}
+
+# Two independent ways the loop pauses itself, demoed back to back: Part A
+# is the AI directly recommending Escalate (one cycle, no threshold
+# involved); Part B is the engine auto-escalating after repeated Failed
+# cycles (escalationThreshold temporarily lowered, and the AI simulated
+# unreachable, purely so the streak builds fast enough for a live demo).
+# Both end the same way — the persistent `escalated` status flag — and both
+# are cleared the same way — a plain status patch, no operator restart.
+escalate() {
+  step "Beat 6 — Escalate"
+  narrate "Two ways this loop pauses itself and waits for a human: the AI
+directly recommending Escalate, and the engine auto-escalating after
+repeated Failed cycles. This beat demos both, and how to clear each."
+  pause
+
+  step "Part A — the AI directly recommends Escalate"
+  bump_mock_agent_escalate
+  pause
+
+  narrate "One cycle is enough — Escalate skips the improvement-threshold
+guardrail and the repeated-failure count entirely, same as NoOp/Reject/Defer."
+  wait_for_escalated || return 1
+  revert_mock_agent_escalate
+
+  narrate "Watch Pane A — the loop is now paused. The next periodic tick
+won't do anything: Reconcile checks the escalated flag before it ever
+evaluates a trigger condition."
+  run kubectl describe orchestrationprofile "$PROFILE"
+  pause
+
+  step "Clearing the escalation — the documented unpause"
+  clear_escalation
+  narrate "That status patch is the whole recovery mechanism. Watching Pane
+A/B below proves detection actually resumed, not just that the flag flipped."
+  clear_cooldown
+  pause
+
+  step "Part B — auto-escalation after repeated Failed cycles"
+  capture_original_escalation_threshold
+  set_escalation_threshold 2
+  narrate "Lowering escalationThreshold to 2 (default 3) purely so this
+doesn't take as long to demo live — the mechanism itself doesn't care what
+the number is."
+  pause
+
+  scale_mock_agent_down
+  narrate "Watch Pane B — expect a couple of quick 'Watching (Failed)'
+cycles (bounded by the ~5s AI-consultation timeout, not a slow enactor
+timeout), then the one that crosses the threshold gets recorded Escalated
+instead of Failed."
+  wait_for_escalated || return 1
+
+  step "Restoring the mock agent, then clearing the pause the same way as Part A"
+  restore_mock_agent_replicas
+  clear_escalation
+  revert_escalation_threshold
+  pause
+
+  clear_cooldown
+  narrate "Watch Pane A/B — up to 30s for the next tick, then instant."
+  pause
+
+  step "Final state"
+  run kubectl describe orchestrationprofile "$PROFILE"
+  pause
+}
+
 # ─── Main ───────────────────────────────────────────────────────────────────
 
 usage() {
-  echo "Usage: $0 [noop|retry|move|scale|resources|cleanup]"
-  echo "  (no argument) runs noop, retry, move, scale, resources in order"
+  echo "Usage: $0 [noop|retry|move|scale|resources|escalate|cleanup]"
+  echo "  (no argument) runs noop, retry, move, scale, resources, escalate in order"
 }
 
 main() {
@@ -697,6 +902,7 @@ main() {
     move) move ;;
     scale) scale ;;
     resources) resources ;;
+    escalate) escalate ;;
     cleanup) : ;; # cleanup runs unconditionally via the EXIT trap below
     all)
       noop
@@ -704,6 +910,7 @@ main() {
       move
       scale
       resources
+      escalate
       ;;
     -h|--help) usage; trap - EXIT; exit 0 ;;
     *) usage >&2; trap - EXIT; exit 1 ;;

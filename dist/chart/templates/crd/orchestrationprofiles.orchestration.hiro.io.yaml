@@ -90,6 +90,13 @@ spec:
                                         type: boolean
                                     enabled:
                                         type: boolean
+                                    escalationThreshold:
+                                        description: |-
+                                            escalationThreshold is how many consecutive Failed/Deferred decision
+                                            cycles this workload may have before the rebalance loop escalates and
+                                            pauses itself. <= 0 uses DefaultEscalationThreshold.
+                                        format: int32
+                                        type: integer
                                     triggerConditions:
                                         items:
                                             type: string
@@ -150,6 +157,12 @@ spec:
                                             action is the AI-returned action being processed for the current cycle
                                             (e.g. "Move", "NoOp"). Empty before the AI has responded.
                                         type: string
+                                    consecutiveFailures:
+                                        description: |-
+                                            consecutiveFailures counts terminal Failed/Deferred outcomes in a row,
+                                            reset by any other outcome. Crossing escalationThreshold sets escalated.
+                                        format: int32
+                                        type: integer
                                     cooldownUntil:
                                         description: |-
                                             cooldownUntil blocks new Triggered transitions for this workload until
@@ -163,6 +176,18 @@ spec:
                                         description: |-
                                             details carries free-form, state-specific context for the current cycle
                                             (e.g. target node, improvement score, dry-run marker).
+                                        type: string
+                                    escalated:
+                                        description: |-
+                                            escalated, when true, pauses the rebalance loop for this workload
+                                            entirely until cleared — set when consecutiveFailures crosses
+                                            escalationThreshold, or when the AI itself returns action "Escalate".
+                                            Never cleared automatically; see escalatedReason for why it was set.
+                                        type: boolean
+                                    escalatedReason:
+                                        description: |-
+                                            escalatedReason explains why escalated was set. Only meaningful while
+                                            escalated is true.
                                         type: string
                                     lastTransitionAt:
                                         description: lastTransitionAt is when state last changed.
@@ -206,6 +231,7 @@ spec:
                                                         - Rejected
                                                         - Deferred
                                                         - Failed
+                                                        - Escalated
                                                     type: string
                                                 reason:
                                                     description: reason explains why the decision ended in this state.

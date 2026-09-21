@@ -33,8 +33,7 @@ import (
 // terminal transition (directly, or via Decided/Enacting for actions that
 // need to do something first). Registered per orchestrationv1alpha1.RebalanceAction
 // in actionDispatchers rather than switched on inline in dispatchDecision, so
-// a future enactor (AdjustResources, AdjustReplicas, Defer, Escalate) is a
-// new map entry, not a change to dispatchDecision itself.
+// a future action is a new map entry, not a change to dispatchDecision itself.
 type actionDispatcher func(
 	r *Reconciler,
 	ctx context.Context,
@@ -54,6 +53,7 @@ var actionDispatchers = map[orchestrationv1alpha1.RebalanceAction]actionDispatch
 	orchestrationv1alpha1.RebalanceActionMove:            dispatchMove,
 	orchestrationv1alpha1.RebalanceActionAdjustReplicas:  dispatchScale,
 	orchestrationv1alpha1.RebalanceActionAdjustResources: dispatchResource,
+	orchestrationv1alpha1.RebalanceActionEscalate:        dispatchEscalate,
 }
 
 // dispatchDecision applies actionDispatchers to a successful AI response. An
@@ -136,6 +136,27 @@ func dispatchDefer(
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, resp.Reason,
 		TransitionOptions{Action: resp.Action, Outcome: OutcomeDeferred, Cooldown: cooldown}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Watching (Deferred) failed", "profile", profile.Name)
+	}
+}
+
+// dispatchEscalate mirrors dispatchNoOp — the AI itself decided this needs a
+// human rather than a repeated-failure count crossing the threshold on its
+// own (see StateWriter.Transition's escalation promotion). Either path ends
+// up recorded the same way: outcome Escalated, which Transition also uses to
+// set the persistent, non-self-clearing Escalated flag that pauses this
+// profile's rebalance loop until a human clears it (see Reconciler.Reconcile).
+func dispatchEscalate(
+	r *Reconciler,
+	ctx context.Context,
+	key types.NamespacedName,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	resp *placementserver.RebalanceDecisionResponse,
+	cooldown time.Duration,
+) {
+	logger := logf.FromContext(ctx)
+	if _, err := r.Writer.Transition(ctx, key, StateWatching, resp.Reason,
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeEscalated, Cooldown: cooldown}); err != nil {
+		logger.Error(err, "rebalance: dispatch transition to Watching (Escalated) failed", "profile", profile.Name)
 	}
 }
 

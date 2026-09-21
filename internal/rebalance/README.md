@@ -63,6 +63,7 @@ Not numbered because they're continuous background wiring rather than steps in a
 - [`StateWriter` — the single-writer rule](#statewriter--the-single-writer-rule)
   - [Why the reader must be uncached](#why-the-reader-must-be-uncached)
   - [Watchdog for a profile stuck in a non-Watching state](#watchdog-for-a-profile-stuck-in-a-non-watching-state)
+  - [Escalation — pausing on repeated failures](#escalation--pausing-on-repeated-failures)
 - [Wiring into the system](#wiring-into-the-system)
   - [Configuration](#configuration)
   - [RBAC](#rbac)
@@ -95,7 +96,8 @@ stateDiagram-v2
 
 Active states (`state`): `Watching`, `Triggered`, `Evaluating`, `Decided`, `Enacting`.
 Outcomes (`recentDecisions[].outcome`, never a `state` value): `Enacted`, `NoOp`, `Rejected`,
-`Deferred`, `Failed`.
+`Deferred`, `Failed`, `Escalated` (see
+[Escalation — pausing on repeated failures](#escalation--pausing-on-repeated-failures)).
 
 The transition table lives in [`state.go`](state.go) (`validTransitions`,
 `IsValidTransition`). From `Watching` (or the unset initial state — the two are equivalent),
@@ -363,6 +365,7 @@ flowchart TD
     Reg -- NoOp --> N1(["Watching + NoOp"])
     Reg -- Reject --> N2(["Watching + Rejected"])
     Reg -- Defer --> N3(["Watching + Deferred"])
+    Reg -- Escalate --> N4(["Watching + Escalated<br/>(loop paused)"])
     Reg -- Move --> G{"Improvement >= threshold<br/>AND PodName / TargetNode set?"}
     G -- no --> Rej(["Watching + Rejected / Failed"])
     G -- yes --> D(["Decided"])
@@ -389,10 +392,10 @@ flowchart TD
 
 [`dispatch.go`](dispatch.go) carries a successful `RebalanceDecisionResponse` the rest of the
 way to a terminal `Watching` write. It's a registry (`actionDispatchers`, keyed by
-`orchestrationv1alpha1.RebalanceAction`), not a hardcoded switch, so a future enactor
-(`Escalate`) is a new map entry — `dispatchDecision` itself never changes. An action with no
-registered dispatcher — genuinely unrecognized, not one of the known values — is treated as a
-processing error — `Watching` + outcome `Failed` — rather than guessed at.
+`orchestrationv1alpha1.RebalanceAction`), not a hardcoded switch, so a future action is a new map
+entry — `dispatchDecision` itself never changes. An action with no registered dispatcher —
+genuinely unrecognized, not one of the known values — is treated as a processing error —
+`Watching` + outcome `Failed` — rather than guessed at.
 
 - **`NoOp`** (`dispatchNoOp`) exits straight from `Evaluating` to `Watching` with outcome `NoOp`.
   No `Decided`/`Enacting` hop — both are valid direct exits from `Evaluating` in
@@ -402,6 +405,11 @@ processing error — `Watching` + outcome `Failed` — rather than guessed at.
   opposed to NoOp's "nothing needs to change"), so recording that as `Failed` via the
   no-dispatcher fallthrough would misreport a deliberate decision as a processing error. `Defer`
   still applies the profile's cooldown, same as every other terminal `Watching` write.
+- **`Escalate`** (`dispatchEscalate`) also mirrors `NoOp` — the AI itself decided this workload
+  needs a human rather than further automated action. It ends up recorded exactly the same way a
+  *repeated-failure* auto-escalation does (see
+  [Escalation — pausing on repeated failures](#escalation--pausing-on-repeated-failures)):
+  outcome `Escalated`, which also sets the persistent flag that pauses this profile's loop.
 - **`Move`** (`dispatchMove`) first applies the improvement-threshold guardrail
   (`Reconciler.ImprovementThreshold`, default `DefaultImprovementThreshold` — a single global
   value for now, not per-trigger-reason). Below threshold, or missing `PodName`/`TargetNode`,
@@ -869,6 +877,55 @@ minutes being the longest), it force-transitions the profile straight to `Watchi
 immediately re-enter `Triggered` and crash-loop through the same failure. A cycle that's still
 genuinely progressing — `LastTransitionAt` recent — is left alone.
 
+### Escalation — pausing on repeated failures
+
+```mermaid
+flowchart LR
+    T(("Transition to<br/>Watching")) --> Streak{"outcome Failed<br/>or Deferred?"}
+    Streak -- yes --> Inc["consecutiveFailures++"]
+    Streak -- no --> Reset["consecutiveFailures = 0"]
+    Inc --> Cross{">= escalationThreshold?"}
+    Cross -- yes --> Promote["outcome -> Escalated<br/>escalated = true"]
+    Cross -- no --> Done1(["recorded as-is"])
+    Reset --> Done2(["recorded as-is"])
+    Promote --> Pause["Reconcile: escalated == true<br/>-> skip everything, no self-requeue"]
+```
+
+Two independent things can happen when a cycle ends back at `Watching`, both handled inside
+`StateWriter.Transition`'s existing terminal-write branch — no dispatcher/enactor needed to know
+about either:
+
+1. **The streak.** `rs.ConsecutiveFailures` increments on outcome `Failed`/`Deferred`, and resets
+   to 0 on anything else (`Enacted`/`NoOp`/`Rejected`/`Escalated`). Deliberately *consecutive*, not
+   windowed — any non-repeat outcome in between is proof the workload can still be acted on
+   normally, so the count starts over. Once it reaches `profile.Spec.Rebalancing
+   .EscalationThreshold` (`<= 0` uses `DefaultEscalationThreshold` = 3), *that same cycle's*
+   outcome is promoted from `Failed`/`Deferred` to `Escalated` — the real failure reason is kept in
+   the recorded `reason` text, just folded into the escalation message instead of standing alone.
+2. **A direct request.** The AI can also return `Escalate` itself (`dispatchEscalate`, mirroring
+   `dispatchNoOp` — see [Dispatch](#dispatch--acting-on-the-ais-decision)), which arrives at
+   `Transition` already carrying outcome `Escalated` and skips the streak check entirely — the
+   AI's own judgment doesn't need to wait for a repeat-failure count to catch up.
+
+Either path sets the same persistent `rs.Escalated` flag (+ `EscalatedReason`) — unlike
+`RecentDecisions`, which is a rolling window, this flag survives until something explicitly
+clears it. `Reconcile` checks it first thing, right next to the `Spec.Rebalancing.Enabled` check:
+while `Escalated`, the profile is skipped entirely — no trigger evaluation, no bypass actions
+either (a stronger pause than cooldown, which deliberately still lets `RetryPendingSchedule`
+through) — and no self-requeue, since there's nothing to do until a human acts; the primary watch
+already wakes `Reconcile` the moment status changes.
+
+**Clearing it** is a plain status patch, same shape as the watchdog recovery above:
+
+```
+kubectl patch orchestrationprofile <name> --subresource=status \
+  -p '{"status":{"rebalancingStatus":{"escalated":false,"consecutiveFailures":0}}}'
+```
+
+Resetting `consecutiveFailures` alongside `escalated` is optional but recommended — otherwise a
+single subsequent failure could immediately re-cross an already-close-to-threshold count. The
+flag is intentionally never cleared automatically: auto-clearing would defeat the point of
+requiring a human to have actually looked at it.
 
 <a id="wiring-into-the-system"></a>
 ## 🔌 <u>Wiring into the system</u>
@@ -1118,9 +1175,9 @@ flowchart LR
 <a id="demo-walkthrough"></a>
 ## 🎬 <u>Demo walkthrough</u>
 
-[`hack/demo_rebalance.sh`](../../hack/demo_rebalance.sh) drives all five lifecycle paths
+[`hack/demo_rebalance.sh`](../../hack/demo_rebalance.sh) drives all six lifecycle paths
 above against a live cluster, narrated pane-by-pane (see the script's own header comment for
-pane setup and usage: `hack/demo_rebalance.sh [noop|retry|move|scale|resources|cleanup]`).
+pane setup and usage: `hack/demo_rebalance.sh [noop|retry|move|scale|resources|escalate|cleanup]`).
 
 ### Feature view — what each beat proves
 
@@ -1191,8 +1248,23 @@ flowchart LR
     Before -->|"AI recommends a new<br/>target CPU/Memory"| After
 ```
 
+**Beat 6 — Escalate: knows when to stop and ask for a human**
+
+```mermaid
+flowchart LR
+    subgraph Before["Before"]
+        R1["Repeated Failed cycles,<br/>or the AI itself says<br/>'I need a human'"]
+    end
+    subgraph After["After"]
+        R2["Loop pauses itself —<br/>no more automated action<br/>until someone clears it"]
+    end
+    Before -->|"escalate"| After
+```
+
 HIRO doesn't just place workloads intelligently once — it keeps watching, and can safely
-move things, resize capacity, or right-size resource usage later if conditions change.
+move things, resize capacity, or right-size resource usage later if conditions change. And
+when it genuinely can't make progress on its own, it says so and stops, instead of retrying
+forever or guessing.
 
 ### Mechanics — what the script actually does
 
@@ -1271,6 +1343,33 @@ flowchart TD
     Revert --> Cycle2["Watching (outcome: Enacted)"]
 ```
 
+**Beat 6 — Escalate**
+
+```mermaid
+flowchart TD
+    Start(["escalate()"]) --> A1["Part A: bump_mock_agent_escalate<br/>(force guaranteed Escalate)"]
+    A1 --> A2["wait_for_escalated:<br/>reassert clear_cooldown +<br/>close_energy_window<br/>every 2s (up to 90s)"]
+    A2 --> A3["one cycle: Triggered → Evaluating<br/>(AI call, Escalate) → Watching<br/>(outcome: Escalated, escalated=true)"]
+    A3 --> A4["clear_escalation<br/>(the documented unpause)"]
+    A4 --> B1["Part B: lower escalationThreshold<br/>to 2, scale mock agent to 0"]
+    B1 --> B2["wait_for_escalated again:<br/>~2 quick Failed cycles<br/>(AI unreachable, ~5s each)"]
+    B2 --> B3["2nd Failed cycle promoted:<br/>Watching (outcome: Escalated),<br/>escalated=true — no dispatcher<br/>involved, all inside Transition"]
+    B3 --> B4["restore mock agent,<br/>clear_escalation,<br/>revert escalationThreshold"]
+    B4 --> Done(["one more normal cycle<br/>proves detection resumed"])
+```
+
+Neither escalation path touches scheduling once a cycle starts, but `wait_for_escalated` still
+closes the energy window on every reassert: `$PROFILE`'s only configured trigger condition is
+`EnergyThreshold`, which only matches while the window is closed — same dependency beats 3/4
+have, for an unrelated reason (theirs is about the *replacement* pod scheduling; this one is
+about the *trigger* matching at all). Part B's `escalationThreshold` is lowered purely so the
+demo doesn't take as long: the promotion logic itself lives entirely
+inside `StateWriter.Transition` (see [Escalation — pausing on repeated
+failures](#escalation--pausing-on-repeated-failures)), the same for both paths and for any
+value of the threshold. Simulating "the AI is unreachable" (scaling `mock-decision-agent` to 0)
+rather than forcing real Move/Scale timeouts is what keeps Part B's Failed streak fast —
+bounded by `DecisionTimeout` (~5s) instead of a 60s enactor timeout.
+
 Beat 5 can't poll for Enacting the way beats 3/4 do: resourceEnactor's fallback (template-
 patch) path patches and returns to Watching in the same reconcile, so Enacting never lingers
 long enough for a 2s poll to observe it. `wait_for_resources_applied` polls the Deployment's
@@ -1289,6 +1388,15 @@ so cleanup restores them correctly regardless of which beat runs, or in what ord
 EAO's true pre-demo status can itself be a closed window, `revert_replicas`/`revert_resources`
 each open the window and wait out $APP's rollout before returning, so `cleanup()` only hands
 window control back to EAO's real status once nothing is still trying to schedule.
+
+Beat 6 re-asserts the same way, and for the same underlying reason — its trigger condition
+(`EnergyThreshold`) needs the window closed to match, same as beats 3/4, even though nothing
+it enacts needs scheduling. It captures `escalationThreshold`'s real pre-demo value the same
+idempotent way
+(`capture_original_escalation_threshold`), and `cleanup()` also unconditionally checks the
+*live* `escalated` flag (`ensure_not_escalated`), not a beat-scoped variable — escalation is
+reachable from any beat's own repeated failures, not just beat 6, so this is the one cleanup
+step that isn't gated on "did beat 6 specifically run."
 
 <a id="testing"></a>
 ## 🧪 <u>Testing</u>

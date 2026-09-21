@@ -506,6 +506,124 @@ func TestReconciler_DeferDispatchedDirectly(t *testing.T) {
 	}
 }
 
+// TestReconciler_EscalateDispatchedDirectly covers an AI response that
+// itself requests Escalate: like NoOp/Reject/Defer it exits straight from
+// Evaluating to Watching, but also sets the persistent Escalated flag that
+// pauses this profile's loop.
+func TestReconciler_EscalateDispatchedDirectly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+			RequestID: "test",
+			Action:    orchestrationv1alpha1.RebalanceActionEscalate,
+			Reason:    "repeated conflicting recommendations, needs a human to look",
+		})
+	}))
+	defer server.Close()
+
+	profile := testProfileWithConditions(TriggerScheduled)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), profile)
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if rs.State != StateWatching {
+		t.Fatalf("state = %q, want Watching", rs.State)
+	}
+	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeEscalated {
+		t.Errorf("recentDecisions = %+v, want one Escalated-outcome entry", rs.RecentDecisions)
+	}
+	if !rs.Escalated {
+		t.Error("escalated = false, want true after a direct AI-requested Escalate")
+	}
+}
+
+// TestReconciler_AutoEscalatesAfterConsecutiveFailures drives repeated
+// AI-unreachable cycles (each ends Watching/Failed) against a low
+// EscalationThreshold, and checks the threshold-crossing cycle gets promoted
+// to Escalated with the loop paused — without the AI ever being asked to
+// escalate itself.
+func TestReconciler_AutoEscalatesAfterConsecutiveFailures(t *testing.T) {
+	profile := testProfileWithConditions(TriggerScheduled)
+	profile.Spec.Rebalancing.EscalationThreshold = 2
+	r, c := newTestReconciler(t, testDeployment(), profile)
+
+	for i := range 2 {
+		if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+			t.Fatalf("Reconcile #%d: %v", i+1, err)
+		}
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if !rs.Escalated {
+		t.Fatalf("escalated = false after %d consecutive Failed cycles crossing threshold (2), want true", rs.ConsecutiveFailures)
+	}
+	if len(rs.RecentDecisions) != 2 || rs.RecentDecisions[0].Outcome != OutcomeEscalated {
+		t.Errorf("recentDecisions = %+v, want the 2nd cycle promoted to Escalated", rs.RecentDecisions)
+	}
+}
+
+// TestReconciler_EscalatedProfileSkipsDetection is the pause itself: once
+// Escalated is set, Reconcile must not evaluate triggers or touch state at
+// all, and must not keep self-requeuing (same posture as Enabled=false).
+func TestReconciler_EscalatedProfileSkipsDetection(t *testing.T) {
+	profile := testProfileWithConditions(TriggerScheduled)
+	profile.Status.RebalancingStatus.Escalated = true
+	profile.Status.RebalancingStatus.EscalatedReason = "3 consecutive Failed outcomes"
+	r, c := newTestReconciler(t, testDeployment(), profile)
+
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("RequeueAfter = %v, want 0 while escalated (watch-driven only)", res.RequeueAfter)
+	}
+
+	got := getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if len(rs.RecentDecisions) != 0 {
+		t.Errorf("recentDecisions = %+v, want none — an escalated profile must not run any cycle", rs.RecentDecisions)
+	}
+	if !rs.Escalated {
+		t.Error("escalated flipped to false unexpectedly")
+	}
+}
+
+// TestReconciler_ClearingEscalatedResumesDetection: once a human clears the
+// flag (a plain status patch, per the documented recovery), the very next
+// Reconcile must resume normal detection instead of staying paused forever.
+func TestReconciler_ClearingEscalatedResumesDetection(t *testing.T) {
+	profile := testProfileWithConditions(TriggerScheduled)
+	profile.Status.RebalancingStatus.Escalated = true
+	r, c := newTestReconciler(t, testDeployment(), profile)
+
+	got := getProfile(t, c, profile.Name)
+	got.Status.RebalancingStatus.Escalated = false
+	got.Status.RebalancingStatus.ConsecutiveFailures = 0
+	if err := c.Status().Update(context.Background(), got); err != nil {
+		t.Fatalf("clearing escalated: %v", err)
+	}
+
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.RequeueAfter != 30*time.Second {
+		t.Errorf("RequeueAfter = %v, want DetectionInterval (30s) once resumed", res.RequeueAfter)
+	}
+
+	got = getProfile(t, c, profile.Name)
+	rs := got.Status.RebalancingStatus
+	if len(rs.RecentDecisions) != 1 {
+		t.Errorf("recentDecisions = %+v, want one entry — detection should have run normally", rs.RecentDecisions)
+	}
+}
+
 // TestReconciler_MoveAboveThresholdReachesEnacting covers an accepted Move
 // recommendation: the cycle reaches Decided and Enacting (verified via the
 // Warning event the terminal write emits) before the enactor's eviction

@@ -18,6 +18,7 @@ package rebalance
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -144,6 +145,134 @@ func TestStateWriter_Transition_TerminalRecordsHistoryAndCooldown(t *testing.T) 
 	}
 	if rs.RecentDecisions[0].Outcome != OutcomeNoOp || rs.RecentDecisions[0].DecisionID != rs.DecisionID {
 		t.Errorf("recentDecisions[0] = %+v, want matching NoOp record", rs.RecentDecisions[0])
+	}
+}
+
+// runRebalanceCycle drives Triggered -> Evaluating -> Watching(outcome) for
+// writer, returning the persisted status after the terminal write. Shared by
+// the escalation tests below, which each need several full cycles in a row.
+func runRebalanceCycle(t *testing.T, writer *StateWriter, key types.NamespacedName, outcome orchestrationv1alpha1.RebalanceOutcome) orchestrationv1alpha1.RebalancingStatus {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := writer.Transition(ctx, key, StateTriggered, "cycle", TransitionOptions{}); err != nil {
+		t.Fatalf("Transition to Triggered: %v", err)
+	}
+	if _, err := writer.Transition(ctx, key, StateEvaluating, "cycle", TransitionOptions{}); err != nil {
+		t.Fatalf("Transition to Evaluating: %v", err)
+	}
+	rs, err := writer.Transition(ctx, key, StateWatching, "cycle result", TransitionOptions{Outcome: outcome})
+	if err != nil {
+		t.Fatalf("Transition to Watching (%s): %v", outcome, err)
+	}
+	return rs
+}
+
+func TestStateWriter_Transition_EscalatesAfterConsecutiveFailures(t *testing.T) {
+	profile := testProfile("profile-escalate-a")
+	profile.Spec.Rebalancing.EscalationThreshold = 2
+	writer, recorder := newTestWriter(t, profile)
+	key := types.NamespacedName{Name: "profile-escalate-a"}
+
+	rs := runRebalanceCycle(t, writer, key, OutcomeFailed)
+	if rs.ConsecutiveFailures != 1 || rs.Escalated {
+		t.Fatalf("after 1st Failed: consecutiveFailures=%d escalated=%v, want 1/false", rs.ConsecutiveFailures, rs.Escalated)
+	}
+	if rs.RecentDecisions[0].Outcome != OutcomeFailed {
+		t.Errorf("recentDecisions[0].Outcome = %q, want Failed (not yet promoted)", rs.RecentDecisions[0].Outcome)
+	}
+
+	rs = runRebalanceCycle(t, writer, key, OutcomeDeferred)
+	if rs.ConsecutiveFailures != 2 || !rs.Escalated {
+		t.Fatalf("after 2nd Failed/Deferred: consecutiveFailures=%d escalated=%v, want 2/true", rs.ConsecutiveFailures, rs.Escalated)
+	}
+	if rs.RecentDecisions[0].Outcome != OutcomeEscalated {
+		t.Errorf("recentDecisions[0].Outcome = %q, want Escalated once the threshold is crossed", rs.RecentDecisions[0].Outcome)
+	}
+	if rs.EscalatedReason == "" {
+		t.Error("escalatedReason not set")
+	}
+
+	// Escalation must be loud — a Warning event, same as Failed/Rejected/Deferred.
+	var sawWarning bool
+	for {
+		select {
+		case ev := <-recorder.Events:
+			if strings.HasPrefix(ev, "Warning") {
+				sawWarning = true
+			}
+		default:
+			if !sawWarning {
+				t.Error("expected at least one Warning event across the two cycles")
+			}
+			return
+		}
+	}
+}
+
+func TestStateWriter_Transition_NonFailureOutcomeResetsConsecutiveFailures(t *testing.T) {
+	profile := testProfile("profile-escalate-b")
+	writer, _ := newTestWriter(t, profile)
+	key := types.NamespacedName{Name: "profile-escalate-b"}
+
+	rs := runRebalanceCycle(t, writer, key, OutcomeFailed)
+	if rs.ConsecutiveFailures != 1 {
+		t.Fatalf("consecutiveFailures = %d, want 1", rs.ConsecutiveFailures)
+	}
+
+	rs = runRebalanceCycle(t, writer, key, OutcomeNoOp)
+	if rs.ConsecutiveFailures != 0 {
+		t.Errorf("consecutiveFailures = %d after NoOp, want reset to 0", rs.ConsecutiveFailures)
+	}
+	if rs.Escalated {
+		t.Error("escalated = true, want false — NoOp should never escalate")
+	}
+}
+
+func TestStateWriter_Transition_DirectEscalateBypassesThreshold(t *testing.T) {
+	profile := testProfile("profile-escalate-c")
+	profile.Spec.Rebalancing.EscalationThreshold = 5 // high — only a direct request should trigger it here
+	writer, _ := newTestWriter(t, profile)
+	key := types.NamespacedName{Name: "profile-escalate-c"}
+	ctx := context.Background()
+
+	if _, err := writer.Transition(ctx, key, StateTriggered, "cycle", TransitionOptions{}); err != nil {
+		t.Fatalf("Transition to Triggered: %v", err)
+	}
+	if _, err := writer.Transition(ctx, key, StateEvaluating, "cycle", TransitionOptions{}); err != nil {
+		t.Fatalf("Transition to Evaluating: %v", err)
+	}
+	rs, err := writer.Transition(ctx, key, StateWatching, "AI said escalate", TransitionOptions{
+		Action: orchestrationv1alpha1.RebalanceActionEscalate, Outcome: OutcomeEscalated,
+	})
+	if err != nil {
+		t.Fatalf("Transition to Watching (Escalated): %v", err)
+	}
+	if !rs.Escalated {
+		t.Error("escalated = false, want true after a direct AI-requested Escalate")
+	}
+	if rs.ConsecutiveFailures != 0 {
+		t.Errorf("consecutiveFailures = %d, want 0 — a direct escalate isn't a failure streak", rs.ConsecutiveFailures)
+	}
+	if rs.RecentDecisions[0].Outcome != OutcomeEscalated {
+		t.Errorf("recentDecisions[0].Outcome = %q, want Escalated", rs.RecentDecisions[0].Outcome)
+	}
+}
+
+func TestStateWriter_Transition_UnsetThresholdUsesDefault(t *testing.T) {
+	profile := testProfile("profile-escalate-d") // EscalationThreshold left unset
+	writer, _ := newTestWriter(t, profile)
+	key := types.NamespacedName{Name: "profile-escalate-d"}
+
+	var rs orchestrationv1alpha1.RebalancingStatus
+	for i := range DefaultEscalationThreshold - 1 {
+		rs = runRebalanceCycle(t, writer, key, OutcomeFailed)
+		if rs.Escalated {
+			t.Fatalf("escalated too early, on cycle %d of %d", i+1, DefaultEscalationThreshold)
+		}
+	}
+	rs = runRebalanceCycle(t, writer, key, OutcomeFailed)
+	if !rs.Escalated {
+		t.Errorf("expected escalation once consecutiveFailures reached DefaultEscalationThreshold (%d)", DefaultEscalationThreshold)
 	}
 }
 

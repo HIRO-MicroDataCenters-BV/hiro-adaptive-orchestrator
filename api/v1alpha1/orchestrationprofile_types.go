@@ -48,6 +48,11 @@ type RebalancingSpec struct {
 	TriggerConditions []string `json:"triggerConditions,omitempty"`
 	CooldownSeconds   int      `json:"cooldownSeconds,omitempty"`
 	DryRun            bool     `json:"dryRun,omitempty"`
+
+	// escalationThreshold is how many consecutive Failed/Deferred decision
+	// cycles this workload may have before the rebalance loop escalates and
+	// pauses itself. <= 0 uses DefaultEscalationThreshold.
+	EscalationThreshold int32 `json:"escalationThreshold,omitempty"`
 }
 
 // OrchestrationProfileSpec defines the desired state of OrchestrationProfile
@@ -100,11 +105,12 @@ const (
 type RebalanceOutcome string
 
 const (
-	RebalanceOutcomeEnacted  RebalanceOutcome = "Enacted"
-	RebalanceOutcomeNoOp     RebalanceOutcome = "NoOp"
-	RebalanceOutcomeRejected RebalanceOutcome = "Rejected"
-	RebalanceOutcomeDeferred RebalanceOutcome = "Deferred"
-	RebalanceOutcomeFailed   RebalanceOutcome = "Failed"
+	RebalanceOutcomeEnacted   RebalanceOutcome = "Enacted"
+	RebalanceOutcomeNoOp      RebalanceOutcome = "NoOp"
+	RebalanceOutcomeRejected  RebalanceOutcome = "Rejected"
+	RebalanceOutcomeDeferred  RebalanceOutcome = "Deferred"
+	RebalanceOutcomeFailed    RebalanceOutcome = "Failed"
+	RebalanceOutcomeEscalated RebalanceOutcome = "Escalated"
 )
 
 type RebalanceAction string
@@ -116,6 +122,7 @@ const (
 	RebalanceActionDefer           RebalanceAction = "Defer"
 	RebalanceActionAdjustReplicas  RebalanceAction = "AdjustReplicas"
 	RebalanceActionAdjustResources RebalanceAction = "AdjustResources"
+	RebalanceActionEscalate        RebalanceAction = "Escalate"
 )
 
 // RebalanceDecision is a single terminal-outcome record kept in the profile's
@@ -125,7 +132,7 @@ type RebalanceDecision struct {
 	DecisionID string `json:"decisionId"`
 
 	// outcome is the terminal outcome of this decision cycle.
-	// +kubebuilder:validation:Enum=Enacted;NoOp;Rejected;Deferred;Failed
+	// +kubebuilder:validation:Enum=Enacted;NoOp;Rejected;Deferred;Failed;Escalated
 	Outcome RebalanceOutcome `json:"outcome,omitempty"`
 
 	// action is the AI-returned action that was processed (e.g. "Move", "NoOp").
@@ -190,6 +197,23 @@ type RebalancingStatus struct {
 	// outcomes, newest first, trimmed to a bounded length (default 10).
 	// +optional
 	RecentDecisions []RebalanceDecision `json:"recentDecisions,omitempty"`
+
+	// consecutiveFailures counts terminal Failed/Deferred outcomes in a row,
+	// reset by any other outcome. Crossing escalationThreshold sets escalated.
+	// +optional
+	ConsecutiveFailures int32 `json:"consecutiveFailures,omitempty"`
+
+	// escalated, when true, pauses the rebalance loop for this workload
+	// entirely until cleared — set when consecutiveFailures crosses
+	// escalationThreshold, or when the AI itself returns action "Escalate".
+	// Never cleared automatically; see escalatedReason for why it was set.
+	// +optional
+	Escalated bool `json:"escalated,omitempty"`
+
+	// escalatedReason explains why escalated was set. Only meaningful while
+	// escalated is true.
+	// +optional
+	EscalatedReason string `json:"escalatedReason,omitempty"`
 }
 
 // OrchestrationProfileStatus defines the observed state of OrchestrationProfile.
