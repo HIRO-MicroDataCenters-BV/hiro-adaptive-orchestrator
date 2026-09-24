@@ -69,7 +69,10 @@ var _ = Describe("Manager", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
 
 		By("deploying the controller-manager")
-		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
+		// Uses the webhook + cert-manager overlay (config/default-with-webhook) rather than
+		// the plain config/default so the webhook Service, MutatingWebhookConfiguration, and
+		// cert-manager Certificates this suite asserts on actually exist.
+		cmd = exec.Command("make", "deploy-scheduler", fmt.Sprintf("IMG=%s", managerImage))
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 	})
@@ -82,7 +85,7 @@ var _ = Describe("Manager", Ordered, func() {
 		_, _ = utils.Run(cmd)
 
 		By("undeploying the controller-manager")
-		cmd = exec.Command("make", "undeploy")
+		cmd = exec.Command("make", "undeploy-scheduler")
 		_, _ = utils.Run(cmd)
 
 		By("uninstalling CRDs")

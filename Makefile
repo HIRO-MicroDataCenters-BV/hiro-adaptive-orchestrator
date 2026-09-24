@@ -176,6 +176,10 @@ deploy-scheduler: manifests kustomize ## Deploy controller + webhook + cert-mana
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
+.PHONY: undeploy-scheduler
+undeploy-scheduler: kustomize ## Undeploy controller + webhook + cert-manager TLS resources deployed via deploy-scheduler. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	"$(KUSTOMIZE)" build config/default-with-webhook | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
+
 ##@ Dependencies
 
 ## Location to install dependencies to
