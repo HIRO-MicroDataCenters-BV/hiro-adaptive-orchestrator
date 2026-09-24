@@ -26,6 +26,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 )
 
 // -----------------------------------------------------------------------------
@@ -53,6 +54,7 @@ func (r *OrchestrationProfileReconciler) updateStatus(
 	// Emit an event whenever the status transitions to a new value.
 	if profile.Status.Status != previousStatus {
 		r.emitStatusTransitionEvent(profile)
+		metrics.ControllerProfileStatusTransitionsTotal.WithLabelValues(previousStatus, profile.Status.Status).Inc()
 	}
 
 	if err := r.Status().Update(ctx, profile); err != nil {

@@ -47,6 +47,12 @@ type RebalancingSpec struct {
 	Enabled           bool     `json:"enabled"`
 	TriggerConditions []string `json:"triggerConditions,omitempty"`
 	CooldownSeconds   int      `json:"cooldownSeconds,omitempty"`
+	DryRun            bool     `json:"dryRun,omitempty"`
+
+	// escalationThreshold is how many consecutive Failed/Deferred decision
+	// cycles this workload may have before the rebalance loop escalates and
+	// pauses itself. <= 0 uses DefaultEscalationThreshold.
+	EscalationThreshold int32 `json:"escalationThreshold,omitempty"`
 }
 
 // OrchestrationProfileSpec defines the desired state of OrchestrationProfile
@@ -84,10 +90,130 @@ type PlacementStatus struct {
 	PodStatuses  []PodStatus `json:"podStatuses,omitempty"`
 }
 
+// RebalancingStateType enumerates the states of the rebalance decision
+// lifecycle state machine (see the rebalance engine design).
+type RebalancingStateType string
+
+const (
+	RebalancingStateWatching   RebalancingStateType = "Watching"
+	RebalancingStateTriggered  RebalancingStateType = "Triggered"
+	RebalancingStateEvaluating RebalancingStateType = "Evaluating"
+	RebalancingStateDecided    RebalancingStateType = "Decided"
+	RebalancingStateEnacting   RebalancingStateType = "Enacting"
+)
+
+type RebalanceOutcome string
+
+const (
+	RebalanceOutcomeEnacted   RebalanceOutcome = "Enacted"
+	RebalanceOutcomeNoOp      RebalanceOutcome = "NoOp"
+	RebalanceOutcomeRejected  RebalanceOutcome = "Rejected"
+	RebalanceOutcomeDeferred  RebalanceOutcome = "Deferred"
+	RebalanceOutcomeFailed    RebalanceOutcome = "Failed"
+	RebalanceOutcomeEscalated RebalanceOutcome = "Escalated"
+)
+
+type RebalanceAction string
+
+const (
+	RebalanceActionMove            RebalanceAction = "Move"
+	RebalanceActionNoOp            RebalanceAction = "NoOp"
+	RebalanceActionReject          RebalanceAction = "Reject"
+	RebalanceActionDefer           RebalanceAction = "Defer"
+	RebalanceActionAdjustReplicas  RebalanceAction = "AdjustReplicas"
+	RebalanceActionAdjustResources RebalanceAction = "AdjustResources"
+	RebalanceActionEscalate        RebalanceAction = "Escalate"
+)
+
+// RebalanceDecision is a single terminal-outcome record kept in the profile's
+// rolling decision history.
+type RebalanceDecision struct {
+	// decisionId correlates this record with engine logs and Kubernetes Events.
+	DecisionID string `json:"decisionId"`
+
+	// outcome is the terminal outcome of this decision cycle.
+	// +kubebuilder:validation:Enum=Enacted;NoOp;Rejected;Deferred;Failed;Escalated
+	Outcome RebalanceOutcome `json:"outcome,omitempty"`
+
+	// action is the AI-returned action that was processed (e.g. "Move", "NoOp").
+	// Dont use kubebuilder:validation:Enum here because the AI may return new actions in
+	// the future, and we don't want to break the CRD schema for that reason.
+	Action RebalanceAction `json:"action,omitempty"`
+
+	// reason explains why the decision ended in this state.
+	Reason string `json:"reason,omitempty"`
+
+	// details carries free-form, state-specific context (e.g. target node,
+	// improvement score, dry-run marker).
+	Details string `json:"details,omitempty"`
+
+	// startedAt is when this decision's cycle entered Triggered.
+	StartedAt metav1.Time `json:"startedAt,omitempty"`
+
+	// lastTransitionAt is when this decision reached its terminal state.
+	LastTransitionAt metav1.Time `json:"lastTransitionAt,omitempty"`
+}
+
 // Rebalancing Status
 type RebalancingStatus struct {
-	LastTriggeredAt string `json:"lastTriggeredAt,omitempty"`
-	Reason          string `json:"reason,omitempty"`
+	// state is the current position of this workload's decision lifecycle
+	// state machine. Empty when no rebalance cycle has ever been triggered.
+	// +kubebuilder:validation:Enum=Watching;Triggered;Evaluating;Decided;Enacting
+	// +optional
+	State RebalancingStateType `json:"state,omitempty"`
+
+	// reason explains why the current state was entered.
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// decisionId correlates the current cycle with engine logs and Kubernetes Events.
+	// +optional
+	DecisionID string `json:"decisionId,omitempty"`
+
+	// action is the AI-returned action being processed for the current cycle
+	// (e.g. "Move", "NoOp"). Empty before the AI has responded.
+	// +optional
+	Action RebalanceAction `json:"action,omitempty"`
+
+	// details carries free-form, state-specific context for the current cycle
+	// (e.g. target node, improvement score, dry-run marker).
+	// +optional
+	Details string `json:"details,omitempty"`
+
+	// startedAt is when the current cycle entered Triggered.
+	// +optional
+	StartedAt metav1.Time `json:"startedAt,omitempty"`
+
+	// lastTransitionAt is when state last changed.
+	// +optional
+	LastTransitionAt metav1.Time `json:"lastTransitionAt,omitempty"`
+
+	// cooldownUntil blocks new Triggered transitions for this workload until
+	// this time has passed.
+	// +optional
+	CooldownUntil metav1.Time `json:"cooldownUntil,omitempty"`
+
+	// recentDecisions is a rolling window of the most recent terminal
+	// outcomes, newest first, trimmed to a bounded length (default 10).
+	// +optional
+	RecentDecisions []RebalanceDecision `json:"recentDecisions,omitempty"`
+
+	// consecutiveFailures counts terminal Failed/Deferred outcomes in a row,
+	// reset by any other outcome. Crossing escalationThreshold sets escalated.
+	// +optional
+	ConsecutiveFailures int32 `json:"consecutiveFailures,omitempty"`
+
+	// escalated, when true, pauses the rebalance loop for this workload
+	// entirely until cleared — set when consecutiveFailures crosses
+	// escalationThreshold, or when the AI itself returns action "Escalate".
+	// Never cleared automatically; see escalatedReason for why it was set.
+	// +optional
+	Escalated bool `json:"escalated,omitempty"`
+
+	// escalatedReason explains why escalated was set. Only meaningful while
+	// escalated is true.
+	// +optional
+	EscalatedReason string `json:"escalatedReason,omitempty"`
 }
 
 // OrchestrationProfileStatus defines the observed state of OrchestrationProfile.

@@ -14,17 +14,54 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - pods
+  - nodes
   verbs:
   - get
   - list
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/eviction
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
+  - pods/resize
+  verbs:
+  - update
+- apiGroups:
   - apps
   resources:
   - deployments
-  - replicasets
   - statefulsets
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - replicasets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - autoscaling
+  resources:
+  - horizontalpodautoscalers
   verbs:
   - get
   - list
@@ -45,6 +82,12 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - metrics.k8s.io
+  resources:
+  - nodes
+  verbs:
+  - get
 - apiGroups:
   - orchestration.hiro.io
   resources:

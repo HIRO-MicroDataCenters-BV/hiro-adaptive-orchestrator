@@ -18,12 +18,18 @@ package utils
 
 import (
 	"context"
+	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 )
 
 const kindReplicaSet = "ReplicaSet"
@@ -89,6 +95,147 @@ func ResolveAppFromPod(
 		}
 	}
 	return "", "", ""
+}
+
+// ResolveLabelSelector fetches the referenced workload object and extracts its
+// pod selector MatchLabels. Returns nil if the kind is not supported.
+//
+// Supported kinds: Deployment, StatefulSet, ReplicaSet, Job
+//
+// Shared by the OrchestrationProfile controller (pod discovery for
+// PlacementStatus) and the rebalance engine's trigger evaluators (pod
+// discovery for NodeFailure/CPU/Memory conditions) — kept in one place so
+// both stay in sync on how a workload's pods are resolved.
+func ResolveLabelSelector(
+	ctx context.Context,
+	k8sClient client.Client,
+	appRef orchestrationv1alpha1.ApplicationReference,
+) (map[string]string, error) {
+	key := types.NamespacedName{
+		Name:      appRef.Name,
+		Namespace: appRef.Namespace,
+	}
+
+	switch appRef.Kind {
+	case kindDeployment:
+		obj := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, key, obj); err != nil {
+			return nil, err
+		}
+		return obj.Spec.Selector.MatchLabels, nil
+
+	case kindStatefulSet:
+		obj := &appsv1.StatefulSet{}
+		if err := k8sClient.Get(ctx, key, obj); err != nil {
+			return nil, err
+		}
+		return obj.Spec.Selector.MatchLabels, nil
+
+	case kindJob:
+		obj := &batchv1.Job{}
+		if err := k8sClient.Get(ctx, key, obj); err != nil {
+			return nil, err
+		}
+		return obj.Spec.Selector.MatchLabels, nil
+
+	case kindReplicaSet:
+		obj := &appsv1.ReplicaSet{}
+		if err := k8sClient.Get(ctx, key, obj); err != nil {
+			return nil, err
+		}
+		return obj.Spec.Selector.MatchLabels, nil
+
+	default:
+		return nil, nil
+	}
+}
+
+// FindPodsForApplication resolves the workload's pod label selector and lists
+// all pods that match it in the application's namespace.
+//
+// If the selector cannot be resolved (e.g. unknown kind), it falls back to the
+// conventional {"app": appRef.Name} label to avoid returning zero pods silently.
+func FindPodsForApplication(
+	ctx context.Context,
+	k8sClient client.Client,
+	appRef orchestrationv1alpha1.ApplicationReference,
+) ([]corev1.Pod, error) {
+	logger := logf.FromContext(ctx)
+
+	labelSelector, err := ResolveLabelSelector(ctx, k8sClient, appRef)
+	if err != nil {
+		return nil, fmt.Errorf("resolving label selector for %s %s/%s: %w",
+			appRef.Kind, appRef.Namespace, appRef.Name, err)
+	}
+
+	// Fallback: if selector resolution returned nothing, use the conventional app label.
+	if len(labelSelector) == 0 {
+		logger.Info("utils: no label selector, using app label",
+			"app", appRef.Name,
+			"namespace", appRef.Namespace,
+		)
+		labelSelector = map[string]string{"app": appRef.Name}
+	}
+
+	podList := &corev1.PodList{}
+	if err := k8sClient.List(ctx, podList,
+		client.InNamespace(appRef.Namespace),
+		client.MatchingLabels(labelSelector),
+	); err != nil {
+		return nil, fmt.Errorf("listing pods for %s/%s with labels %v: %w",
+			appRef.Namespace, appRef.Name, labelSelector, err)
+	}
+
+	logger.Info("utils: pods resolved",
+		"app", appRef.Name,
+		"namespace", appRef.Namespace,
+		"podCount", len(podList.Items),
+	)
+
+	return podList.Items, nil
+}
+
+// FindEAOForApp finds the EnergyAwareOrchestration resource (returned as
+// unstructured, since it's a CRD from a separate, optional component) whose
+// spec.applicationRef matches the given ApplicationReference directly.
+//
+// This is simpler than resolving from a pod's owner chain (see
+// internal/placement-server's pod-triggered EAO lookup, used for initial
+// placement): the caller already knows the app directly from the profile's
+// own ApplicationRef, no pod needed. Shared by the rebalance engine's
+// trigger evaluator and its rebalance decision context builder — kept in
+// one place so both match EAO the same way.
+//
+// Returns nil (no error) when no matching EAO exists, or when the CRD/API
+// call fails — EnergyAwareOrchestration is an optional component, so a
+// lookup failure is treated as "no EAO data available", not a hard error.
+func FindEAOForApp(
+	ctx context.Context,
+	k8sClient client.Client,
+	eaoGVK schema.GroupVersionKind,
+	appRef orchestrationv1alpha1.ApplicationReference,
+) (*unstructured.Unstructured, error) {
+	eaoList := &unstructured.UnstructuredList{}
+	eaoList.SetGroupVersionKind(eaoGVK)
+	if err := k8sClient.List(ctx, eaoList); err != nil {
+		return nil, fmt.Errorf("listing EnergyAwareOrchestration resources: %w", err)
+	}
+
+	for i := range eaoList.Items {
+		eao := &eaoList.Items[i]
+
+		refName, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "name")
+		refKind, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "kind")
+		refNamespace, _, _ := unstructured.NestedString(eao.Object, "spec", "applicationRef", "namespace")
+		if refNamespace == "" {
+			refNamespace = eao.GetNamespace()
+		}
+
+		if refName == appRef.Name && refNamespace == appRef.Namespace && refKind == appRef.Kind {
+			return eao, nil
+		}
+	}
+	return nil, nil
 }
 
 // NodeNames extracts the names of a list of nodes as a slice.

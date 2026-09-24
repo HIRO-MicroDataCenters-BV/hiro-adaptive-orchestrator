@@ -24,6 +24,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 )
 
 // =============================================================================
@@ -69,7 +71,7 @@ func (s *PlacementServer) handleExtenderFilter(w http.ResponseWriter, r *http.Re
 		"nodeCount", len(args.Nodes.Items),
 	)
 
-	gate, err := s.filter(ctx, args.Pod)
+	gate, err := s.filter(ctx, args.Pod, metrics.PathExtender)
 	if err != nil {
 		logger.Error(err, "extender: energy gate check failed, allowing scheduling",
 			"requestId", requestID,
@@ -153,7 +155,7 @@ func (s *PlacementServer) handleExtenderPrioritize(w http.ResponseWriter, r *htt
 		CandidateNodes: candidateNodes,
 	}
 
-	decisionResp, err := s.score(ctx, placementCtx, requestID)
+	decisionResp, err := s.score(ctx, placementCtx, requestID, metrics.PathExtender)
 	if err != nil {
 		logger.Error(err, "extender: prioritize failed, returning equal scores",
 			"requestId", requestID,

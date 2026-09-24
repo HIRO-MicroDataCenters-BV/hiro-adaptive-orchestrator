@@ -1,0 +1,168 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Overlay: base operator + scheduler webhook (cert-manager TLS).
+# Use when DEPLOY_SCHEDULER_PLUGIN=true:
+#   make deploy-scheduler IMG=<image>
+#
+# PREREQUISITE: cert-manager must be installed before applying this.
+# hack/deploy_full_stack.sh installs it in Phase 0 when DEPLOY_SCHEDULER_PLUGIN=true.
+#
+# Differences from config/default:
+#   + config/webhook     — webhook Service + MutatingWebhookConfiguration
+#   + config/certmanager — self-signed Issuer + TLS Certificates
+#   + manager_webhook_patch.yaml — cert volume mount + port 9443 on operator Deployment
+#   + replacements       — populate Certificate dnsNames and MWC CA annotation from
+#                          actual resource names (no hardcoded values)
+
+# Same namespace and namePrefix as config/default.
+namespace: hiro-adaptive-orchestrator-system
+namePrefix: hiro-adaptive-orchestrator-
+
+#- ../network-policy
+resources:
+- ../crd
+- ../rbac
+- ../manager
+- ../webhook
+- ../certmanager
+#- ../prometheus
+
+# [METRICS] Shared component: adds metrics Service + enables HTTPS :8443 endpoint.
+# [WEBHOOK-PATCH] Adds cert volume mount, port 9443, and --webhook-cert-path arg to the Deployment.
+components:
+- ../components/metrics
+
+# [WEBHOOK] Mount the cert-manager Secret (optional) and expose port 9443.
+# optional: true means the pod starts safely before cert-manager issues the cert.
+# [NAMESPACE-EXCLUSION] Adds namespaceSelector to exclude system namespaces.
+# This is the static default; deploy_full_stack.sh Phase 4b replaces it with
+# WEBHOOK_EXCLUDE_NAMESPACES when that env var is set.
+patches:
+- path: manager_webhook_patch.yaml
+  target:
+    kind: Deployment
+- path: mwc_namespace_patch.yaml
+  target:
+    kind: MutatingWebhookConfiguration
+
+# ── Parameterized replacements ────────────────────────────────────────────────
+#
+# kustomize reads the actual post-transformation values (after namePrefix and
+# namespace are applied) and substitutes them into the placeholder fields.
+# No hardcoded names or namespaces anywhere in this file.
+#
+# Certificate placeholder format:  SERVICE_NAME.SERVICE_NAMESPACE.svc[.cluster.local]
+# MWC annotation placeholder:      CERT_NAMESPACE/CERT_NAME
+#
+
+# ── Webhook Certificate dnsNames ─────────────────────────────────────────────
+# Read the webhook Service name (post-namePrefix) and namespace (post-namespace)
+# and write them into the two dnsNames of the webhook Certificate.
+
+# ── Metrics Certificate dnsNames ─────────────────────────────────────────────
+
+# ── MutatingWebhookConfiguration CA injection annotation ─────────────────────
+# cert-manager ca-injector reads cert-manager.io/inject-ca-from: <ns>/<cert-name>
+# and injects the CA bundle automatically.  Read both fields from the Certificate
+# resource itself so they always match after namePrefix/namespace transforms.
+replacements:
+- source:
+    fieldPath: .metadata.name
+    kind: Service
+    name: webhook-service
+    version: v1
+  targets:
+  - fieldPaths:
+    - .spec.dnsNames.0
+    - .spec.dnsNames.1
+    options:
+      create: true
+      delimiter: .
+    select:
+      group: cert-manager.io
+      kind: Certificate
+      name: serving-cert
+      version: v1
+- source:
+    fieldPath: .metadata.namespace
+    kind: Service
+    name: webhook-service
+    version: v1
+  targets:
+  - fieldPaths:
+    - .spec.dnsNames.0
+    - .spec.dnsNames.1
+    options:
+      create: true
+      delimiter: .
+      index: 1
+    select:
+      group: cert-manager.io
+      kind: Certificate
+      name: serving-cert
+      version: v1
+- source:
+    fieldPath: .metadata.name
+    kind: Service
+    name: controller-manager-metrics-service
+    version: v1
+  targets:
+  - fieldPaths:
+    - .spec.dnsNames.0
+    - .spec.dnsNames.1
+    options:
+      create: true
+      delimiter: .
+    select:
+      group: cert-manager.io
+      kind: Certificate
+      name: metrics-certs
+      version: v1
+- source:
+    fieldPath: .metadata.namespace
+    kind: Service
+    name: controller-manager-metrics-service
+    version: v1
+  targets:
+  - fieldPaths:
+    - .spec.dnsNames.0
+    - .spec.dnsNames.1
+    options:
+      create: true
+      delimiter: .
+      index: 1
+    select:
+      group: cert-manager.io
+      kind: Certificate
+      name: metrics-certs
+      version: v1
+- source:
+    fieldPath: .metadata.namespace
+    group: cert-manager.io
+    kind: Certificate
+    name: serving-cert
+    version: v1
+  targets:
+  - fieldPaths:
+    - .metadata.annotations.[cert-manager.io/inject-ca-from]
+    options:
+      create: true
+      delimiter: /
+    select:
+      kind: MutatingWebhookConfiguration
+- source:
+    fieldPath: .metadata.name
+    group: cert-manager.io
+    kind: Certificate
+    name: serving-cert
+    version: v1
+  targets:
+  - fieldPaths:
+    - .metadata.annotations.[cert-manager.io/inject-ca-from]
+    options:
+      create: true
+      delimiter: /
+      index: 1
+    select:
+      kind: MutatingWebhookConfiguration

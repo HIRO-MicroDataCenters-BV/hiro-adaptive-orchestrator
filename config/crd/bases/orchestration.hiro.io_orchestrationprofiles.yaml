@@ -87,8 +87,17 @@ spec:
                 properties:
                   cooldownSeconds:
                     type: integer
+                  dryRun:
+                    type: boolean
                   enabled:
                     type: boolean
+                  escalationThreshold:
+                    description: |-
+                      escalationThreshold is how many consecutive Failed/Deferred decision
+                      cycles this workload may have before the rebalance loop escalates and
+                      pauses itself. <= 0 uses DefaultEscalationThreshold.
+                    format: int32
+                    type: integer
                   triggerConditions:
                     items:
                       type: string
@@ -147,9 +156,118 @@ spec:
                 description: rebalancingStatus provides details about the current
                   rebalancing state of the application.
                 properties:
-                  lastTriggeredAt:
+                  action:
+                    description: |-
+                      action is the AI-returned action being processed for the current cycle
+                      (e.g. "Move", "NoOp"). Empty before the AI has responded.
+                    type: string
+                  consecutiveFailures:
+                    description: |-
+                      consecutiveFailures counts terminal Failed/Deferred outcomes in a row,
+                      reset by any other outcome. Crossing escalationThreshold sets escalated.
+                    format: int32
+                    type: integer
+                  cooldownUntil:
+                    description: |-
+                      cooldownUntil blocks new Triggered transitions for this workload until
+                      this time has passed.
+                    format: date-time
+                    type: string
+                  decisionId:
+                    description: decisionId correlates the current cycle with engine
+                      logs and Kubernetes Events.
+                    type: string
+                  details:
+                    description: |-
+                      details carries free-form, state-specific context for the current cycle
+                      (e.g. target node, improvement score, dry-run marker).
+                    type: string
+                  escalated:
+                    description: |-
+                      escalated, when true, pauses the rebalance loop for this workload
+                      entirely until cleared — set when consecutiveFailures crosses
+                      escalationThreshold, or when the AI itself returns action "Escalate".
+                      Never cleared automatically; see escalatedReason for why it was set.
+                    type: boolean
+                  escalatedReason:
+                    description: |-
+                      escalatedReason explains why escalated was set. Only meaningful while
+                      escalated is true.
+                    type: string
+                  lastTransitionAt:
+                    description: lastTransitionAt is when state last changed.
+                    format: date-time
                     type: string
                   reason:
+                    description: reason explains why the current state was entered.
+                    type: string
+                  recentDecisions:
+                    description: |-
+                      recentDecisions is a rolling window of the most recent terminal
+                      outcomes, newest first, trimmed to a bounded length (default 10).
+                    items:
+                      description: |-
+                        RebalanceDecision is a single terminal-outcome record kept in the profile's
+                        rolling decision history.
+                      properties:
+                        action:
+                          description: |-
+                            action is the AI-returned action that was processed (e.g. "Move", "NoOp").
+                            Dont use kubebuilder:validation:Enum here because the AI may return new actions in
+                            the future, and we don't want to break the CRD schema for that reason.
+                          type: string
+                        decisionId:
+                          description: decisionId correlates this record with engine
+                            logs and Kubernetes Events.
+                          type: string
+                        details:
+                          description: |-
+                            details carries free-form, state-specific context (e.g. target node,
+                            improvement score, dry-run marker).
+                          type: string
+                        lastTransitionAt:
+                          description: lastTransitionAt is when this decision reached
+                            its terminal state.
+                          format: date-time
+                          type: string
+                        outcome:
+                          description: outcome is the terminal outcome of this decision
+                            cycle.
+                          enum:
+                          - Enacted
+                          - NoOp
+                          - Rejected
+                          - Deferred
+                          - Failed
+                          - Escalated
+                          type: string
+                        reason:
+                          description: reason explains why the decision ended in this
+                            state.
+                          type: string
+                        startedAt:
+                          description: startedAt is when this decision's cycle entered
+                            Triggered.
+                          format: date-time
+                          type: string
+                      required:
+                      - decisionId
+                      type: object
+                    type: array
+                  startedAt:
+                    description: startedAt is when the current cycle entered Triggered.
+                    format: date-time
+                    type: string
+                  state:
+                    description: |-
+                      state is the current position of this workload's decision lifecycle
+                      state machine. Empty when no rebalance cycle has ever been triggered.
+                    enum:
+                    - Watching
+                    - Triggered
+                    - Evaluating
+                    - Decided
+                    - Enacting
                     type: string
                 type: object
               status:

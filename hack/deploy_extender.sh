@@ -318,8 +318,29 @@ wait_for_scheduler_restart() {
     -o jsonpath='{.items[0].metadata.name}')
   local pod_name="kube-scheduler-${cp_node}"
 
-  # Give kubelet a moment to detect the manifest change via inotify.
-  sleep 5
+  # Capture the current pod UID so we can detect a real restart, not just an
+  # already-Ready pod satisfying the wait condition before kubelet acts.
+  local old_uid
+  old_uid=$(kubectl get pod "$pod_name" -n kube-system \
+    -o jsonpath='{.metadata.uid}' 2>/dev/null || echo "")
+  echo "  Current pod UID: ${old_uid:-<not found>}"
+  echo "  Polling for kubelet to replace the pod (UID change)..."
+
+  local deadline=$(( SECONDS + 120 ))
+  while [ $SECONDS -lt $deadline ]; do
+    local new_uid
+    new_uid=$(kubectl get pod "$pod_name" -n kube-system \
+      -o jsonpath='{.metadata.uid}' 2>/dev/null || echo "")
+    if [ -n "$new_uid" ] && [ "$new_uid" != "$old_uid" ]; then
+      echo "  Pod replaced — new UID: $new_uid"
+      break
+    fi
+    sleep 2
+  done
+
+  if [ $SECONDS -ge $deadline ]; then
+    echo "  WARNING: pod UID did not change within 120s — kubelet may still be processing the manifest." >&2
+  fi
 
   step "Waiting for kube-scheduler to be Ready..."
   kubectl wait "pod/${pod_name}" \

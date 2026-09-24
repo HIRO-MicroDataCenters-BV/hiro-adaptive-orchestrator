@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Shared metrics component — included by config/default and config/default-with-webhook.
+# Adds the metrics Service and enables the HTTPS metrics endpoint on the operator Deployment.
+# The parent kustomization's namespace and namePrefix are applied to these resources.
+
+resources:
+- metrics_service.yaml
+
+patches:
+- path: manager_metrics_patch.yaml
+  target:
+    kind: Deployment

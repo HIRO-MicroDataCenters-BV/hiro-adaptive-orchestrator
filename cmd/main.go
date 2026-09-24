@@ -20,8 +20,11 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -31,16 +34,21 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/controller"
+	hirometrics "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/rebalance"
+	webhookv1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/webhook/v1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -54,6 +62,66 @@ func init() {
 
 	utilruntime.Must(orchestrationv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+}
+
+// parseDurationEnv returns 0 (letting the caller apply its own default) when
+// name is unset, or the parsed duration otherwise. Exits the process on an
+// invalid value — a misconfigured duration should fail fast at startup, not
+// silently fall back to a default the deployer didn't ask for.
+func parseDurationEnv(name string) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		setupLog.Error(err, "invalid duration environment variable", "name", name, "value", v)
+		os.Exit(1)
+	}
+	return d
+}
+
+// parseFloatEnv is parseDurationEnv's float64 counterpart.
+func parseFloatEnv(name string) float64 {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		setupLog.Error(err, "invalid float environment variable", "name", name, "value", v)
+		os.Exit(1)
+	}
+	return f
+}
+
+// parseIntEnv is parseDurationEnv's int counterpart.
+func parseIntEnv(name string) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		setupLog.Error(err, "invalid integer environment variable", "name", name, "value", v)
+		os.Exit(1)
+	}
+	return n
+}
+
+// parseQuantityEnv is parseDurationEnv's resource.Quantity counterpart
+// (e.g. "500m", "512Mi").
+func parseQuantityEnv(name string) resource.Quantity {
+	v := os.Getenv(name)
+	if v == "" {
+		return resource.Quantity{}
+	}
+	q, err := resource.ParseQuantity(v)
+	if err != nil {
+		setupLog.Error(err, "invalid resource.Quantity environment variable", "name", name, "value", v)
+		os.Exit(1)
+	}
+	return q
 }
 
 // nolint:gocyclo
@@ -158,7 +226,8 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -303,11 +372,33 @@ func main() {
 		"eaoKind", eaoGVK.Kind,
 	)
 
+	enableWebhooks := os.Getenv("ENABLE_WEBHOOKS") != "false"
+	hiroSchedulerName := os.Getenv("HIRO_SCHEDULER_NAME")
+	if hiroSchedulerName == "" {
+		hiroSchedulerName = webhookv1.DefaultSchedulerName
+	}
+	setupLog.Info("webhook configured",
+		"enableWebhooks", enableWebhooks,
+		"schedulerName", hiroSchedulerName,
+	)
+
 	contextBuilder := placementserver.NewDecisionContextBuilder(
 		mgr.GetClient(),
 		controller.ProfileByAppRefIndex,
 		eaoGVK,
 	)
+
+	// Register the pod scheduler MutatingAdmissionWebhook.
+	// Sets spec.schedulerName automatically on pods governed by an OrchestrationProfile,
+	// removing the need for users to set it manually in their pod specs.
+	// Controlled by ENABLE_WEBHOOKS (default "false" in manager.yaml;
+	// set to "true" by hack/deploy_webhook.sh when deploying with the scheduler plugin).
+	if enableWebhooks {
+		if err := webhookv1.SetupPodWebhookWithManager(mgr, contextBuilder, hiroSchedulerName); err != nil {
+			setupLog.Error(err, "Failed to create webhook", "webhook", "Pod")
+			os.Exit(1)
+		}
+	}
 
 	// Create the DecisionClient with the External AI Agent URL and path.
 	// The client will be used by the PlacementServer to send placement decision requests to the AI agent.
@@ -317,11 +408,197 @@ func main() {
 		8*time.Second, // must be < PlacementServer requestTimeout (10s)
 	)
 
+	// -------------------------------------------------------------------------
+	// Rebalance Engine
+	//
+	// Runtime loop that acts on the AI's guidance after initial placement:
+	// Watching -> Triggered -> Evaluating -> Decided -> Enacting, always
+	// returning to Watching with the cycle's outcome (Enacted/NoOp/Rejected/
+	// Deferred/Failed) recorded on recentDecisions. Registered as a
+	// manager.Runnable so its lifecycle matches every other component here.
+	//
+	// StateWriter is the only component permitted to mutate
+	// status.rebalancingStatus — see internal/rebalance/writer.go.
+	//
+	// Environment variables (all optional; unset/0 uses the package default):
+	//   REBALANCE_MAX_RECENT_DECISIONS     — decision-history length kept per profile
+	//   REBALANCE_DETECTION_INTERVAL       — periodic detection tick, e.g. "30s"
+	//   REBALANCE_DECISION_TIMEOUT         — AI consultation timeout, e.g. "5s"
+	//   REBALANCE_NODE_PRESSURE_THRESHOLD  — CPU/Memory pressure fraction, e.g. "0.90"
+	//   REBALANCE_IMPROVEMENT_THRESHOLD    — minimum Move improvement score to enact, e.g. "20"
+	//   REBALANCE_DECISION_STORE_TTL       — how long a Move decision biases scoring, e.g. "60s"
+	//   REBALANCE_MOVE_ACTION_TIMEOUT      — max wait for a Move's replacement pod, e.g. "60s"
+	//   REBALANCE_MOVE_RATE_LIMIT          — cluster-wide Moves/minute across every profile, e.g. "5"
+	//   REBALANCE_SCALE_ACTION_TIMEOUT     — max wait for an AdjustReplicas rollout, e.g. "60s"
+	//   REBALANCE_MIN_REPLICAS             — fallback min replicas when no HPA exists, e.g. "1"
+	//   REBALANCE_MAX_REPLICAS             — fallback max replicas when no HPA exists, e.g. "10"
+	//   REBALANCE_RESOURCE_ACTION_TIMEOUT  — max time spent attempting in-place resize, e.g. "60s"
+	//   REBALANCE_MIN_CPU                  — AdjustResources guardrail lower bound, e.g. "50m"
+	//   REBALANCE_MAX_CPU                  — AdjustResources guardrail upper bound, e.g. "2"
+	//   REBALANCE_MIN_MEMORY               — AdjustResources guardrail lower bound, e.g. "64Mi"
+	//   REBALANCE_MAX_MEMORY               — AdjustResources guardrail upper bound, e.g. "2Gi"
+	//   REBALANCE_WATCHDOG_STALE_THRESHOLD — max time stuck mid-cycle before force-recovery, e.g. "15m"
+	// -------------------------------------------------------------------------
+	rebalanceMaxRecentDecisions := parseIntEnv("REBALANCE_MAX_RECENT_DECISIONS")
+	if rebalanceMaxRecentDecisions <= 0 {
+		rebalanceMaxRecentDecisions = rebalance.DefaultMaxRecentDecisions
+	}
+	rebalanceDetectionInterval := parseDurationEnv("REBALANCE_DETECTION_INTERVAL")
+	if rebalanceDetectionInterval <= 0 {
+		rebalanceDetectionInterval = rebalance.DefaultDetectionInterval
+	}
+	rebalanceDecisionTimeout := parseDurationEnv("REBALANCE_DECISION_TIMEOUT")
+	if rebalanceDecisionTimeout <= 0 {
+		rebalanceDecisionTimeout = rebalance.DefaultDecisionTimeout
+	}
+	rebalanceNodePressureThreshold := parseFloatEnv("REBALANCE_NODE_PRESSURE_THRESHOLD")
+	if rebalanceNodePressureThreshold <= 0 {
+		rebalanceNodePressureThreshold = rebalance.DefaultNodePressureThreshold
+	}
+	rebalanceImprovementThreshold := parseFloatEnv("REBALANCE_IMPROVEMENT_THRESHOLD")
+	if rebalanceImprovementThreshold <= 0 {
+		rebalanceImprovementThreshold = rebalance.DefaultImprovementThreshold
+	}
+	rebalanceDecisionStoreTTL := parseDurationEnv("REBALANCE_DECISION_STORE_TTL")
+	if rebalanceDecisionStoreTTL <= 0 {
+		rebalanceDecisionStoreTTL = placementserver.DefaultDecisionStoreTTL
+	}
+	rebalanceMoveActionTimeout := parseDurationEnv("REBALANCE_MOVE_ACTION_TIMEOUT")
+	if rebalanceMoveActionTimeout <= 0 {
+		rebalanceMoveActionTimeout = rebalance.DefaultMoveActionTimeout
+	}
+	rebalanceMoveRateLimit := parseIntEnv("REBALANCE_MOVE_RATE_LIMIT")
+	if rebalanceMoveRateLimit <= 0 {
+		rebalanceMoveRateLimit = rebalance.DefaultMoveRateLimit
+	}
+	rebalanceScaleActionTimeout := parseDurationEnv("REBALANCE_SCALE_ACTION_TIMEOUT")
+	if rebalanceScaleActionTimeout <= 0 {
+		rebalanceScaleActionTimeout = rebalance.DefaultScaleActionTimeout
+	}
+	rebalanceMinReplicas := int32(parseIntEnv("REBALANCE_MIN_REPLICAS"))
+	if rebalanceMinReplicas <= 0 {
+		rebalanceMinReplicas = rebalance.DefaultMinReplicas
+	}
+	rebalanceMaxReplicas := int32(parseIntEnv("REBALANCE_MAX_REPLICAS"))
+	if rebalanceMaxReplicas <= 0 {
+		rebalanceMaxReplicas = rebalance.DefaultMaxReplicas
+	}
+	rebalanceResourceActionTimeout := parseDurationEnv("REBALANCE_RESOURCE_ACTION_TIMEOUT")
+	if rebalanceResourceActionTimeout <= 0 {
+		rebalanceResourceActionTimeout = rebalance.DefaultResourceActionTimeout
+	}
+	rebalanceMinCPU := parseQuantityEnv("REBALANCE_MIN_CPU")
+	if rebalanceMinCPU.IsZero() {
+		rebalanceMinCPU = rebalance.DefaultMinCPU
+	}
+	rebalanceMaxCPU := parseQuantityEnv("REBALANCE_MAX_CPU")
+	if rebalanceMaxCPU.IsZero() {
+		rebalanceMaxCPU = rebalance.DefaultMaxCPU
+	}
+	rebalanceMinMemory := parseQuantityEnv("REBALANCE_MIN_MEMORY")
+	if rebalanceMinMemory.IsZero() {
+		rebalanceMinMemory = rebalance.DefaultMinMemory
+	}
+	rebalanceMaxMemory := parseQuantityEnv("REBALANCE_MAX_MEMORY")
+	if rebalanceMaxMemory.IsZero() {
+		rebalanceMaxMemory = rebalance.DefaultMaxMemory
+	}
+	rebalanceWatchdogStaleThreshold := parseDurationEnv("REBALANCE_WATCHDOG_STALE_THRESHOLD")
+	if rebalanceWatchdogStaleThreshold <= 0 {
+		rebalanceWatchdogStaleThreshold = rebalance.DefaultWatchdogStaleThreshold
+	}
+	// Resolved above (not left at the parseXEnv zero-sentinel) so this log
+	// line — and everything downstream — reflects what's actually in
+	// effect, not "0" for anything the deployer left unset.
+	setupLog.Info("rebalance engine configured",
+		"maxRecentDecisions", rebalanceMaxRecentDecisions,
+		"detectionInterval", rebalanceDetectionInterval,
+		"decisionTimeout", rebalanceDecisionTimeout,
+		"nodePressureThreshold", rebalanceNodePressureThreshold,
+		"improvementThreshold", rebalanceImprovementThreshold,
+		"decisionStoreTTL", rebalanceDecisionStoreTTL,
+		"moveActionTimeout", rebalanceMoveActionTimeout,
+		"moveRateLimit", rebalanceMoveRateLimit,
+		"scaleActionTimeout", rebalanceScaleActionTimeout,
+		"minReplicas", rebalanceMinReplicas,
+		"maxReplicas", rebalanceMaxReplicas,
+		"resourceActionTimeout", rebalanceResourceActionTimeout,
+		"minCPU", rebalanceMinCPU.String(),
+		"maxCPU", rebalanceMaxCPU.String(),
+		"minMemory", rebalanceMinMemory.String(),
+		"maxMemory", rebalanceMaxMemory.String(),
+		"watchdogStaleThreshold", rebalanceWatchdogStaleThreshold,
+	)
+
+	// decisionStore is shared between the PlacementServer (reads it in
+	// score, in-process) and the rebalance engine's Move enactor (writes to
+	// it before eviction) — both live in this same operator binary.
+	decisionStore := placementserver.NewDecisionStore(rebalanceDecisionStoreTTL)
+
+	rebalanceWriter := rebalance.NewStateWriter(
+		mgr.GetClient(),
+		mgr.GetAPIReader(), // uncached — see NewStateWriter's doc comment on why
+		mgr.GetEventRecorderFor("rebalance-engine"), //nolint:staticcheck
+		rebalanceMaxRecentDecisions,
+	)
+	rebalanceEngine := rebalance.NewEngine(mgr.GetClient(), rebalanceWriter)
+	if err := mgr.Add(rebalanceEngine); err != nil {
+		setupLog.Error(err, "unable to register rebalance engine")
+		os.Exit(1)
+	}
+
+	// metricsClient talks to metrics-server (metrics.k8s.io) for the
+	// CPUThreshold/MemoryThreshold trigger conditions. metrics-server is an
+	// optional cluster component — NodePressureEvaluator soft-fails per node
+	// when it's unavailable, so this client is safe to construct unconditionally.
+	metricsClient, err := metricsclientset.NewForConfig(restConfig)
+	if err != nil {
+		setupLog.Error(err, "unable to create metrics-server client")
+		os.Exit(1)
+	}
+	pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, rebalanceNodePressureThreshold)
+	triggerEvaluator := rebalance.NewTriggerEvaluator(mgr.GetClient(), eaoGVK, pressureEvaluator)
+
+	rebalanceDetector := rebalance.NewReconciler(
+		mgr.GetClient(),
+		rebalanceWriter,
+		triggerEvaluator,
+		controller.ProfileByAppRefIndex,
+		rebalanceDetectionInterval,
+		contextBuilder,
+		decisionClient,
+		rebalanceDecisionTimeout,
+		rebalanceImprovementThreshold,
+		decisionStore,
+		rebalanceMoveActionTimeout,
+		rebalanceMoveRateLimit,
+		rebalanceScaleActionTimeout,
+		rebalanceMinReplicas,
+		rebalanceMaxReplicas,
+		rebalanceResourceActionTimeout,
+		rebalanceMinCPU,
+		rebalanceMaxCPU,
+		rebalanceMinMemory,
+		rebalanceMaxMemory,
+		rebalanceWatchdogStaleThreshold,
+	)
+	// eaoGVK above is the List kind (used for List() calls); Watches()/
+	// RESTMapper need the singular item kind, derived here rather than
+	// carrying a second GVK variable through main.go.
+	eaoItemGVK := eaoGVK
+	eaoItemGVK.Kind = strings.TrimSuffix(eaoGVK.Kind, "List")
+	if err := rebalanceDetector.SetupWithManager(mgr, eaoItemGVK); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "RebalanceDetection")
+		os.Exit(1)
+	}
+	crmetrics.Registry.MustRegister(hirometrics.NewRebalanceStateGaugeCollector(mgr.GetClient()))
+
 	// Create the PlacementServer with the context builder and decision client.
 	// The server will use these to handle incoming placement decision requests from the kube-scheduler plugin.
 	placementServer := placementserver.NewPlacementServer(
 		contextBuilder,
 		decisionClient,
+		decisionStore,
 		placementServerPort,
 		placementScorePath,
 		placementFilterPath,

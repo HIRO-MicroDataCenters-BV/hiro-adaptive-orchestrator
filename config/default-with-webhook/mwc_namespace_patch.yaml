@@ -1,0 +1,18 @@
+# JSON patch — adds namespaceSelector to the MutatingWebhookConfiguration.
+# Excludes system and infrastructure namespaces so the webhook never intercepts
+# pods created by Kubernetes itself.
+#
+# The excluded namespace list is the deploy-time default.
+# deploy_full_stack.sh Phase 4b replaces this list with WEBHOOK_EXCLUDE_NAMESPACES
+# if that env var is set, so you can add your own namespaces without touching
+# this file.
+- op: add
+  path: /webhooks/0/namespaceSelector
+  value:
+    matchExpressions:
+    - key: kubernetes.io/metadata.name
+      operator: NotIn
+      values:
+      - kube-system
+      - kube-public
+      - kube-node-lease

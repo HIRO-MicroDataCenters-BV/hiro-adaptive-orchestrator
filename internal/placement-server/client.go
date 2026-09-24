@@ -174,6 +174,86 @@ func (c *DecisionClient) RequestDecision(
 	return &resp, nil
 }
 
+// RequestRebalanceDecision sends a rebalance DecisionRequest (Pod nil,
+// RebalanceContext populated — see DecisionContextBuilder.BuildRebalanceContext)
+// to the same External AI Agent and returns its RebalanceDecisionResponse.
+//
+// Deliberately a separate method rather than reusing RequestDecision: the
+// response shape differs (broader action vocabulary, not just NodeScores),
+// and RequestDecision's logging assumes req.Pod is non-nil, which it never
+// is for a rebalance request. Both methods share the same agentURL/agentPath/
+// httpClient — same configured agent, same "no parallel HTTP path" — this is
+// the "richer conversation" the rebalance engine design calls for, not a
+// second decision path.
+func (c *DecisionClient) RequestRebalanceDecision(
+	ctx context.Context,
+	req *DecisionRequest,
+) (*RebalanceDecisionResponse, error) {
+	logger := logf.FromContext(ctx)
+
+	if req.RequestID == "" {
+		req.RequestID = uuid.NewString()
+	}
+
+	logger.Info("ai-client: sending rebalance decision request",
+		"requestId", req.RequestID,
+		"agentURL", c.agentURL,
+		"profile", req.AOProfile.ProfileName,
+		"decisionId", req.RebalanceContext.DecisionID,
+		"reason", req.RebalanceContext.Reason,
+		"currentPlacements", len(req.RebalanceContext.CurrentPlacements),
+		"candidateNodes", len(req.CandidateNodes),
+		"energyDataAttached", req.EAOProfile != nil,
+	)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling rebalance DecisionRequest for profile %s: %w",
+			req.AOProfile.ProfileName, err)
+	}
+
+	url := c.agentURL + c.agentPath
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("building HTTP request for profile %s: %w",
+			req.AOProfile.ProfileName, err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Request-ID", req.RequestID)
+
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("calling external decision agent at %s for profile %s: %w",
+			url, req.AOProfile.ProfileName, err)
+	}
+	defer func() { _ = httpResp.Body.Close() }()
+
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(
+			"external decision agent returned HTTP %d for profile %s (requestId=%s)",
+			httpResp.StatusCode, req.AOProfile.ProfileName, req.RequestID,
+		)
+	}
+
+	var resp RebalanceDecisionResponse
+	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("decoding RebalanceDecisionResponse for profile %s: %w",
+			req.AOProfile.ProfileName, err)
+	}
+
+	logger.Info("ai-client: rebalance decision response received",
+		"requestId", req.RequestID,
+		"profile", req.AOProfile.ProfileName,
+		"action", resp.Action,
+		"podName", resp.PodName,
+		"targetNode", resp.TargetNode,
+		"improvement", resp.Improvement,
+		"reason", resp.Reason,
+	)
+
+	return &resp, nil
+}
+
 // =============================================================================
 // Helper
 // =============================================================================

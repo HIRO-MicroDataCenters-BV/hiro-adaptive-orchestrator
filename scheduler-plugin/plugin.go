@@ -25,6 +25,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/klog/v2"
 	fwk "k8s.io/kube-scheduler/framework"
 
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
@@ -221,6 +222,22 @@ func (h *HIROScore) PreScore(
 		scores[ns.NodeName] = max(fwk.MinNodeScore, min(fwk.MaxNodeScore, int64(ns.Score)))
 	}
 	state.Write(cycleStateKey, scores)
+
+	// Log all AI node scores and the recommended node once per scheduling cycle.
+	var topNode string
+	var topScore int64 = -1
+	for node, score := range scores {
+		if score > topScore {
+			topScore = score
+			topNode = node
+		}
+	}
+	klog.InfoS(PluginName+": AI node scores",
+		"pod", klog.KObj(pod),
+		"scores", map[string]int64(scores),
+		"recommendedNode", topNode,
+		"recommendedScore", topScore,
+	)
 	return nil
 }
 
@@ -233,7 +250,7 @@ func (h *HIROScore) PreScore(
 func (h *HIROScore) Score(
 	_ context.Context,
 	state fwk.CycleState,
-	_ *corev1.Pod,
+	pod *corev1.Pod,
 	nodeInfo fwk.NodeInfo,
 ) (int64, *fwk.Status) {
 	nodeName := nodeInfo.Node().Name
@@ -243,9 +260,15 @@ func (h *HIROScore) Score(
 	}
 	scores, ok := data.(nodeScoreMap)
 	if !ok {
-		return 0, fwk.AsStatus(fmt.Errorf("HIROScore: unexpected CycleState type %T", data))
+		return 0, fwk.AsStatus(fmt.Errorf("%s: unexpected CycleState type %T", PluginName, data))
 	}
-	return scores[nodeName], nil
+	score := scores[nodeName]
+	klog.V(2).InfoS(PluginName+": node score contribution",
+		"pod", klog.KObj(pod),
+		"node", nodeName,
+		"hiroScore", score,
+	)
+	return score, nil
 }
 
 // ScoreExtensions returns nil; HIROScore does not implement NormalizeScore.

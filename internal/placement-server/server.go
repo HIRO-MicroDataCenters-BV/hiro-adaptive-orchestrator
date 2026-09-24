@@ -21,10 +21,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 )
 
 // =============================================================================
@@ -72,14 +76,25 @@ type PlacementServer struct {
 	client  *DecisionClient
 	server  *http.Server
 
+	// decisionStore holds rebalance-engine decisions that score should take
+	// into account instead of making a fresh AI call — see decision_store.go.
+	// Never nil; NewPlacementServer creates one if the caller passes nil, so
+	// score can always consult it unconditionally.
+	decisionStore *DecisionStore
+
 	// requestTimeout is applied per request.
 	requestTimeout time.Duration
 }
 
-// NewPlacementServer creates a PlacementServer.
+// NewPlacementServer creates a PlacementServer. store may be nil, in which
+// case one is created with the package default TTL — pass a shared
+// *DecisionStore when the rebalance engine's enactors need to write to the
+// same instance this server reads from (they must be the same process-wide
+// instance; see decision_store.go).
 func NewPlacementServer(
 	builder *DecisionContextBuilder,
 	client *DecisionClient,
+	store *DecisionStore,
 	port string,
 	scorePath string,
 	filterPath string,
@@ -94,6 +109,9 @@ func NewPlacementServer(
 	} else {
 		addr = port
 	}
+	if store == nil {
+		store = NewDecisionStore(0)
+	}
 	return &PlacementServer{
 		Addr:                   addr,
 		scorePath:              scorePath,
@@ -103,6 +121,7 @@ func NewPlacementServer(
 		extenderPrioritizePath: extenderPrioritizePath,
 		builder:                builder,
 		client:                 client,
+		decisionStore:          store,
 		requestTimeout:         timeout,
 	}
 }
@@ -153,19 +172,109 @@ func (s *PlacementServer) Start(ctx context.Context) error {
 // score runs the full AI decision pipeline: build DecisionRequest via the
 // builder, send it to the External AI Agent, return the DecisionResponse.
 //
+// Checks decisionStore first: if the rebalance engine already decided this
+// workload's next pod should land on a specific node, that takes priority
+// over a fresh AI call — see decisionStoreResponse and decision_store.go for
+// why. A store miss (the common case — most pods are never the target of a
+// rebalance decision) falls through to the AI call unchanged.
+//
 // Used by:
 //   - handleScore             (plugin path: POST /api/v1/placement/score)
 //   - handleExtenderPrioritize (extender path: POST /extender/prioritize)
+//
+// path identifies which of those two callers this is ("plugin" or
+// "extender"), purely for the hiro_placement_score_* metrics — both callers
+// go through the exact same decision logic either way.
 func (s *PlacementServer) score(
 	ctx context.Context,
 	placementCtx PlacementContext,
 	requestID string,
+	path string,
 ) (*DecisionResponse, error) {
+	start := time.Now()
+	defer func() {
+		metrics.PlacementScoreDuration.WithLabelValues(path).Observe(time.Since(start).Seconds())
+	}()
+
+	if resp := s.decisionStoreResponse(ctx, placementCtx, requestID); resp != nil {
+		metrics.PlacementScoreRequestsTotal.WithLabelValues(path, metrics.ScoreResultStoreHit).Inc()
+		return resp, nil
+	}
+
 	req, err := s.builder.Build(ctx, placementCtx, requestID)
 	if err != nil {
+		metrics.PlacementScoreRequestsTotal.WithLabelValues(path, metrics.ScoreResultAIError).Inc()
 		return nil, err
 	}
-	return s.client.RequestDecision(ctx, req)
+	resp, err := s.client.RequestDecision(ctx, req)
+	if err != nil {
+		metrics.PlacementScoreRequestsTotal.WithLabelValues(path, metrics.ScoreResultAIError).Inc()
+		return nil, err
+	}
+	logInitialPlacementDecision(ctx, req, resp)
+	metrics.PlacementScoreRequestsTotal.WithLabelValues(path, metrics.ScoreResultAISuccess).Inc()
+	return resp, nil
+}
+
+// decisionStoreResponse checks decisionStore for a live entry for the
+// workload governing placementCtx.Pod, and if Action == Move, synthesizes a
+// DecisionResponse that scores TargetNode decisively above every other
+// candidate — the same shape the AI agent would return, so callers don't
+// need to special-case it. Returns nil (no opinion) on a miss, a resolution
+// error, or any non-Move entry, so score falls through to its normal AI
+// call.
+//
+// The profile lookup here duplicates one Build already does internally —
+// accepted for now since it's a cheap, cache-backed indexed Get, not worth
+// threading a resolved profile through Build's signature for.
+func (s *PlacementServer) decisionStoreResponse(
+	ctx context.Context,
+	placementCtx PlacementContext,
+	requestID string,
+) *DecisionResponse {
+	logger := logf.FromContext(ctx)
+
+	profile, err := s.builder.FindProfileForPod(ctx, placementCtx.Pod)
+	if err != nil || profile == nil {
+		return nil
+	}
+
+	key := WorkloadKey(profile.Namespace, profile.Name)
+	entry, ok := s.decisionStore.Lookup(key)
+	if !ok || entry.Action != orchestrationv1alpha1.RebalanceActionMove || entry.TargetNode == "" {
+		return nil
+	}
+
+	nodeScores := make([]NodeScore, 0, len(placementCtx.CandidateNodes))
+	found := false
+	for _, node := range placementCtx.CandidateNodes {
+		score := 0.0
+		if node.Name == entry.TargetNode {
+			score = 100.0
+			found = true
+		}
+		nodeScores = append(nodeScores, NodeScore{NodeName: node.Name, Score: score})
+	}
+	if !found {
+		// TargetNode isn't even a candidate for this pod (e.g. it became
+		// unschedulable since the decision was recorded) — no opinion, let
+		// the normal AI call decide instead of insisting on the stale hint.
+		return nil
+	}
+
+	logger.Info("placement: decision-store hit, bypassing AI call",
+		"requestId", requestID,
+		"pod", placementCtx.Pod.Name,
+		"profile", profile.Name,
+		"decisionId", entry.DecisionID,
+		"targetNode", entry.TargetNode,
+	)
+
+	return &DecisionResponse{
+		RequestID:  requestID,
+		NodeScores: nodeScores,
+		Reason:     fmt.Sprintf("rebalance decision %s: %s", entry.DecisionID, entry.Reason),
+	}
 }
 
 // filter runs the energy gate check for a single pod.
@@ -173,8 +282,20 @@ func (s *PlacementServer) score(
 // Used by:
 //   - handleFilter        (plugin path: POST /api/v1/placement/filter)
 //   - handleExtenderFilter (extender path: POST /extender/filter)
-func (s *PlacementServer) filter(ctx context.Context, pod *corev1.Pod) (EnergyGateResponse, error) {
-	return s.builder.CheckEnergyGate(ctx, pod)
+//
+// path identifies which of those two callers this is, purely for metrics —
+// see score's doc comment for the same convention. An error here is always
+// soft-failed open by the caller (Allowed=true regardless), so it's counted
+// separately (PlacementFilterErrorsTotal) rather than as an "allowed"
+// request outcome.
+func (s *PlacementServer) filter(ctx context.Context, pod *corev1.Pod, path string) (EnergyGateResponse, error) {
+	gate, err := s.builder.CheckEnergyGate(ctx, pod)
+	if err != nil {
+		metrics.PlacementFilterErrorsTotal.WithLabelValues(path).Inc()
+		return gate, err
+	}
+	metrics.PlacementFilterRequestsTotal.WithLabelValues(path, strconv.FormatBool(gate.Allowed)).Inc()
+	return gate, nil
 }
 
 // =============================================================================
@@ -214,7 +335,7 @@ func (s *PlacementServer) handleScore(w http.ResponseWriter, r *http.Request) {
 		"candidateNodes", len(placementCtx.CandidateNodes),
 	)
 
-	decisionResp, err := s.score(ctx, placementCtx, requestID)
+	decisionResp, err := s.score(ctx, placementCtx, requestID, metrics.PathPlugin)
 	if err != nil {
 		logger.Error(err, "placement: score request failed",
 			"requestId", requestID,
@@ -278,7 +399,7 @@ func (s *PlacementServer) handleFilter(w http.ResponseWriter, r *http.Request) {
 		"namespace", req.Pod.Namespace,
 	)
 
-	gate, err := s.filter(ctx, req.Pod)
+	gate, err := s.filter(ctx, req.Pod, metrics.PathPlugin)
 	if err != nil {
 		logger.Error(err, "placement: filter check failed, allowing scheduling",
 			"requestId", requestID,
