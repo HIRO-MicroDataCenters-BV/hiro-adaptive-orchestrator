@@ -26,8 +26,6 @@ resources:
 - ../manager
 - ../webhook
 - ../certmanager
-# [PROMETHEUS] To enable prometheus monitor, uncomment the line below.
-# hack/deploy_full_stack.sh uncomments this in place when DEPLOY_PROMETHEUS_OPERATOR=true.
 #- ../prometheus
 
 # [METRICS] Shared component: adds metrics Service + enables HTTPS :8443 endpoint.
