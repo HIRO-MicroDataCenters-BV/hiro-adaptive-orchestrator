@@ -670,6 +670,17 @@ enable_prometheus_scaffold() {
   echo "  Enabled config/prometheus in $overlay/kustomization.yaml."
 }
 
+# disable_prometheus_scaffold restores the overlay's kustomization.yaml to its
+# committed default (config/prometheus commented out) once the ServiceMonitor
+# has been applied to the cluster, so this script doesn't leave a permanent
+# working-tree edit behind after each run.
+disable_prometheus_scaffold() {
+  local overlay="$1"
+  sed -i.bak 's/^- \.\.\/prometheus/#- ..\/prometheus/' "$REPO_ROOT/$overlay/kustomization.yaml"
+  rm -f "$REPO_ROOT/$overlay/kustomization.yaml.bak"
+  echo "  Restored config/prometheus to disabled in $overlay/kustomization.yaml."
+}
+
 apply_prometheus_overlay() {
   local overlay="$1"
   echo "  Re-applying $overlay (namespace/nameprefix/image already set by Phase 4)..."
@@ -716,6 +727,7 @@ deploy_prometheus_monitoring() {
   enable_prometheus_scaffold "$overlay"
   apply_prometheus_overlay "$overlay"
   bind_prometheus_metrics_rbac
+  disable_prometheus_scaffold "$overlay"
 }
 
 # ---------------------------------------------------------------------------
