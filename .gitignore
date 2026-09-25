@@ -52,3 +52,7 @@ Thumbs.db
 # Local development files
 .env
 .env.local
+
+# Helm — vendored local dependency archives, regenerated with
+# `helm dependency update charts/hiro-full-stack` (Chart.lock IS committed).
+charts/*/charts/

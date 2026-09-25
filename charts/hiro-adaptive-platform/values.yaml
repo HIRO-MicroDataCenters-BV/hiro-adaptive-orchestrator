@@ -1,0 +1,124 @@
+## hiro-adaptive-platform — umbrella chart values.
+##
+## The operator itself is configured entirely through the `hiro-operator`
+## key below, which passes straight through to the subchart at
+## ../../dist/chart (the kubebuilder-generated operator chart, referenced
+## as a local dependency — see Chart.yaml). Its full set of values
+## (manager.image, manager.env, resources, crd.*, rbacHelpers.*, etc.) is
+## documented in that chart's own values.yaml.
+##
+## Everything else this umbrella chart adds (scheduler plugin/extender, mock
+## decision agent, bundled cluster prerequisites) will be added here as
+## those pieces are implemented.
+
+hiro-operator:
+  enabled: true
+  ## Enabling webhook mode (below) also needs the operator to see
+  ## ENABLE_WEBHOOKS=true. manager.env is a plain list — Helm replaces it
+  ## wholesale, it doesn't merge entries — so there's no single-flag way to
+  ## flip just this one var. Override the full list here, e.g.:
+  ##   manager:
+  ##     env:
+  ##       - name: ENABLE_WEBHOOKS
+  ##         value: "true"
+  ##       - name: DECISION_AGENT_URL
+  ##         ... (every other entry from dist/chart/values.yaml's own default)
+  ## A composed, semantic version of this list (rebalanceEngine.*,
+  ## aiAgent.backendUrl, etc. instead of a raw env array) is planned for a
+  ## later step of this chart's build-out.
+
+## Pod-mutating webhook (auto-sets schedulerName on new pods). Lives entirely
+## in THIS chart's own templates (templates/webhook/), not in dist/chart, so
+## its values live at this top level too, not under hiro-operator: above.
+## Renders a MutatingWebhookConfiguration + webhook Service, and — via the
+## Helm post-renderer at postrender/render.sh, wired in by the
+## helm-platform-deploy Makefile target — patches the operator Deployment
+## with the volume mount/port/arg it needs to serve webhook TLS.
+##
+## Also needs: hiro-operator.manager.env with ENABLE_WEBHOOKS=true (above).
+webhook:
+  enable: false
+  # Namespaces the webhook will never intercept.
+  excludeNamespaces:
+    - kube-system
+    - kube-public
+    - kube-node-lease
+  ## Self-signed cert-manager Issuer + Certificate for the webhook's TLS —
+  ## needs the cert-manager CONTROLLER already running in the cluster
+  ## (either your own, or bundled via the top-level certManager: block
+  ## below). NOTE: dist/chart/values.yaml also has an (unused,
+  ## kubebuilder-stub) hiro-operator.certManager.enable key — unrelated to
+  ## this one, don't confuse the two. Set false if you already have your
+  ## own `webhook-server-cert` Secret in this release's namespace instead.
+  certManager:
+    enable: false
+
+## Cluster-wide infrastructure this stack can use, each bundled here ONLY
+## for convenience on an isolated/demo/Kind cluster — off by default. The
+## expected production posture is "install these yourself, once, shared
+## across whatever else runs in the cluster," not tied to this release's
+## lifecycle. Turning one of these on means `helm uninstall` on THIS
+## release also removes that shared infrastructure — fine for a throwaway
+## Kind cluster, risky on a cluster anything else depends on.
+##
+## Known gaps vs. hack/deploy_full_stack.sh's install of the same things:
+## it auto-detects and skips installing a component if something similar
+## already exists cluster-wide (by name, across all namespaces) — Helm has
+## no equivalent, so enabling one of these on a cluster that already has an
+## unrelated instance risks a conflicting duplicate (e.g. a node-exporter
+## hostPort clash). It also self-heals a previously failed release before
+## retrying; a failed bundled subchart here does not self-heal within one
+## umbrella `helm upgrade` — `helm uninstall` and retry if that happens.
+prerequisites:
+  # Required (from somewhere — here or your own install) when
+  # webhook.certManager.enable above is true.
+  certManager:
+    enable: false
+  # Powers the rebalance engine's CPUThreshold/MemoryThreshold pressure
+  # triggers (soft-fails, logged, without it — everything else works the
+  # same either way).
+  metricsServer:
+    enable: false
+  # Lets a Prometheus instance actually scrape this stack's own metrics.
+  prometheus:
+    enable: false
+
+## Passthrough config for the bundled dependencies above, keyed by their
+## alias (see Chart.yaml) — unused and harmless while the matching
+## prerequisites.<name>.enable stays false. NOT where the enable flag
+## itself lives: cert-manager's chart enforces a strict values schema that
+## rejects unknown keys, so mixing an "enable" flag into this block breaks
+## validation for that one (confirmed) — kept consistent across all three
+## rather than relying on each dependency's schema strictness.
+certManager:
+  # The cert-manager chart doesn't install its own CRDs by default.
+  crds:
+    enabled: true
+
+metricsServer:
+  # Kind/minikube/k3d: kubelet serving certs aren't signed by a CA
+  # metrics-server trusts. Remove this on a cluster with valid kubelet
+  # certs (matches hack/install_metrics_server.sh's own dev-cluster-only
+  # default).
+  args:
+    - --kubelet-insecure-tls
+
+prometheus:
+  prometheus:
+    prometheusSpec:
+      # Empty selectors = watch ServiceMonitors in every namespace with any
+      # labels, not just ones carrying this release's own Helm labels —
+      # otherwise this Prometheus would never see the operator's own
+      # ServiceMonitor. (hack/install_prometheus_operator.sh needs the
+      # equivalent --set-json for the same reason: plain --set {} parses as
+      # a list, not a map, and the CRD rejects it — a real YAML map here
+      # has no such problem.)
+      #
+      # serviceMonitorSelectorNilUsesHelmValues defaults to true in this
+      # chart, and its own template treats an empty {} selector as "unset"
+      # under that flag — silently falling back to a `release: <name>`
+      # selector instead of the empty one. Must be turned off explicitly or
+      # the {} below is ignored.
+      serviceMonitorSelectorNilUsesHelmValues: false
+      serviceMonitorSelector: {}
+      serviceMonitorNamespaceSelector: {}

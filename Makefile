@@ -310,6 +310,40 @@ helm-history: ## Show Helm release history.
 helm-rollback: ## Rollback to previous Helm release.
 	$(HELM) rollback $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
 
+## Path to the full-stack umbrella Helm chart
+HELM_PLATFORM_CHART_DIR ?= charts/hiro-adaptive-platform
+## Name of the full-stack Helm release
+HELM_PLATFORM_RELEASE ?= hiro-adaptive-platform
+
+.PHONY: helm-platform-lint
+helm-platform-lint: ## Lint the full-stack umbrella chart.
+	$(HELM) dependency update $(HELM_PLATFORM_CHART_DIR)
+	$(HELM) lint $(HELM_PLATFORM_CHART_DIR)
+
+.PHONY: helm-platform-template
+helm-platform-template: ## Render the full-stack umbrella chart (no cluster required).
+	$(HELM) dependency update $(HELM_PLATFORM_CHART_DIR)
+	$(HELM) template $(HELM_PLATFORM_RELEASE) $(HELM_PLATFORM_CHART_DIR) $(HELM_EXTRA_ARGS)
+
+.PHONY: helm-platform-deploy
+helm-platform-deploy: install-helm ## Deploy the full stack via the umbrella Helm chart.
+	$(HELM) dependency update $(HELM_PLATFORM_CHART_DIR)
+	$(HELM) upgrade --install $(HELM_PLATFORM_RELEASE) $(HELM_PLATFORM_CHART_DIR) \
+		--namespace $(HELM_NAMESPACE) \
+		--create-namespace \
+		--post-renderer $(CURDIR)/$(HELM_PLATFORM_CHART_DIR)/postrender/render.sh \
+		--wait \
+		--timeout 10m \
+		$(HELM_EXTRA_ARGS)
+
+.PHONY: helm-platform-uninstall
+helm-platform-uninstall: ## Uninstall the full-stack Helm release.
+	$(HELM) uninstall $(HELM_PLATFORM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-platform-status
+helm-platform-status: ## Show full-stack Helm release status.
+	$(HELM) status $(HELM_PLATFORM_RELEASE) --namespace $(HELM_NAMESPACE)
+
 ##@ Scheduler Build
 #
 # The scheduler lives in scheduler-plugin/ — a separate Go module with its own

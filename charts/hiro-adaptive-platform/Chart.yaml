@@ -1,0 +1,52 @@
+apiVersion: v2
+name: hiro-adaptive-platform
+description: >-
+  Full hiro-adaptive-orchestrator stack — operator, AI decision agent, and
+  scheduler component (plugin or extender, selectable), deployed as one
+  Helm release.
+type: application
+
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - kubernetes
+  - operator
+  - scheduler
+
+dependencies:
+  - name: hiro-adaptive-orchestrator
+    alias: hiro-operator
+    version: "*"
+    repository: "file://../../dist/chart"
+    condition: hiro-operator.enabled
+
+  # Optional, off by default — bundle a cluster-wide prerequisite as part of
+  # THIS release for convenience on an isolated/demo/Kind cluster. On a
+  # shared cluster, install these yourself instead and leave the matching
+  # prerequisites.<name>.enable flag false — see values.yaml and the chart
+  # README for why (uninstalling this release would remove them too).
+  #
+  # Each is aliased so its passthrough config lives in one clearly-named
+  # values.yaml block (same pattern as hiro-operator above) — but the
+  # enable flag itself lives under prerequisites.<name>.enable, NOT inside
+  # that aliased block: some of these charts (cert-manager confirmed)
+  # enforce a strict values schema that rejects unknown top-level keys, so
+  # an "enable" key living alongside their real config breaks validation.
+  # Decoupling the condition path from the passthrough key sidesteps that
+  # regardless of how strict any given dependency's schema is.
+  - name: cert-manager
+    alias: certManager
+    version: ">=1.17.0"
+    repository: "https://charts.jetstack.io"
+    condition: prerequisites.certManager.enable
+  - name: metrics-server
+    alias: metricsServer
+    version: ">=3.12.0"
+    repository: "https://kubernetes-sigs.github.io/metrics-server/"
+    condition: prerequisites.metricsServer.enable
+  - name: kube-prometheus-stack
+    alias: prometheus
+    version: ">=65.0.0"
+    repository: "https://prometheus-community.github.io/helm-charts"
+    condition: prerequisites.prometheus.enable
