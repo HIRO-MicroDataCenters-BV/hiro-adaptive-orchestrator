@@ -1,0 +1,50 @@
+{{- if .Values.mockAgent.enable }}
+# Default name/port (mock-decision-agent:8080, no release prefix) match
+# hack/mock_decision_agent.yaml exactly, and let values.yaml's
+# hiro-operator.manager.env DECISION_AGENT_URL default statically to
+# http://mock-decision-agent:8080 without needing any templating (Helm
+# values.yaml can't template itself — see that comment for the fuller
+# reason). If you override mockAgent.serviceName/.port, update that
+# DECISION_AGENT_URL entry to match — nothing here can do that for you.
+# mockAgent.port itself IS safe to change on its own (unlike serviceName,
+# it isn't baked into that URL by name) — the container's actual listener
+# is templated from it too, see templates/mock-agent/configmap.yaml.
+# Trade-off of the default name: installing this chart twice in the same
+# namespace with mockAgent.enable=true on both would collide on it — an
+# edge case accepted for a demo/eval-only feature, matching the original
+# script.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.mockAgent.serviceName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Values.mockAgent.serviceName }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Values.mockAgent.serviceName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.mockAgent.serviceName }}
+    spec:
+      containers:
+        - name: mock-agent
+          image: {{ .Values.mockAgent.image }}
+          command: ["python3", "/app/server.py"]
+          ports:
+            - containerPort: {{ .Values.mockAgent.port }}
+          volumeMounts:
+            - name: script
+              mountPath: /app
+          resources:
+            {{- toYaml .Values.mockAgent.resources | nindent 12 }}
+      volumes:
+        - name: script
+          configMap:
+            name: {{ .Values.mockAgent.serviceName }}
+{{- end }}

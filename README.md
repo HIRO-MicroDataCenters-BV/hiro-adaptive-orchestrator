@@ -559,15 +559,19 @@ NAMESPACE=my-ns NAME_PREFIX=my-org- DEPLOY_EXTENDER=true hack/deploy_full_stack.
 flowchart LR
     D(["How do you want<br/>to deploy?"]) --> A["Scripted<br/>hack/deploy_*.sh"]
     D --> B["Manual Kustomize<br/>make deploy"]
-    D --> C["Helm<br/>make helm-deploy"]
+    D --> C["Helm (operator only)<br/>make helm-deploy"]
+    D --> F["Helm (full stack)<br/>make helm-platform-deploy"]
     D --> E["YAML bundle<br/>dist/install.yaml"]
     A --> A1["Recommended — handles<br/>cert-manager, webhook,<br/>mock agent, env injection"]
     B --> B1["Full manual control,<br/>no scripted phases"]
     C --> C1["GitOps-friendly,<br/>chart auto-generated from config/"]
+    F --> F1["GitOps-friendly, operator +<br/>webhook + scheduler + prerequisites<br/>as one upgradeable release"]
     E --> E1["Single-file apply,<br/>e.g. air-gapped installs"]
 ```
 
 All deploy scripts share the same parameter model: every variable has a default and can be overridden via environment. See [All Parameters](#all-parameters) for the full reference.
+
+`make helm-deploy` deploys the operator alone, from the chart kubebuilder generates at `dist/chart` (RBAC, CRD, manager Deployment only). `make helm-platform-deploy` deploys the same operator plus everything else in this section — webhook, scheduler (plugin or extender), mock agent, samples, optional bundled prerequisites — as one Helm release, via the umbrella chart at `charts/hiro-adaptive-platform`. See [that chart's README](charts/hiro-adaptive-platform/README.md) for its full values reference and worked examples; like the scripted path, it's additive, not a replacement.
 
 ### Full-Stack (operator + mock agent + scheduler)
 

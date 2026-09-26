@@ -1,0 +1,31 @@
+{{- if .Values.samples.enabled }}
+# See orchestrationprofile-sample.yaml for the full comment on this sample
+# set. targetDeploymentName must match nginx-deployment-1.yaml's
+# samples.nginxApp1.deploymentName.
+apiVersion: orchestration.hiro.io/v1alpha1
+kind: OrchestrationProfile
+metadata:
+  name: {{ .Values.samples.profile1.name }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  applicationRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .Values.samples.profile1.targetDeploymentName }}
+    namespace: {{ .Values.samples.namespace }}
+  placement:
+    strategy: Spread
+    awareness:
+      cpu: false
+      memory: false
+      gpu: false
+      energy: true
+  rebalancing:
+    enabled: {{ .Values.samples.rebalancing.enabled }}
+    dryRun: {{ .Values.samples.rebalancing.dryRun }}
+    cooldownSeconds: 300
+    triggerConditions:
+      - "EnergyThreshold"
+{{- end }}

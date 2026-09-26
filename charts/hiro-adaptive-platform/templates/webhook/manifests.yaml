@@ -1,4 +1,7 @@
 {{- if .Values.webhook.enable }}
+{{- if ne .Values.scheduler.mode "plugin" }}
+{{- fail (include "hiro-adaptive-platform.errors.webhookRequiresPlugin" .) }}
+{{- end }}
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:

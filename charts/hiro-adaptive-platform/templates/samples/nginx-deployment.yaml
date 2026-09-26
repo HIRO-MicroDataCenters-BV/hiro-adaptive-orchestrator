@@ -1,0 +1,50 @@
+{{- if .Values.samples.enabled }}
+# Not referenced by any of the sample OrchestrationProfiles (they all
+# target nginxApp1/nginxApp2 below) — ported anyway since config/samples/
+# applies it too (unreferenced there as well).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.samples.nginxApp.deploymentName }}
+  namespace: {{ .Values.samples.namespace }}
+  labels:
+    app: {{ .Values.samples.nginxApp.deploymentName }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Values.samples.nginxApp.deploymentName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.samples.nginxApp.deploymentName }}
+    spec:
+      containers:
+        - name: nginx
+          image: {{ .Values.samples.nginxImage }}
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.samples.nginxApp.serviceName }}
+  namespace: {{ .Values.samples.namespace }}
+  labels:
+    app: {{ .Values.samples.nginxApp.deploymentName }}
+spec:
+  selector:
+    app: {{ .Values.samples.nginxApp.deploymentName }}
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: ClusterIP
+{{- end }}

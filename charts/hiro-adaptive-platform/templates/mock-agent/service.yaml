@@ -1,0 +1,17 @@
+{{- if .Values.mockAgent.enable }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.mockAgent.serviceName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Values.mockAgent.serviceName }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  selector:
+    app: {{ .Values.mockAgent.serviceName }}
+  ports:
+    - port: {{ .Values.mockAgent.port }}
+      targetPort: {{ .Values.mockAgent.port }}
+{{- end }}

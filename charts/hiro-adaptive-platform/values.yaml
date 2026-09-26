@@ -1,124 +1,253 @@
 ## hiro-adaptive-platform — umbrella chart values.
 ##
-## The operator itself is configured entirely through the `hiro-operator`
-## key below, which passes straight through to the subchart at
-## ../../dist/chart (the kubebuilder-generated operator chart, referenced
-## as a local dependency — see Chart.yaml). Its full set of values
-## (manager.image, manager.env, resources, crd.*, rbacHelpers.*, etc.) is
-## documented in that chart's own values.yaml.
-##
-## Everything else this umbrella chart adds (scheduler plugin/extender, mock
-## decision agent, bundled cluster prerequisites) will be added here as
-## those pieces are implemented.
+## The operator is configured via `hiro-operator` below, which passes
+## straight through to the dist/chart subchart. Everything else (scheduler,
+## mock agent, bundled prerequisites, samples) is this chart's own.
 
 hiro-operator:
   enabled: true
-  ## Enabling webhook mode (below) also needs the operator to see
-  ## ENABLE_WEBHOOKS=true. manager.env is a plain list — Helm replaces it
-  ## wholesale, it doesn't merge entries — so there's no single-flag way to
-  ## flip just this one var. Override the full list here, e.g.:
-  ##   manager:
-  ##     env:
-  ##       - name: ENABLE_WEBHOOKS
-  ##         value: "true"
-  ##       - name: DECISION_AGENT_URL
-  ##         ... (every other entry from dist/chart/values.yaml's own default)
-  ## A composed, semantic version of this list (rebalanceEngine.*,
-  ## aiAgent.backendUrl, etc. instead of a raw env array) is planned for a
-  ## later step of this chart's build-out.
+  # manager.env is one list — Helm replaces it wholesale, it can't merge
+  # entries by name. So this is the operator's complete env list; edit an
+  # entry directly to change it. Defaults match dist/chart/values.yaml.
+  manager:
+    env:
+      # Defaults to the bundled mock agent (mockAgent below). Not
+      # auto-derived from mockAgent.serviceName/.port — values.yaml can't
+      # template itself. Update this by hand if you change those.
+      - name: DECISION_AGENT_URL
+        value: http://mock-decision-agent:8080
+      - name: DECISION_AGENT_PATH
+        value: /api/v1/agent/placement/decision
+      # PlacementServer — this operator's scoring endpoint, called by the
+      # scheduler plugin/extender (see scheduler: below).
+      - name: PLACEMENT_SERVER_PORT
+        value: ":8090"
+      - name: PLACEMENT_SCORE_PATH
+        value: /api/v1/placement/score
+      - name: PLACEMENT_FILTER_PATH
+        value: /api/v1/placement/filter
+      - name: PLACEMENT_SERVER_HEALTH_PATH
+        value: /healthz
+      # EnergyAwareOrchestration CRD coordinates (external, optional CRD).
+      - name: EAO_GROUP
+        value: eas.hiro.io
+      - name: EAO_VERSION
+        value: v1
+      - name: EAO_KIND
+        value: EnergyAwareOrchestration
+      # Scheduler extender HTTP paths.
+      - name: EXTENDER_FILTER_PATH
+        value: /extender/filter
+      - name: EXTENDER_PRIORITIZE_PATH
+        value: /extender/prioritize
+      # Rebalance engine tuning. rebalancing.enabled/dryRun are
+      # per-OrchestrationProfile fields, not env vars — see samples below.
+      - name: REBALANCE_MAX_RECENT_DECISIONS
+        value: "10"
+      - name: REBALANCE_DETECTION_INTERVAL
+        value: 30s
+      - name: REBALANCE_DECISION_TIMEOUT
+        value: 5s
+      - name: REBALANCE_NODE_PRESSURE_THRESHOLD
+        value: "0.90"
+      - name: REBALANCE_IMPROVEMENT_THRESHOLD
+        value: "20"
+      - name: REBALANCE_DECISION_STORE_TTL
+        value: 60s
+      - name: REBALANCE_MOVE_ACTION_TIMEOUT
+        value: 60s
+      - name: REBALANCE_MOVE_RATE_LIMIT
+        value: "5"
+      - name: REBALANCE_SCALE_ACTION_TIMEOUT
+        value: 60s
+      - name: REBALANCE_MIN_REPLICAS
+        value: "1"
+      - name: REBALANCE_MAX_REPLICAS
+        value: "10"
+      - name: REBALANCE_RESOURCE_ACTION_TIMEOUT
+        value: 60s
+      - name: REBALANCE_MIN_CPU
+        value: 50m
+      - name: REBALANCE_MAX_CPU
+        value: "2"
+      - name: REBALANCE_MIN_MEMORY
+        value: 64Mi
+      - name: REBALANCE_MAX_MEMORY
+        value: 2Gi
+      - name: REBALANCE_WATCHDOG_STALE_THRESHOLD
+        value: 15m
+      # Inert default — when webhook.enable=true, postrender/render.sh
+      # overrides this to "true" automatically (Kubernetes uses the last
+      # duplicate env entry). Only takes effect as written here otherwise.
+      - name: ENABLE_WEBHOOKS
+        value: "false"
+      # Inert default — when scheduler.mode=plugin, postrender/render.sh
+      # overrides this to match scheduler.plugin.schedulerName
+      # automatically. Only takes effect as written here otherwise.
+      - name: HIRO_SCHEDULER_NAME
+        value: hiro-scheduler
 
-## Pod-mutating webhook (auto-sets schedulerName on new pods). Lives entirely
-## in THIS chart's own templates (templates/webhook/), not in dist/chart, so
-## its values live at this top level too, not under hiro-operator: above.
-## Renders a MutatingWebhookConfiguration + webhook Service, and — via the
-## Helm post-renderer at postrender/render.sh, wired in by the
-## helm-platform-deploy Makefile target — patches the operator Deployment
-## with the volume mount/port/arg it needs to serve webhook TLS.
-##
-## Also needs: hiro-operator.manager.env with ENABLE_WEBHOOKS=true (above).
+## Mock decision agent — opt-in demo/eval only. Off by default; when on,
+## DECISION_AGENT_URL above already points at it by default.
+mockAgent:
+  enable: false
+  serviceName: mock-decision-agent
+  # Safe to change on its own — templated into the Service, the container
+  # port, and the script's own listener (files/mock_decision_agent_server.py).
+  port: 8080
+  image: python:3.11-slim
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+## Pod-mutating webhook (auto-sets schedulerName on new pods). Lives in this
+## chart's own templates (templates/webhook/), not dist/chart — patches the
+## operator Deployment via the Helm post-renderer (postrender/render.sh).
+## Also needs hiro-operator.manager.env's ENABLE_WEBHOOKS=true above.
 webhook:
   enable: false
-  # Namespaces the webhook will never intercept.
+  # Namespaces the webhook never intercepts.
   excludeNamespaces:
     - kube-system
     - kube-public
     - kube-node-lease
-  ## Self-signed cert-manager Issuer + Certificate for the webhook's TLS —
-  ## needs the cert-manager CONTROLLER already running in the cluster
-  ## (either your own, or bundled via the top-level certManager: block
-  ## below). NOTE: dist/chart/values.yaml also has an (unused,
-  ## kubebuilder-stub) hiro-operator.certManager.enable key — unrelated to
-  ## this one, don't confuse the two. Set false if you already have your
-  ## own `webhook-server-cert` Secret in this release's namespace instead.
+  # Self-signed Issuer + Certificate for the webhook's TLS — needs
+  # cert-manager already running (your own, or prerequisites.certManager
+  # below). Set false if you provide your own `webhook-server-cert` Secret.
   certManager:
     enable: false
 
-## Cluster-wide infrastructure this stack can use, each bundled here ONLY
-## for convenience on an isolated/demo/Kind cluster — off by default. The
-## expected production posture is "install these yourself, once, shared
-## across whatever else runs in the cluster," not tied to this release's
-## lifecycle. Turning one of these on means `helm uninstall` on THIS
-## release also removes that shared infrastructure — fine for a throwaway
-## Kind cluster, risky on a cluster anything else depends on.
-##
-## Known gaps vs. hack/deploy_full_stack.sh's install of the same things:
-## it auto-detects and skips installing a component if something similar
-## already exists cluster-wide (by name, across all namespaces) — Helm has
-## no equivalent, so enabling one of these on a cluster that already has an
-## unrelated instance risks a conflicting duplicate (e.g. a node-exporter
-## hostPort clash). It also self-heals a previously failed release before
-## retrying; a failed bundled subchart here does not self-heal within one
-## umbrella `helm upgrade` — `helm uninstall` and retry if that happens.
+## Cluster-wide infra this stack can use — bundled here only for
+## convenience on a demo/Kind cluster, off by default. Production posture:
+## install these yourself, shared across the cluster. `helm uninstall` on
+## this release removes anything bundled here too.
 prerequisites:
-  # Required (from somewhere — here or your own install) when
-  # webhook.certManager.enable above is true.
+  # Needed when webhook.certManager.enable above is true.
   certManager:
     enable: false
-  # Powers the rebalance engine's CPUThreshold/MemoryThreshold pressure
-  # triggers (soft-fails, logged, without it — everything else works the
-  # same either way).
+  # Powers the rebalance engine's CPU/Memory pressure triggers.
   metricsServer:
     enable: false
-  # Lets a Prometheus instance actually scrape this stack's own metrics.
+  # Lets a Prometheus instance scrape this stack's metrics.
   prometheus:
     enable: false
 
-## Passthrough config for the bundled dependencies above, keyed by their
-## alias (see Chart.yaml) — unused and harmless while the matching
-## prerequisites.<name>.enable stays false. NOT where the enable flag
-## itself lives: cert-manager's chart enforces a strict values schema that
-## rejects unknown keys, so mixing an "enable" flag into this block breaks
-## validation for that one (confirmed) — kept consistent across all three
-## rather than relying on each dependency's schema strictness.
+## Passthrough config for the bundled dependencies above (keyed by their
+## Chart.yaml alias) — harmless while the matching prerequisites.* stays
+## off. The enable flags live in prerequisites above, not here, because
+## cert-manager's chart schema rejects unknown keys like "enable".
 certManager:
-  # The cert-manager chart doesn't install its own CRDs by default.
+  # cert-manager's chart doesn't install its own CRDs by default.
   crds:
     enabled: true
 
 metricsServer:
-  # Kind/minikube/k3d: kubelet serving certs aren't signed by a CA
-  # metrics-server trusts. Remove this on a cluster with valid kubelet
-  # certs (matches hack/install_metrics_server.sh's own dev-cluster-only
-  # default).
+  # Kind/minikube/k3d only — kubelet certs aren't trusted there.
   args:
     - --kubelet-insecure-tls
 
 prometheus:
   prometheus:
     prometheusSpec:
-      # Empty selectors = watch ServiceMonitors in every namespace with any
-      # labels, not just ones carrying this release's own Helm labels —
-      # otherwise this Prometheus would never see the operator's own
-      # ServiceMonitor. (hack/install_prometheus_operator.sh needs the
-      # equivalent --set-json for the same reason: plain --set {} parses as
-      # a list, not a map, and the CRD rejects it — a real YAML map here
-      # has no such problem.)
-      #
-      # serviceMonitorSelectorNilUsesHelmValues defaults to true in this
-      # chart, and its own template treats an empty {} selector as "unset"
-      # under that flag — silently falling back to a `release: <name>`
-      # selector instead of the empty one. Must be turned off explicitly or
-      # the {} below is ignored.
+      # Empty selectors = scrape ServiceMonitors everywhere, not just ones
+      # with this release's Helm labels (needed to see the operator's own).
+      # serviceMonitorSelectorNilUsesHelmValues must also be false, or this
+      # chart treats an empty {} as "unset" and auto-generates one anyway.
       serviceMonitorSelectorNilUsesHelmValues: false
       serviceMonitorSelector: {}
       serviceMonitorNamespaceSelector: {}
+
+## Custom scheduler. "plugin" runs a standalone Deployment (in-process
+## HIROScore plugin) for pods with schedulerName: hiro-scheduler. "extender"
+## instead patches the cluster's existing kube-scheduler to call the same
+## PlacementServer via HTTP — for clusters where a custom scheduler pod
+## can't be deployed (GKE Autopilot, EKS Fargate). Mutually exclusive.
+scheduler:
+  mode: none   # none | plugin | extender
+  plugin:
+    # Single source of truth for the scheduler's registered name — also
+    # patched into the operator's HIRO_SCHEDULER_NAME env var automatically
+    # by postrender/render.sh, so there's nothing to keep in sync by hand.
+    schedulerName: hiro-scheduler
+    image:
+      repository: ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/hiro-scheduler
+      # No safe default — not published on a release cadence yet. Required
+      # when scheduler.mode=plugin.
+      tag: ""
+      pullPolicy: IfNotPresent
+    replicas: 1
+    imagePullSecrets: []
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    placementServer:
+      # No safe default — the operator's placement Service name depends on
+      # Helm's name-truncation logic, unsafe to guess. Look it up with
+      # `kubectl get svc -n <namespace>` after deploying, then set
+      # http://<name>.<namespace>.svc.cluster.local:8090.
+      url: ""
+      path: /api/v1/placement/score
+      filterPath: /api/v1/placement/filter
+      timeoutSeconds: 8
+  # Runs 3 hook Jobs with real cluster access after install/upgrade, so
+  # unlike plugin mode it resolves the PlacementServer by label selector —
+  # no required url. Needs privileged access to the control-plane node
+  # (patches kube-scheduler's static pod manifest) and RBAC in kube-system
+  # — see templates/scheduler-extender/ and the chart README.
+  extender:
+    images:
+      kubectl: bitnami/kubectl:1.31
+      patcher: python:3-slim
+    placementServer:
+      port: 8090
+      filterVerb: extender/filter
+      prioritizeVerb: extender/prioritize
+      weight: 5
+      httpTimeoutSeconds: 8
+      enableHTTPS: false
+      ignorable: true
+      nodeCacheCapable: false
+
+## Sample OrchestrationProfile CRs + nginx Deployments, for demos/eval. Off
+## by default (production installs shouldn't get demo workloads).
+## rebalancing.enabled/dryRun are per-CR fields, unrelated to
+## hiro-operator.manager.env despite the similar name. Each
+## targetDeploymentName is just a string reference — keep it in sync by
+## hand with the matching nginxAppN.deploymentName.
+samples:
+  enabled: false
+  namespace: default
+  nginxImage: nginx:latest
+  rebalancing:
+    enabled: true
+    dryRun: false
+  # Unreferenced by any profile below — ported for parity with
+  # config/samples/, which is unreferenced there too.
+  nginxApp:
+    deploymentName: nginx-deployment
+    serviceName: nginx-service
+  # Targeted by profileSample and profile1.
+  nginxApp1:
+    deploymentName: nginx-deployment-1
+    serviceName: nginx-service-1
+  # Targeted by profile2 (the one hack/demo_rebalance.sh drives).
+  nginxApp2:
+    deploymentName: nginx-deployment-2
+    serviceName: nginx-service-2
+  profileSample:
+    name: orchestrationprofile-sample
+    targetDeploymentName: nginx-deployment-1
+  profile1:
+    name: orchestrationprofile-1
+    targetDeploymentName: nginx-deployment-1
+  profile2:
+    name: orchestrationprofile-2
+    targetDeploymentName: nginx-deployment-2

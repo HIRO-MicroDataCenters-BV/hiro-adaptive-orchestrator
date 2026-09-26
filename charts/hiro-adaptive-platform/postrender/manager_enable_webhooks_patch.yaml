@@ -1,0 +1,17 @@
+# Chart-owned — NOT shared with config/default-with-webhook (that overlay's
+# manager_webhook_patch.yaml only adds the cert volume/mount/port/arg, never
+# touches env). Applied by render.sh only when it detects the webhook is
+# active, appending a second ENABLE_WEBHOOKS entry; Kubernetes allows
+# duplicate env names in a PodSpec and uses the last one, so this safely
+# overrides manager.env's static "false" default without editing it.
+#
+# Deliberately unconditional (not "wait for cert-manager first" like
+# hack/deploy_full_stack.sh's Phase 9) — the operator may briefly
+# CrashLoopBackOff until cert-manager issues the cert, which `helm
+# install/upgrade --wait --timeout` tolerates. Simpler than replicating the
+# script's imperative wait-then-flip sequencing in a static patch.
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: ENABLE_WEBHOOKS
+    value: "true"

@@ -1,0 +1,18 @@
+{{- if eq .Values.scheduler.mode "plugin" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-hiro-scheduler
+  labels:
+    app.kubernetes.io/name: hiro-scheduler
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-hiro-scheduler
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-hiro-scheduler
+    namespace: {{ .Release.Namespace }}
+{{- end }}

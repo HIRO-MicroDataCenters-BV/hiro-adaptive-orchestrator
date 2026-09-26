@@ -1,0 +1,77 @@
+{{- if eq .Values.scheduler.mode "plugin" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-hiro-scheduler
+  labels:
+    app.kubernetes.io/name: hiro-scheduler
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+rules:
+  # Read nodes and pods
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  # Bind pods to nodes
+  - apiGroups: [""]
+    resources: ["bindings", "pods/binding"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["patch", "update"]
+  # Watch workloads
+  - apiGroups: [""]
+    resources: ["replicationcontrollers", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps", "extensions"]
+    resources: ["replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  # Persistent storage
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "persistentvolumes"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csinodes", "csidrivers", "csistoragecapacities"]
+    verbs: ["get", "list", "watch"]
+  # VolumeAttachments — required by the VolumeBinding scheduling plugin
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch"]
+  # Dynamic Resource Allocation (DRA) — k8s v1.31+
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaims", "resourceslices", "deviceclasses"]
+    verbs: ["get", "list", "watch"]
+  # ConfigMaps — extension-apiserver-authentication in kube-system (auth delegation)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  # Namespace and events
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  # Core events API (legacy — v1 Event objects)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+  # events.k8s.io API group — used by kube-scheduler v1.19+ for scheduling events
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+  # Leader election leases (stored in kube-system)
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "list", "update", "patch", "watch"]
+  # Auth delegation for secure health endpoints
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+{{- end }}

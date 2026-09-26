@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# hack/patch_scheduler_static_pod.py
+# charts/hiro-adaptive-platform/files/patch_scheduler_static_pod.py
 #
-# NOTE: charts/hiro-adaptive-platform/files/patch_scheduler_static_pod.py is
-# a manual COPY of this file (the Helm extender hook Jobs' patch step) — if
-# you change the logic here, update that copy too.
+# COPY of hack/patch_scheduler_static_pod.py — Helm's .Files.Get can only
+# read files inside the chart's own directory, so this can't be referenced
+# in place the way the webhook Deployment patch is (see postrender/render.sh
+# for that approach, which works because kustomize --load-restrictor allows
+# absolute paths; no equivalent exists for .Files.Get). Keep this in sync by
+# hand with hack/patch_scheduler_static_pod.py if that one changes.
 #
 # Idempotently patches /etc/kubernetes/manifests/kube-scheduler.yaml to
 # register the HIRO PlacementServer as a scheduler extender.
