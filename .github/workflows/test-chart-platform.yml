@@ -90,7 +90,8 @@ jobs:
             --set webhook.enable=true \
             --set webhook.certManager.enable=true \
             --set prerequisites.certManager.enable=true \
-            --set mockAgent.enable=true"
+            --set mockAgent.enable=true \
+            --set samples.enabled=true"
 
       - name: Check PlacementServer health
         run: |

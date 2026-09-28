@@ -24,10 +24,28 @@ name: Deploy Full-Platform Chart
 #   DOCKERHUB_USERNAME     Only needed if you switch to the commented-out
 #   DOCKERHUB_PASSWORD     Docker Hub build-push jobs below instead of GHCR.
 #
+# ─── Repo Variables ────────────────────────────────────────────────────────
+# Unlike the manual-trigger input below, these apply on every run regardless
+# of trigger — including the automatic push-to-main deploy, which has no
+# inputs to fill in. All optional; each defaults to this chart's own
+# values.yaml default (i.e. unset here = feature off) if not set.
+#   TARGET_NAMESPACE            k8s namespace for the release  (default: hiro-adaptive-orchestrator-system)
+#   TARGET_RELEASE_NAME         Helm release name              (default: hiro-adaptive-platform)
+#   SCHEDULER_MODE               none | plugin | extender        (default: none)
+#   WEBHOOK_ENABLE                true | false                    (default: false)
+#   WEBHOOK_CERT_MANAGER_ENABLE   true | false                    (default: false)
+#   PREREQ_CERT_MANAGER_ENABLE    true | false                    (default: false)
+#   MOCK_AGENT_ENABLE             true | false                    (default: false)
+#   HELM_EXTRA_VALUES             Catch-all for anything not covered by a
+#                                 named variable above — raw --set/-f args,
+#                                 applied on every run same as the others
+#                                 (e.g. "--set samples.enabled=true").
+#
 # ─── Manual-trigger inputs (workflow_dispatch) ────────────────────────────
 #   extra_helm_args        Optional. Extra --set/-f args appended to the
-#                          helm upgrade command for one-off overrides
-#                          (e.g. --set scheduler.mode=plugin).
+#                          helm upgrade command, layered on top of the repo
+#                          Variables above — for a one-off override on a
+#                          single run rather than a standing setting.
 
 on:
   push:
@@ -44,9 +62,27 @@ permissions:
   packages: write
 
 jobs:
+  # Stage 0 — fails the whole run explicitly, before spending any CI time on
+  # lint/build/deploy, if a secret this workflow needs isn't configured.
+  # Without this, a missing TARGET_KUBECONFIG only surfaces much later as a
+  # confusing failure inside "Write kubeconfig"/"Deploy" — this turns that
+  # into one clear error at the very start instead.
+  verify-secrets:
+    name: Verify required secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check TARGET_KUBECONFIG is set
+        run: |
+          if [ -z "${{ secrets.TARGET_KUBECONFIG }}" ]; then
+            echo "::error::TARGET_KUBECONFIG secret is not set. Add it in repo Settings > Secrets and variables > Actions (base64-encoded kubeconfig — see header comment) before running this workflow."
+            exit 1
+          fi
+          echo "TARGET_KUBECONFIG is set."
+
   # Stage 1 — parallel, no cluster or images needed.
   helm-lint:
     name: Helm lint (umbrella chart)
+    needs: verify-secrets
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +93,7 @@ jobs:
 
   helm-template-check:
     name: Helm template-check (value combinations)
+    needs: verify-secrets
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -189,13 +226,22 @@ jobs:
           export KUBECONFIG="$HOME/.kube/config"
           IMAGE_REPO="${{ needs.build-push-operator.outputs.image }}"
           SCHED_REPO="${{ needs.build-push-scheduler.outputs.image }}"
-          make helm-platform-deploy HELM_EXTRA_ARGS="\
-            --reuse-values \
-            --set hiro-operator.manager.image.repository=${IMAGE_REPO%%:*} \
-            --set hiro-operator.manager.image.tag=${IMAGE_REPO##*:} \
-            --set scheduler.plugin.image.repository=${SCHED_REPO%%:*} \
-            --set scheduler.plugin.image.tag=${SCHED_REPO##*:} \
-            ${{ inputs.extra_helm_args }}"
+          make helm-platform-deploy \
+            HELM_NAMESPACE="${{ vars.TARGET_NAMESPACE || 'hiro-adaptive-orchestrator-system' }}" \
+            HELM_PLATFORM_RELEASE="${{ vars.TARGET_RELEASE_NAME || 'hiro-adaptive-platform' }}" \
+            HELM_EXTRA_ARGS="\
+              --reuse-values \
+              --set hiro-operator.manager.image.repository=${IMAGE_REPO%%:*} \
+              --set hiro-operator.manager.image.tag=${IMAGE_REPO##*:} \
+              --set scheduler.plugin.image.repository=${SCHED_REPO%%:*} \
+              --set scheduler.plugin.image.tag=${SCHED_REPO##*:} \
+              --set scheduler.mode=${{ vars.SCHEDULER_MODE || 'none' }} \
+              --set webhook.enable=${{ vars.WEBHOOK_ENABLE || 'false' }} \
+              --set webhook.certManager.enable=${{ vars.WEBHOOK_CERT_MANAGER_ENABLE || 'false' }} \
+              --set prerequisites.certManager.enable=${{ vars.PREREQ_CERT_MANAGER_ENABLE || 'false' }} \
+              --set mockAgent.enable=${{ vars.MOCK_AGENT_ENABLE || 'false' }} \
+              ${{ vars.HELM_EXTRA_VALUES }} \
+              ${{ inputs.extra_helm_args }}"
 
       - name: Show release status
         if: always()
