@@ -1,4 +1,4 @@
-name: Test Full-Stack Chart
+name: Verify Full Chart
 #
 # CI-only verification of charts/hiro-adaptive-platform against a throwaway
 # Kind cluster created inside this workflow's own runner — mirrors
