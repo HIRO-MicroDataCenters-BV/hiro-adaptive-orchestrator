@@ -8,7 +8,7 @@
 # see charts/hiro-adaptive-platform/README.md), deploys the full stack, and
 # checks it came up healthy.
 #
-# Local counterpart to .github/workflows/verify-chart-platform.yml, which runs
+# Local counterpart to .github/workflows/platform-verify-chart.yml, which runs
 # the same deploy but with images actually pushed to Docker Hub first — this
 # script skips that round-trip for speed.
 #
@@ -102,7 +102,7 @@ check_prerequisites() {
 # the operator is built as a Docker image, not a local binary here). IMG is
 # read from config/manager/kustomization.yaml's own committed default rather
 # than hardcoded, so this can't clobber it — see .github/workflows/
-# verify-chart-platform.yml's manifests-drift-check job for the same pattern.
+# platform-verify-chart.yml's manifests-drift-check job for the same pattern.
 regenerate_manifests() {
   step "Linting..."
   make -C "$REPO_ROOT" lint

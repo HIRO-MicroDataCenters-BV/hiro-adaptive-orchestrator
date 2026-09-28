@@ -1,4 +1,4 @@
-name: Verify Full Chart
+name: Platform Verify Chart
 #
 # CI-only verification of charts/hiro-adaptive-platform against a throwaway
 # Kind cluster created inside this workflow's own runner — mirrors
@@ -7,7 +7,7 @@ name: Verify Full Chart
 # images only ever need to exist on the same runner for this one job.
 #
 # Deploying to a real target cluster is a separate concern — see
-# deploy-chart-platform.yml (kubeconfig from a repo secret, images pushed to
+# platform-deploy-chart.yml (kubeconfig from a repo secret, images pushed to
 # GHCR) rather than this file.
 
 on:

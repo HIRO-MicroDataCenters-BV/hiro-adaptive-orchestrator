@@ -1,7 +1,7 @@
-name: Deploy Full-Platform Chart
+name: Platform Deploy Chart
 #
 # Deploys charts/hiro-adaptive-platform to a REAL target cluster — not a
-# throwaway Kind cluster (that's verify-chart-platform.yml). Runs after a PR
+# throwaway Kind cluster (that's platform-verify-chart.yml). Runs after a PR
 # merges to main, or on demand via the "Run workflow" button.
 #
 # Images are built here and pushed to GHCR (this repo's own package
@@ -75,7 +75,7 @@ jobs:
           fi
           echo "TARGET_KUBECONFIG is set."
 
-  # Same check as verify-chart-platform.yml's job of the same name.
+  # Same check as platform-verify-chart.yml's job of the same name.
   manifests-drift-check:
     name: Verify generated manifests are up to date
     runs-on: ubuntu-latest
