@@ -1,0 +1,204 @@
+name: Deploy Full-Platform Chart
+#
+# Deploys charts/hiro-adaptive-platform to a REAL target cluster — not a
+# throwaway Kind cluster (that's test-chart-platform.yml). Runs after a PR
+# merges to main, or on demand via the "Run workflow" button.
+#
+# Images are built here and pushed to GHCR (this repo's own package
+# registry) using the built-in GITHUB_TOKEN — no separate registry
+# credential to manage. The target cluster's kubeconfig comes from the
+# TARGET_KUBECONFIG repo secret (masked in logs, unlike a repo Variable).
+#
+# helm upgrade uses --reuse-values, so a run only needs to specify what's
+# actually changing (here: the two image tags) — it won't silently reset
+# every other value on the live release back to values.yaml's defaults the
+# way a plain `helm upgrade` would. Use the "extra_helm_args" manual-trigger
+# input for anything else that needs changing for a given run.
+#
+# ─── Repo Secrets ─────────────────────────────────────────────────────────
+#   TARGET_KUBECONFIG      Required. Base64-encoded kubeconfig for the
+#                          target cluster (`kubectl config view --raw | base64`).
+#                          Used by deploy-target-cluster.
+#   GITHUB_TOKEN           Built-in, provided automatically by Actions — not
+#                          something you configure. Used to push to GHCR.
+#   DOCKERHUB_USERNAME     Only needed if you switch to the commented-out
+#   DOCKERHUB_PASSWORD     Docker Hub build-push jobs below instead of GHCR.
+#
+# ─── Manual-trigger inputs (workflow_dispatch) ────────────────────────────
+#   extra_helm_args        Optional. Extra --set/-f args appended to the
+#                          helm upgrade command for one-off overrides
+#                          (e.g. --set scheduler.mode=plugin).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      extra_helm_args:
+        description: "Extra --set/-f args appended to helm upgrade (e.g. --set scheduler.mode=plugin)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # Stage 1 — parallel, no cluster or images needed.
+  helm-lint:
+    name: Helm lint (umbrella chart)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Helm
+        run: make install-helm
+      - name: helm lint
+        run: make helm-platform-lint
+
+  helm-template-check:
+    name: Helm template-check (value combinations)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Helm
+        run: make install-helm
+      - name: Install kustomize
+        run: make kustomize
+      - name: helm-platform-template-check
+        run: make helm-platform-template-check
+
+  # Stage 2 — needs stage 1. Builds run in parallel with each other.
+  build-push-operator:
+    name: Build + push operator image
+    needs: [helm-lint, helm-template-check]
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.tag.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tag
+        run: echo "image=ghcr.io/${{ github.repository }}/hiro-adaptive-orchestrator-controller:sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+      - name: Build and push
+        run: make docker-build docker-push IMG=${{ steps.tag.outputs.image }}
+
+  build-push-scheduler:
+    name: Build + push scheduler image
+    needs: [helm-lint, helm-template-check]
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.tag.outputs.image }}
+    env:
+      SCHED_K8S_VERSION: v1.35.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tag
+        run: echo "image=ghcr.io/${{ github.repository }}/hiro-scheduler:sha-${{ github.sha }}-k8s${SCHED_K8S_VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Build and push
+        run: |
+          make docker-build-scheduler docker-push-scheduler \
+            SCHED_IMG=ghcr.io/${{ github.repository }}/hiro-scheduler \
+            SCHED_VERSION=sha-${{ github.sha }} \
+            SCHED_K8S_VERSION=$SCHED_K8S_VERSION
+
+  # Alternate stage 2 — Docker Hub instead of GHCR, using the
+  # DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD repo secrets (already configured).
+  # Commented out — GHCR (above) is the active push target for now. To
+  # switch: comment out build-push-operator/build-push-scheduler above,
+  # uncomment these two, and update deploy-target-cluster's `needs:` and its
+  # `needs.build-push-operator*`/`needs.build-push-scheduler*` references
+  # below to point at these job names instead.
+  #
+  # build-push-operator-dockerhub:
+  #   name: Build + push operator image (Docker Hub)
+  #   needs: [helm-lint, helm-template-check]
+  #   runs-on: ubuntu-latest
+  #   outputs:
+  #     image: ${{ steps.tag.outputs.image }}
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Log in to Docker Hub
+  #       uses: docker/login-action@v3
+  #       with:
+  #         username: ${{ secrets.DOCKERHUB_USERNAME }}
+  #         password: ${{ secrets.DOCKERHUB_PASSWORD }}
+  #     - id: tag
+  #       run: echo "image=hiroregistry/hiro-adaptive-orchestrator-controller:sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+  #     - name: Build and push
+  #       run: make docker-build docker-push IMG=${{ steps.tag.outputs.image }}
+  #
+  # build-push-scheduler-dockerhub:
+  #   name: Build + push scheduler image (Docker Hub)
+  #   needs: [helm-lint, helm-template-check]
+  #   runs-on: ubuntu-latest
+  #   outputs:
+  #     image: ${{ steps.tag.outputs.image }}
+  #   env:
+  #     SCHED_K8S_VERSION: v1.35.0
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Log in to Docker Hub
+  #       uses: docker/login-action@v3
+  #       with:
+  #         username: ${{ secrets.DOCKERHUB_USERNAME }}
+  #         password: ${{ secrets.DOCKERHUB_PASSWORD }}
+  #     - id: tag
+  #       run: echo "image=hiroregistry/hiro-scheduler:sha-${{ github.sha }}-k8s${SCHED_K8S_VERSION}" >> "$GITHUB_OUTPUT"
+  #     - name: Build and push
+  #       run: |
+  #         make docker-build-scheduler docker-push-scheduler \
+  #           SCHED_IMG=hiroregistry/hiro-scheduler \
+  #           SCHED_VERSION=sha-${{ github.sha }} \
+  #           SCHED_K8S_VERSION=$SCHED_K8S_VERSION
+
+  # Stage 3 — needs both builds. Deploys to the real target cluster.
+  deploy-target-cluster:
+    name: Deploy to target cluster
+    needs: [build-push-operator, build-push-scheduler]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        run: make install-helm
+
+      - name: Install kustomize
+        run: make kustomize
+
+      - name: Write kubeconfig
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.TARGET_KUBECONFIG }}" | base64 -d > "$HOME/.kube/config"
+        # TARGET_KUBECONFIG is expected base64-encoded, matching how
+        # `kubectl config view --raw | base64` produces it — avoids any
+        # multi-line-secret formatting issues in the GitHub UI.
+
+      - name: Deploy charts/hiro-adaptive-platform
+        run: |
+          export KUBECONFIG="$HOME/.kube/config"
+          IMAGE_REPO="${{ needs.build-push-operator.outputs.image }}"
+          SCHED_REPO="${{ needs.build-push-scheduler.outputs.image }}"
+          make helm-platform-deploy HELM_EXTRA_ARGS="\
+            --reuse-values \
+            --set hiro-operator.manager.image.repository=${IMAGE_REPO%%:*} \
+            --set hiro-operator.manager.image.tag=${IMAGE_REPO##*:} \
+            --set scheduler.plugin.image.repository=${SCHED_REPO%%:*} \
+            --set scheduler.plugin.image.tag=${SCHED_REPO##*:} \
+            ${{ inputs.extra_helm_args }}"
+
+      - name: Show release status
+        if: always()
+        run: |
+          export KUBECONFIG="$HOME/.kube/config"
+          make helm-platform-status
