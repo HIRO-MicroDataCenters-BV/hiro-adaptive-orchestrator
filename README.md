@@ -1373,35 +1373,6 @@ SCHED_K8S_VERSION=v1.36.0 hack/deploy_scheduler.sh
 
 The `pin_k8s_version.sh` script uses `go mod edit` to surgically update only the `k8s.io/kubernetes` require entry and the staging module replace directives — no full file rewrite.
 
-### Kubebuilder Version
-
-Three places must be kept in sync (not updated automatically):
-
-| File | Field |
-|------|-------|
-| `PROJECT` | `cliVersion:` |
-| `.github/workflows/platform-verify-chart.yml` | kubebuilder download URL/version |
-| `.github/workflows/platform-deploy-chart.yml` | kubebuilder download URL/version |
-
-```bash
-# 1. Update PROJECT's cliVersion and both workflow files' download URLs
-
-# 2. Update your local install too
-brew upgrade kubebuilder   # also bumps the shared `go` formula — see note below
-
-# 3. Regenerate and verify
-make manifests generate
-rm -rf dist && IMG=<repo>:<tag> kubebuilder edit --plugins=helm/v2-alpha --force
-make helm-platform-template-check
-```
-
-`brew upgrade kubebuilder` can silently bump your system's default `go` too
-(a shared Homebrew dependency), which may outpace what `golangci-lint`
-supports and break `make lint` with an export-data version error.
-`hack/deploy_full_stack_with_helm.sh` already pins `GOTOOLCHAIN` to
-`go.mod`'s own version to route around this; if you hit it elsewhere, set
-`GOTOOLCHAIN=go$(go list -m -f '{{.GoVersion}}')` for that command.
-
 ---
 
 <a id="project-initialization"></a>

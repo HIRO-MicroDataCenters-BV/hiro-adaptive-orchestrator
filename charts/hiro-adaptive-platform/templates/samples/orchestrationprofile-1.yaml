@@ -1,4 +1,4 @@
-{{- if .Values.samples.enabled }}
+{{- if and .Values.samples.enabled (.Capabilities.APIVersions.Has "orchestration.hiro.io/v1alpha1/OrchestrationProfile") }}
 # See orchestrationprofile-sample.yaml for the full comment on this sample
 # set. targetDeploymentName must match nginx-deployment-1.yaml's
 # samples.nginxApp1.deploymentName.
