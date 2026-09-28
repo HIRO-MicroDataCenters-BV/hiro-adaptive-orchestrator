@@ -91,6 +91,7 @@ rules:
 - apiGroups:
   - orchestration.hiro.io
   resources:
+  - demoresources
   - orchestrationprofiles
   verbs:
   - create
@@ -103,12 +104,14 @@ rules:
 - apiGroups:
   - orchestration.hiro.io
   resources:
+  - demoresources/finalizers
   - orchestrationprofiles/finalizers
   verbs:
   - update
 - apiGroups:
   - orchestration.hiro.io
   resources:
+  - demoresources/status
   - orchestrationprofiles/status
   verbs:
   - get
