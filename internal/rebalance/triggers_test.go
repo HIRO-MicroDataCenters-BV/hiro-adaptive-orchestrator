@@ -95,8 +95,6 @@ func testEAO(action, reason string, sufficient *bool) *unstructured.Unstructured
 	return eao
 }
 
-func boolPtr(b bool) *bool { return &b }
-
 // newTestTriggerEvaluator builds a TriggerEvaluator wired to a fake client
 // seeded with the given objects and a fake metrics clientset with no
 // NodeMetrics registered (CPU/Memory checks soft-fail to "no match" unless
@@ -135,7 +133,7 @@ func newTestTriggerEvaluator(t *testing.T, objs ...client.Object) *TriggerEvalua
 
 func TestTriggerEvaluator_EnergyInsufficient(t *testing.T) {
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
-	eao := testEAO("DeployImmediately", "", boolPtr(false))
+	eao := testEAO("DeployImmediately", "", new(false))
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao)
 
 	matched, result, err := evaluator.Evaluate(context.Background(), profile)
@@ -172,7 +170,7 @@ func TestTriggerEvaluator_EnergyDelayed(t *testing.T) {
 
 func TestTriggerEvaluator_EnergyWindowReachedWithPendingPod(t *testing.T) {
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
-	eao := testEAO("DeployImmediately", "", boolPtr(true))
+	eao := testEAO("DeployImmediately", "", new(true))
 	pending := testPod("app-a-pending", "", corev1.PodPending)
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, pending)
 
@@ -202,7 +200,7 @@ func TestTriggerEvaluator_EnergyWindowReachedWithPendingPod(t *testing.T) {
 // MinPendingPodAge must not be considered retry-eligible yet.
 func TestTriggerEvaluator_FreshPendingPodNotYetRetryEligible(t *testing.T) {
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
-	eao := testEAO("DeployImmediately", "", boolPtr(true))
+	eao := testEAO("DeployImmediately", "", new(true))
 	pending := testPod("app-a-pending", "", corev1.PodPending)
 	pending.CreationTimestamp = metav1.NewTime(time.Now())
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, pending)
@@ -227,7 +225,7 @@ func TestTriggerEvaluator_FreshPendingPodNotYetRetryEligible(t *testing.T) {
 // unscheduled" criteria retryPendingSchedule actually acts on.
 func TestTriggerEvaluator_ScheduledPendingPodNotRetryEligible(t *testing.T) {
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
-	eao := testEAO("DeployImmediately", "", boolPtr(true))
+	eao := testEAO("DeployImmediately", "", new(true))
 	pending := testPod("app-a-pending", "node-a", corev1.PodPending)
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, pending)
 
@@ -242,7 +240,7 @@ func TestTriggerEvaluator_ScheduledPendingPodNotRetryEligible(t *testing.T) {
 
 func TestTriggerEvaluator_EnergyOKNoPendingPod(t *testing.T) {
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
-	eao := testEAO("DeployImmediately", "", boolPtr(true))
+	eao := testEAO("DeployImmediately", "", new(true))
 	running := testPod("app-a-1", "node-a", corev1.PodRunning)
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, running)
 

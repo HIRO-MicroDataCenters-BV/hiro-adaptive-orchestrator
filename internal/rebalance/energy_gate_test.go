@@ -46,7 +46,7 @@ func TestClassifyScheduleTimeout(t *testing.T) {
 		{
 			name:        "energy awareness disabled stays Failed",
 			profile:     testProfileWithConditions(TriggerScheduled), // Awareness.Energy: false
-			objs:        []client.Object{testEAO("Waiting", "demo: closed", boolPtr(false))},
+			objs:        []client.Object{testEAO("Waiting", "demo: closed", new(false))},
 			wantOutcome: OutcomeFailed,
 			wantReason:  timeoutReason,
 		},
@@ -67,21 +67,21 @@ func TestClassifyScheduleTimeout(t *testing.T) {
 		{
 			name:        "sufficient true stays Failed",
 			profile:     testEnergyAwareProfile(),
-			objs:        []client.Object{testEAO("DeployImmediately", "window open", boolPtr(true))},
+			objs:        []client.Object{testEAO("DeployImmediately", "window open", new(true))},
 			wantOutcome: OutcomeFailed,
 			wantReason:  timeoutReason,
 		},
 		{
 			name:        "sufficient false with a decision reason becomes Deferred",
 			profile:     testEnergyAwareProfile(),
-			objs:        []client.Object{testEAO("Waiting", "demo: energy window closed", boolPtr(false))},
+			objs:        []client.Object{testEAO("Waiting", "demo: energy window closed", new(false))},
 			wantOutcome: OutcomeDeferred,
 			wantReason:  timeoutReason + " (energy gate closed: demo: energy window closed)",
 		},
 		{
 			name:        "sufficient false with no decision reason falls back to generic text",
 			profile:     testEnergyAwareProfile(),
-			objs:        []client.Object{testEAO("Waiting", "", boolPtr(false))},
+			objs:        []client.Object{testEAO("Waiting", "", new(false))},
 			wantOutcome: OutcomeDeferred,
 			wantReason:  timeoutReason + " (energy gate closed: energy supply reported insufficient)",
 		},
