@@ -177,9 +177,16 @@ jobs:
 
       - name: Check PlacementServer health
         run: |
-          kubectl -n $HELM_NAMESPACE run verify-curl --rm -i --restart=Never \
-            --image=curlimages/curl:latest -- \
-            curl -sf http://hiro-adaptive-platform-hiro-operator-controller-manager-placement-service.$HELM_NAMESPACE.svc.cluster.local:8090/healthz
+          for attempt in $(seq 1 10); do
+            if kubectl -n $HELM_NAMESPACE run "verify-curl-${attempt}" --rm -i --restart=Never \
+              --image=curlimages/curl:latest -- curl -sf "$PLACEMENT_SERVER_URL/healthz" >/dev/null 2>&1; then
+              echo "PlacementServer is healthy."
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::PlacementServer at $PLACEMENT_SERVER_URL did not become healthy after 10 attempts."
+          exit 1
 
       - name: Show pods on failure
         if: failure()
