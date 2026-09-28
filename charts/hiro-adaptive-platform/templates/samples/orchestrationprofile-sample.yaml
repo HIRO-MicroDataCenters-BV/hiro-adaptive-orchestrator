@@ -1,8 +1,12 @@
-{{- if .Values.samples.enabled }}
+{{- if and .Values.samples.enabled (.Capabilities.APIVersions.Has "orchestration.hiro.io/v1alpha1/OrchestrationProfile") }}
 # Sample OrchestrationProfile CRs (cluster-scoped), for demos/eval — matches
 # config/samples/, applied unconditionally by hack/deploy_operator.sh today;
 # this chart makes it opt-in instead (off by default) since a production
 # install shouldn't get demo workloads by default.
+#
+# Also gated on the CRD being registered — on a first install it isn't yet
+# (same release, same batch), so these skip that once; the next `helm
+# upgrade` picks them up once the CRD exists.
 #
 # targetDeploymentName is a plain string reference (applicationRef), not a
 # resource this file creates — it must match the actual Deployment name set
