@@ -28,20 +28,18 @@ dependencies:
   # README for why (uninstalling this release would remove them too).
   #
   # Each is aliased so its passthrough config lives in one clearly-named
-  # values.yaml block (same pattern as hiro-operator above) — but the
-  # enable flag itself lives under prerequisites.<name>.enable, NOT inside
-  # that aliased block: some of these charts (cert-manager confirmed)
-  # enforce a strict values schema that rejects unknown top-level keys, so
-  # an "enable" key living alongside their real config breaks validation.
-  # Decoupling the condition path from the passthrough key sidesteps that
-  # regardless of how strict any given dependency's schema is.
+  # values.yaml block — enable flag lives under prerequisites.<name>.enable
+  # instead, since cert-manager's schema rejects an unknown "enable" key.
+  # Aliases must stay lowercase/DNS-safe: both charts derive resource names
+  # from .Chart.Name (= the alias), and "certManager" broke that with
+  # invalid uppercase resource names.
   - name: cert-manager
-    alias: certManager
+    alias: cert-manager
     version: ">=1.17.0"
     repository: "https://charts.jetstack.io"
     condition: prerequisites.certManager.enable
   - name: metrics-server
-    alias: metricsServer
+    alias: metrics-server
     version: ">=3.12.0"
     repository: "https://kubernetes-sigs.github.io/metrics-server/"
     condition: prerequisites.metricsServer.enable

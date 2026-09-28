@@ -134,8 +134,8 @@ prerequisites:
   metricsServer: { enable: false }
   prometheus: { enable: false }
 
-certManager: { crds: { enabled: true } }        # passthrough to the cert-manager subchart
-metricsServer: { args: [--kubelet-insecure-tls] } # passthrough to the metrics-server subchart
+cert-manager: { crds: { enabled: true } }          # passthrough to the cert-manager subchart
+metrics-server: { args: [--kubelet-insecure-tls] } # passthrough to the metrics-server subchart
 prometheus: { prometheus: { prometheusSpec: { ... } } } # passthrough to kube-prometheus-stack
 ```
 

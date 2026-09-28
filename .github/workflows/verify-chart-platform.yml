@@ -1,0 +1,186 @@
+name: Test Full-Stack Chart
+#
+# CI-only verification of charts/hiro-adaptive-platform against a throwaway
+# Kind cluster created inside this workflow's own runner — mirrors
+# hack/deploy_full_stack_with_helm.sh. No registry involved: images are
+# built and `kind load`ed directly, since the Kind cluster and the built
+# images only ever need to exist on the same runner for this one job.
+#
+# Deploying to a real target cluster is a separate concern — see
+# deploy-chart-platform.yml (kubeconfig from a repo secret, images pushed to
+# GHCR) rather than this file.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # Stage 0 — catches stale generated output (dist/chart, config/crd,
+  # config/rbac, api/**/zz_generated.deepcopy.go) that every later stage
+  # would otherwise silently lint/deploy as if it were current. Fail-only,
+  # no auto-commit (would need contents: write and doesn't work for fork
+  # PRs) — prints exact fix commands instead.
+  manifests-drift-check:
+    name: Verify generated manifests are up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Pinned to PROJECT's cliVersion, not "latest" — avoids a tooling
+      # version bump causing a false-positive diff.
+      - name: Install kubebuilder v4.16.0
+        run: |
+          curl -Lo kubebuilder "https://github.com/kubernetes-sigs/kubebuilder/releases/download/v4.16.0/kubebuilder_$(go env GOOS)_$(go env GOARCH)"
+          chmod +x kubebuilder
+          sudo mv kubebuilder /usr/local/bin/kubebuilder
+
+      - name: Install kustomize
+        run: make kustomize
+
+      - name: make manifests generate
+        run: make manifests generate
+
+      # IMG read from the committed default (config/manager/kustomization.yaml)
+      # rather than hardcoded — this is unrelated to whatever ephemeral
+      # tags the build/deploy jobs below push their own images as.
+      - name: Regenerate dist/chart
+        run: |
+          IMG_NAME=$(awk '/newName:/{print $2}' config/manager/kustomization.yaml)
+          IMG_TAG=$(awk '/newTag:/{print $2}' config/manager/kustomization.yaml)
+          export IMG="${IMG_NAME}:${IMG_TAG}"
+          rm -rf dist
+          kubebuilder edit --plugins=helm/v2-alpha --force
+
+      - name: Fail if regeneration produced any diff
+        run: |
+          if ! git diff --exit-code -- config/ api/ dist/; then
+            IMG_NAME=$(awk '/newName:/{print $2}' config/manager/kustomization.yaml)
+            IMG_TAG=$(awk '/newTag:/{print $2}' config/manager/kustomization.yaml)
+            echo "::error::Generated manifests/code are out of date (diff above). Run locally and commit:"
+            echo ""
+            echo "  make manifests generate"
+            echo "  export IMG=${IMG_NAME}:${IMG_TAG}"
+            echo "  rm -rf dist"
+            echo "  kubebuilder edit --plugins=helm/v2-alpha --force"
+            echo "  git add config api dist && git commit -m 'Regenerate manifests'"
+            exit 1
+          fi
+
+  # Stage 1 — needs stage 0. Parallel, no cluster or images needed.
+  helm-lint:
+    name: Helm lint (umbrella chart)
+    needs: manifests-drift-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Helm
+        run: make install-helm
+      - name: helm lint
+        run: make helm-platform-lint
+
+  helm-template-check:
+    name: Helm template-check (value combinations)
+    needs: manifests-drift-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Helm
+        run: make install-helm
+      - name: Install kustomize
+        run: make kustomize
+      - name: helm-platform-template-check
+        run: make helm-platform-template-check
+
+  # Stage 2 — needs stage 1. Build, load, and deploy all happen in this one
+  # job because `kind load docker-image` only works within the same runner
+  # that built the image; splitting this across jobs would need
+  # upload-artifact/download-artifact round-tripping for no benefit here.
+  verify-kind-deploy:
+    name: Build images, load into Kind, deploy full stack
+    needs: [helm-lint, helm-template-check]
+    runs-on: ubuntu-latest
+    env:
+      SCHED_K8S_VERSION: v1.35.0
+      HELM_NAMESPACE: hiro-adaptive-orchestrator-system
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the latest version of kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Create kind cluster
+        run: kind create cluster
+
+      - name: Install Helm
+        run: make install-helm
+
+      - name: Install kustomize
+        run: make kustomize
+
+      - name: Build operator image
+        run: make docker-build IMG=hiro-operator:ci
+
+      - name: Build scheduler image
+        run: make docker-build-scheduler SCHED_IMG=hiro-scheduler SCHED_VERSION=ci SCHED_K8S_VERSION=$SCHED_K8S_VERSION
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image hiro-operator:ci
+          kind load docker-image hiro-scheduler:ci-k8s$SCHED_K8S_VERSION
+
+      # Phase 1: operator only. scheduler.plugin.placementServer.url has no
+      # default (the operator's Service name can't be known before the
+      # operator exists) and webhook.enable requires scheduler.mode=plugin —
+      # both get turned on in phase 2, once that Service is actually live.
+      - name: Deploy charts/hiro-adaptive-platform (phase 1 — operator)
+        run: |
+          make helm-platform-deploy HELM_NAMESPACE=$HELM_NAMESPACE HELM_EXTRA_ARGS="\
+            --set hiro-operator.manager.image.repository=hiro-operator \
+            --set hiro-operator.manager.image.tag=ci \
+            --set hiro-operator.manager.image.pullPolicy=IfNotPresent \
+            --set prerequisites.certManager.enable=true \
+            --set mockAgent.enable=true \
+            --set samples.enabled=true"
+
+      # Same lookup charts/hiro-adaptive-platform/README.md documents doing
+      # by hand: find the PlacementServer Service by label now that it exists.
+      - name: Resolve PlacementServer Service
+        run: |
+          SVC=$(kubectl -n $HELM_NAMESPACE get svc \
+            -l app.kubernetes.io/component=placement-server \
+            -o jsonpath='{.items[0].metadata.name}')
+          echo "PLACEMENT_SERVER_URL=http://${SVC}.${HELM_NAMESPACE}.svc.cluster.local:8090" >> "$GITHUB_ENV"
+
+      # Phase 2: --reuse-values keeps phase 1's settings (operator image,
+      # mockAgent, cert-manager, samples) — without it this `helm upgrade`
+      # would reset everything not repeated below back to values.yaml's
+      # defaults.
+      - name: Deploy charts/hiro-adaptive-platform (phase 2 — scheduler + webhook)
+        run: |
+          make helm-platform-deploy HELM_NAMESPACE=$HELM_NAMESPACE HELM_EXTRA_ARGS="\
+            --reuse-values \
+            --set scheduler.mode=plugin \
+            --set scheduler.plugin.image.repository=hiro-scheduler \
+            --set scheduler.plugin.image.tag=ci-k8s$SCHED_K8S_VERSION \
+            --set scheduler.plugin.image.pullPolicy=IfNotPresent \
+            --set scheduler.plugin.placementServer.url=$PLACEMENT_SERVER_URL \
+            --set webhook.enable=true \
+            --set webhook.certManager.enable=true"
+
+      - name: Check PlacementServer health
+        run: |
+          kubectl -n $HELM_NAMESPACE run verify-curl --rm -i --restart=Never \
+            --image=curlimages/curl:latest -- \
+            curl -sf http://hiro-adaptive-platform-hiro-operator-controller-manager-placement-service.$HELM_NAMESPACE.svc.cluster.local:8090/healthz
+
+      - name: Show pods on failure
+        if: failure()
+        run: kubectl -n $HELM_NAMESPACE get pods -o wide

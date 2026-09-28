@@ -54,8 +54,17 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 
 cat > "$WORK_DIR/all.yaml"
 
+# Anchored on Helm's own postrenderer.helm.sh/postrender-filename
+# annotation (added to every resource on this exact path — Helm strips
+# "# Source:" comments before invoking a post-renderer, they only appear in
+# `helm template`'s own CLI text output, not here), not a bare
+# "kind: MutatingWebhookConfiguration" grep — cert-manager's own bundled
+# chart (prerequisites.certManager.enable=true) renders its own
+# MutatingWebhookConfiguration too, which a bare kind: match can't tell
+# apart from ours, wrongly triggering these patches even when
+# webhook.enable=false.
 webhook_active=false
-if grep -q 'kind: MutatingWebhookConfiguration' "$WORK_DIR/all.yaml"; then
+if grep -q "postrenderer.helm.sh/postrender-filename: 'hiro-adaptive-platform/templates/webhook/manifests.yaml'" "$WORK_DIR/all.yaml"; then
   webhook_active=true
 fi
 
@@ -94,11 +103,18 @@ fi
 
 if [ -n "$scheduler_name" ]; then
   cat > "$WORK_DIR/manager_scheduler_name_patch.yaml" <<EOF
-- op: add
-  path: /spec/template/spec/containers/0/env/-
-  value:
-    name: HIRO_SCHEDULER_NAME
-    value: "${scheduler_name}"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: manager-scheduler-name-patch-target
+spec:
+  template:
+    spec:
+      containers:
+        - name: manager
+          env:
+            - name: HIRO_SCHEDULER_NAME
+              value: "${scheduler_name}"
 EOF
   patches+=$'- path: '"$WORK_DIR/manager_scheduler_name_patch.yaml"$'\n  target:\n'"${OPERATOR_DEPLOYMENT_TARGET}"$'\n'
 fi

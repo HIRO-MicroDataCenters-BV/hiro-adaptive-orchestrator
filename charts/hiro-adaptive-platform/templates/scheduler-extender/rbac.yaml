@@ -8,23 +8,24 @@ render regardless of mode, so keeping it unconditional avoids having to
 keep two different gating conditions in sync.
 */}}
 # One ServiceAccount shared by all extender-related hook Jobs (prep, patch,
-# verify, restore, cleanup). The patch/restore Jobs are privileged and only
-# ever touch the control-plane node's filesystem via hostPath — they make no
-# Kubernetes API calls, so they don't actually need any of the RBAC below,
-# but reuse this same ServiceAccount for simplicity rather than a separate
-# unbound one.
+# verify, restore, cleanup). Lives in kube-system, not this release's own
+# namespace — every one of those Jobs' Pods runs in kube-system (they patch
+# the control-plane's kube-scheduler), and a Pod's serviceAccountName can
+# only resolve a ServiceAccount that exists in the Pod's own namespace.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ .Release.Name }}-hiro-extender
-  namespace: {{ .Release.Namespace }}
+  namespace: kube-system
   labels:
     app.kubernetes.io/name: hiro-extender
     app.kubernetes.io/managed-by: {{ .Release.Service }}
     app.kubernetes.io/instance: {{ .Release.Name }}
 ---
 # Prep Job: resolve the PlacementServer Service's ClusterIP (by label
-# selector, in this release's own namespace).
+# selector, in this release's own namespace) — cross-namespace subject
+# reference to the kube-system ServiceAccount above (a RoleBinding may bind
+# a subject from any namespace; only a Pod's serviceAccountName cannot).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -55,13 +56,11 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ .Release.Name }}-hiro-extender
-    namespace: {{ .Release.Namespace }}
+    namespace: kube-system
 ---
 # Prep Job (create/update the two ConfigMaps) and wait/verify Job (poll the
-# kube-scheduler pod for its restart) both need access in kube-system — a
-# different namespace than this release's own, so this Role+RoleBinding
-# pair lives there instead, referencing the ServiceAccount above as a
-# cross-namespace subject (standard Kubernetes RBAC pattern).
+# kube-scheduler pod for its restart) both need access in kube-system too —
+# same-namespace binding now that the ServiceAccount itself lives here.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -95,4 +94,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ .Release.Name }}-hiro-extender
-    namespace: {{ .Release.Namespace }}
+    namespace: kube-system

@@ -140,12 +140,12 @@ prerequisites:
 ## Chart.yaml alias) — harmless while the matching prerequisites.* stays
 ## off. The enable flags live in prerequisites above, not here, because
 ## cert-manager's chart schema rejects unknown keys like "enable".
-certManager:
+cert-manager:
   # cert-manager's chart doesn't install its own CRDs by default.
   crds:
     enabled: true
 
-metricsServer:
+metrics-server:
   # Kind/minikube/k3d only — kubelet certs aren't trusted there.
   args:
     - --kubelet-insecure-tls
@@ -204,7 +204,7 @@ scheduler:
   # — see templates/scheduler-extender/ and the chart README.
   extender:
     images:
-      kubectl: bitnami/kubectl:1.31
+      kubectl: alpine/k8s:1.31.13
       patcher: python:3-slim
     placementServer:
       port: 8090

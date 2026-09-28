@@ -1,17 +1,19 @@
-# Chart-owned — NOT shared with config/default-with-webhook (that overlay's
-# manager_webhook_patch.yaml only adds the cert volume/mount/port/arg, never
-# touches env). Applied by render.sh only when it detects the webhook is
-# active, appending a second ENABLE_WEBHOOKS entry; Kubernetes allows
-# duplicate env names in a PodSpec and uses the last one, so this safely
-# overrides manager.env's static "false" default without editing it.
+# Strategic-merge patch (not JSON6902): matches env's patchMergeKey (name)
+# and overwrites manager.env's static "false" default in place, instead of
+# appending a second entry — a duplicate name is fine for `helm install`
+# but makes `helm upgrade` fail its patch computation.
 #
-# Deliberately unconditional (not "wait for cert-manager first" like
-# hack/deploy_full_stack.sh's Phase 9) — the operator may briefly
-# CrashLoopBackOff until cert-manager issues the cert, which `helm
-# install/upgrade --wait --timeout` tolerates. Simpler than replicating the
-# script's imperative wait-then-flip sequencing in a static patch.
-- op: add
-  path: /spec/template/spec/containers/0/env/-
-  value:
-    name: ENABLE_WEBHOOKS
-    value: "true"
+# Unconditional on purpose — the operator may briefly CrashLoopBackOff until
+# cert-manager issues the cert, which `helm ... --wait --timeout` tolerates.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: manager-enable-webhooks-patch-target
+spec:
+  template:
+    spec:
+      containers:
+        - name: manager
+          env:
+            - name: ENABLE_WEBHOOKS
+              value: "true"
