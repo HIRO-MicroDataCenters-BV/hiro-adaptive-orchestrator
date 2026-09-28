@@ -257,9 +257,11 @@ Deployment (from the `dist/chart` subchart) can't be hand-edited:
 `postrender/render.sh` handles both: it self-detects which feature(s) are
 active by scanning Helm's own rendered output (no separate values needed),
 and patches the operator's already-rendered Deployment via `kustomize`
-(appending duplicate env entries — Kubernetes uses the last one, so this
-safely overrides `manager.env`'s static defaults without touching them).
-When neither feature is active it passes the input straight through.
+strategic-merge patches, which override `manager.env`'s static defaults by
+matching on each entry's `name` in place — not a plain JSON6902 append,
+which would produce two entries with the same `name` and make `helm
+upgrade`'s patch computation fail outright. When neither feature is active
+it passes the input straight through.
 
 **Helm v4 changed what `--post-renderer` accepts**: it now takes the name
 of an installed plugin (type `postrenderer/v1`), not a raw script path like
@@ -340,6 +342,30 @@ in place. To remove it once nothing needs it anymore:
 ```sh
 kubectl delete crd orchestrationprofiles.orchestration.hiro.io
 ```
+
+## Verification and CI
+
+Three ways to exercise this chart end-to-end, beyond `helm lint`/`helm
+template`:
+
+- **`hack/deploy_full_stack_with_helm.sh`** — local, against a Kind cluster.
+  Regenerates `dist/chart` from source, builds the operator + scheduler
+  images, loads them into Kind (no registry needed), deploys in two phases
+  (operator first, then scheduler plugin + webhook once the operator's
+  Service exists), and health-checks the result. Writes a standalone
+  kubeconfig to `.kind-kubeconfig-<cluster-name>.yaml` and prints it.
+  Options: `KIND_CLUSTER_NAME`, `SCHED_K8S_VERSION`. Usage:
+  `hack/deploy_full_stack_with_helm.sh [deploy|clean]`.
+- **`.github/workflows/platform-verify-chart.yml`** — same idea in CI, on
+  every push/PR, against a throwaway Kind cluster created inside the job.
+  Runs a manifests-drift check first (fails if `dist/chart`/`config`/`api`
+  are out of date with the source), then `helm lint`/`helm
+  template-check`/the same two-phase deploy.
+- **`.github/workflows/platform-deploy-chart.yml`** — deploys to a real
+  target cluster. Runs on push to `main`, or manually via "Run workflow".
+  Builds and pushes images to GHCR, then deploys using a kubeconfig from the
+  `TARGET_KUBECONFIG` repo secret. See the file's own header comment for the
+  full list of repo Secrets/Variables it reads.
 
 ## When to use this vs. `deploy_full_stack.sh`
 

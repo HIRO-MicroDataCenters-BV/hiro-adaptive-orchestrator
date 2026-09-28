@@ -61,7 +61,7 @@ graph LR
 - [Testing](#testing)
 - [Development Workflow](#development-workflow)
 - [Project Structure](#project-structure)
-- [Upgrading Go or Kubernetes Version](#upgrading-go-or-kubernetes-version)
+- [Upgrading Go, Kubernetes, or Kubebuilder Version](#upgrading-go-or-kubernetes-version)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -1321,12 +1321,13 @@ test/e2e/                              # End-to-end tests (Kind)
 ---
 
 <a id="upgrading-go-or-kubernetes-version"></a>
-## ⬆️ <u>Upgrading Go or Kubernetes Version</u>
+## ⬆️ <u>Upgrading Go, Kubernetes, or Kubebuilder Version</u>
 
 ```mermaid
 flowchart LR
     Go["Go version bump"] --> G1["go.mod"] --> G2["Makefile<br/>GOLANGCI_LINT_VERSION"] --> G3[".custom-gcl.yml"] --> G4["make lint"]
     K8s["K8s version bump<br/>(scheduler plugin)"] --> K1["pin-k8s-version"] --> K2["go mod tidy"] --> K3["docker-build-scheduler"] --> K4["deploy_scheduler.sh"]
+    KB["Kubebuilder version bump"] --> KB1["PROJECT<br/>cliVersion"] --> KB2["2 CI workflows<br/>(install step)"] --> KB3["kubebuilder edit<br/>--force"]
 ```
 
 ### Go Version
@@ -1371,6 +1372,35 @@ SCHED_K8S_VERSION=v1.36.0 hack/deploy_scheduler.sh
 ```
 
 The `pin_k8s_version.sh` script uses `go mod edit` to surgically update only the `k8s.io/kubernetes` require entry and the staging module replace directives — no full file rewrite.
+
+### Kubebuilder Version
+
+Three places must be kept in sync (not updated automatically):
+
+| File | Field |
+|------|-------|
+| `PROJECT` | `cliVersion:` |
+| `.github/workflows/platform-verify-chart.yml` | kubebuilder download URL/version |
+| `.github/workflows/platform-deploy-chart.yml` | kubebuilder download URL/version |
+
+```bash
+# 1. Update PROJECT's cliVersion and both workflow files' download URLs
+
+# 2. Update your local install too
+brew upgrade kubebuilder   # also bumps the shared `go` formula — see note below
+
+# 3. Regenerate and verify
+make manifests generate
+rm -rf dist && IMG=<repo>:<tag> kubebuilder edit --plugins=helm/v2-alpha --force
+make helm-platform-template-check
+```
+
+`brew upgrade kubebuilder` can silently bump your system's default `go` too
+(a shared Homebrew dependency), which may outpace what `golangci-lint`
+supports and break `make lint` with an export-data version error.
+`hack/deploy_full_stack_with_helm.sh` already pins `GOTOOLCHAIN` to
+`go.mod`'s own version to route around this; if you hit it elsewhere, set
+`GOTOOLCHAIN=go$(go list -m -f '{{.GoVersion}}')` for that command.
 
 ---
 
