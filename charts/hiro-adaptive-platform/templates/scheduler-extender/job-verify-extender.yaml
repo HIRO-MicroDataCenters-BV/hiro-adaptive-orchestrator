@@ -1,0 +1,59 @@
+{{- if eq .Values.scheduler.mode "extender" }}
+# Step 3 of 3. Not privileged — only talks to the Kubernetes API. Confirms
+# kube-scheduler picked up the patch from job-patch-kube-scheduler.yaml
+# (kubelet detects the manifest change via inotify and restarts the
+# container on its own — this Job only observes and verifies, it doesn't
+# trigger anything). Failing here fails `helm install/upgrade --wait`
+# instead of silently leaving a half-configured extender in place.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-hiro-extender-verify
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: hiro-extender
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "2"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 0
+  activeDeadlineSeconds: 180
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ .Release.Name }}-hiro-extender
+      containers:
+        - name: verify
+          image: {{ .Values.scheduler.extender.images.kubectl }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              CP_NODE=$(kubectl get node -l node-role.kubernetes.io/control-plane \
+                -o jsonpath='{.items[0].metadata.name}')
+              POD_NAME="kube-scheduler-${CP_NODE}"
+              echo "Waiting for ${POD_NAME} to be Ready with the extender config live..."
+
+              i=0
+              while [ "$i" -lt 24 ]; do
+                READY=$(kubectl get pod "$POD_NAME" -n kube-system \
+                  -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
+                CMD=$(kubectl get pod "$POD_NAME" -n kube-system \
+                  -o jsonpath='{.spec.containers[0].command}' 2>/dev/null || echo "")
+                if [ "$READY" = "true" ] && echo "$CMD" | grep -q "hiro-scheduler-config"; then
+                  echo "  ✓ ${POD_NAME} is Ready with --config pointed at the extender config."
+                  exit 0
+                fi
+                i=$((i + 1))
+                sleep 5
+              done
+
+              echo "ERROR: ${POD_NAME} did not become Ready with the extender --config flag" \
+                   "within the timeout. Last observed command: ${CMD:-<none>}" >&2
+              exit 1
+{{- end }}

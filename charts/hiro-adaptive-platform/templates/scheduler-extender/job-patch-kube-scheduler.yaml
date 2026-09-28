@@ -1,0 +1,85 @@
+{{- if eq .Values.scheduler.mode "extender" }}
+# Step 2 of 3. Privileged and runs on the control-plane node — mounts
+# /etc/kubernetes/manifests read/write to patch the kube-scheduler static
+# pod manifest directly (see files/patch_scheduler_static_pod.py, a copy of
+# hack/patch_scheduler_static_pod.py). Makes no Kubernetes API calls.
+#
+# SCHEDULER_CONFIG_PATH (the path the config is written to on the node, and
+# where the static pod mounts it from) is intentionally fixed, not a value
+# — the patch script's idempotency check only matches the config
+# volumeMount/volume by NAME, not by path, so a path that changed between
+# runs would leave a stale mount pointing at the old location while still
+# appending a second, conflicting --config= flag to the command.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-hiro-extender-patch
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: hiro-extender
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ .Release.Name }}-hiro-extender
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+      volumes:
+        - name: host-manifests
+          hostPath:
+            path: /etc/kubernetes/manifests
+            type: Directory
+        - name: host-etc-kubernetes
+          hostPath:
+            path: /etc/kubernetes
+            type: Directory
+        - name: hiro-scheduler-config
+          configMap:
+            name: {{ .Release.Name }}-hiro-scheduler-config
+        - name: patch-script
+          configMap:
+            name: {{ .Release.Name }}-hiro-patch-script
+            defaultMode: 0755
+      containers:
+        - name: patcher
+          image: {{ .Values.scheduler.extender.images.patcher }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "Installing pyyaml..."
+              pip install -q pyyaml
+              echo "Copying scheduler config to node filesystem..."
+              cp /hiro-config/scheduler-config.yaml /host-etc-kubernetes/hiro-scheduler-config.yaml
+              echo "Running patch script..."
+              python3 /scripts/patch.py
+          env:
+            - name: MANIFEST_PATH
+              value: /host-manifests/kube-scheduler.yaml
+            - name: BACKUP_PATH
+              value: /host-etc-kubernetes/kube-scheduler.yaml.hiro-backup
+            - name: SCHEDULER_CONFIG_PATH
+              value: /etc/kubernetes/hiro-scheduler-config.yaml
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          volumeMounts:
+            - name: host-manifests
+              mountPath: /host-manifests
+            - name: host-etc-kubernetes
+              mountPath: /host-etc-kubernetes
+            - name: hiro-scheduler-config
+              mountPath: /hiro-config
+            - name: patch-script
+              mountPath: /scripts
+{{- end }}

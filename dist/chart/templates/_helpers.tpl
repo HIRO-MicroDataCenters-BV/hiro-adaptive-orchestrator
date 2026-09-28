@@ -48,3 +48,16 @@ Dynamically calculates safe truncation to ensure total name length <= 63 chars.
 {{- printf "%s-%s" $fullname $suffix | trunc 63 | trimSuffix "-" }}
 {{- end }}
 {{- end }}
+
+{{/*
+ServiceAccount name to use.
+When enabled, use the chart's ServiceAccount name.
+When disabled, serviceAccount.name must be set; use "default" to pick the namespace default ServiceAccount.
+*/}}
+{{- define "hiro-adaptive-orchestrator.serviceAccountName" -}}
+{{- if .Values.serviceAccount.enabled }}
+{{- include "hiro-adaptive-orchestrator.resourceName" (dict "suffix" "controller-manager" "context" .) }}
+{{- else }}
+{{- required "serviceAccount.name is required when serviceAccount.enabled=false (set name: default explicitly to use the namespace default ServiceAccount)" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}

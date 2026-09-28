@@ -1,115 +1,122 @@
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.rbac.namespaced }}
+kind: Role
+{{- else }}
 kind: ClusterRole
+{{- end }}
 metadata:
-    name: {{ include "hiro-adaptive-orchestrator.resourceName" (dict "suffix" "manager-role" "context" $) }}
+{{- if .Values.rbac.namespaced }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}
+  name: {{ include "hiro-adaptive-orchestrator.resourceName" (dict "suffix" "manager-role" "context" $) }}
 rules:
-    - apiGroups:
-        - ""
-      resources:
-        - events
-      verbs:
-        - create
-        - patch
-    - apiGroups:
-        - ""
-      resources:
-        - nodes
-      verbs:
-        - get
-        - list
-        - watch
-    - apiGroups:
-        - ""
-      resources:
-        - pods
-      verbs:
-        - delete
-        - get
-        - list
-        - watch
-    - apiGroups:
-        - ""
-      resources:
-        - pods/eviction
-      verbs:
-        - create
-    - apiGroups:
-        - ""
-      resources:
-        - pods/resize
-      verbs:
-        - update
-    - apiGroups:
-        - apps
-      resources:
-        - deployments
-        - statefulsets
-      verbs:
-        - get
-        - list
-        - update
-        - watch
-    - apiGroups:
-        - apps
-      resources:
-        - replicasets
-      verbs:
-        - get
-        - list
-        - watch
-    - apiGroups:
-        - autoscaling
-      resources:
-        - horizontalpodautoscalers
-      verbs:
-        - get
-        - list
-        - watch
-    - apiGroups:
-        - batch
-      resources:
-        - jobs
-      verbs:
-        - get
-        - list
-        - watch
-    - apiGroups:
-        - eas.hiro.io
-      resources:
-        - energyawareorchestrations
-      verbs:
-        - get
-        - list
-        - watch
-    - apiGroups:
-        - metrics.k8s.io
-      resources:
-        - nodes
-      verbs:
-        - get
-    - apiGroups:
-        - orchestration.hiro.io
-      resources:
-        - orchestrationprofiles
-      verbs:
-        - create
-        - delete
-        - get
-        - list
-        - patch
-        - update
-        - watch
-    - apiGroups:
-        - orchestration.hiro.io
-      resources:
-        - orchestrationprofiles/finalizers
-      verbs:
-        - update
-    - apiGroups:
-        - orchestration.hiro.io
-      resources:
-        - orchestrationprofiles/status
-      verbs:
-        - get
-        - patch
-        - update
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/eviction
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
+  - pods/resize
+  verbs:
+  - update
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - replicasets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - autoscaling
+  resources:
+  - horizontalpodautoscalers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - eas.hiro.io
+  resources:
+  - energyawareorchestrations
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - metrics.k8s.io
+  resources:
+  - nodes
+  verbs:
+  - get
+- apiGroups:
+  - orchestration.hiro.io
+  resources:
+  - orchestrationprofiles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - orchestration.hiro.io
+  resources:
+  - orchestrationprofiles/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - orchestration.hiro.io
+  resources:
+  - orchestrationprofiles/status
+  verbs:
+  - get
+  - patch
+  - update

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # hack/patch_scheduler_static_pod.py
 #
+# NOTE: charts/hiro-adaptive-platform/files/patch_scheduler_static_pod.py is
+# a manual COPY of this file (the Helm extender hook Jobs' patch step) — if
+# you change the logic here, update that copy too.
+#
 # Idempotently patches /etc/kubernetes/manifests/kube-scheduler.yaml to
 # register the HIRO PlacementServer as a scheduler extender.
 #

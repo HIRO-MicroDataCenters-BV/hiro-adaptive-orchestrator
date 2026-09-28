@@ -1,0 +1,49 @@
+{{- if .Values.samples.enabled }}
+# Target of orchestrationprofile-sample.yaml and orchestrationprofile-1.yaml
+# (via their targetDeploymentName — kept in sync by hand, see those files).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.samples.nginxApp1.deploymentName }}
+  namespace: {{ .Values.samples.namespace }}
+  labels:
+    app: {{ .Values.samples.nginxApp1.deploymentName }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Values.samples.nginxApp1.deploymentName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.samples.nginxApp1.deploymentName }}
+    spec:
+      containers:
+        - name: nginx-1
+          image: {{ .Values.samples.nginxImage }}
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.samples.nginxApp1.serviceName }}
+  namespace: {{ .Values.samples.namespace }}
+  labels:
+    app: {{ .Values.samples.nginxApp1.deploymentName }}
+spec:
+  selector:
+    app: {{ .Values.samples.nginxApp1.deploymentName }}
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: ClusterIP
+{{- end }}

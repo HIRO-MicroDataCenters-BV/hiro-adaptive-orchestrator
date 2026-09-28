@@ -1,0 +1,14 @@
+{{- if .Values.mockAgent.enable }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.mockAgent.serviceName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Values.mockAgent.serviceName }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  server.py: |
+{{ .Files.Get "files/mock_decision_agent_server.py" | replace "REPLACE_LISTEN_PORT" (.Values.mockAgent.port | toString) | indent 4 }}
+{{- end }}

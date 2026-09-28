@@ -277,11 +277,12 @@ HELM_CHART_DIR ?= dist/chart
 HELM_EXTRA_ARGS ?=
 
 .PHONY: install-helm
-install-helm: ## Install the latest version of Helm.
-	@command -v $(HELM) >/dev/null 2>&1 || { \
-		echo "Installing Helm..." && \
+install-helm: ## Install Helm v4+ (some CI runner images ship an older v3 pre-installed).
+	@major=$$($(HELM) version --template '{{.Version}}' 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/'); \
+	if [ -z "$$major" ] || [ "$$major" -lt 4 ]; then \
+		echo "Installing Helm v4..." && \
 		curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash; \
-	}
+	fi
 
 .PHONY: helm-deploy
 helm-deploy: install-helm ## Deploy manager to the K8s cluster via Helm. Specify an image with IMG.
@@ -309,6 +310,97 @@ helm-history: ## Show Helm release history.
 .PHONY: helm-rollback
 helm-rollback: ## Rollback to previous Helm release.
 	$(HELM) rollback $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+## Path to the full-stack umbrella Helm chart
+HELM_PLATFORM_CHART_DIR ?= charts/hiro-adaptive-platform
+## Name of the full-stack Helm release
+HELM_PLATFORM_RELEASE ?= hiro-adaptive-platform
+
+## Name of the postrenderer/v1 plugin wrapping postrender/render.sh. Helm v4
+## requires --post-renderer to name an installed plugin, not a raw script
+## path (see postrender/plugin.yaml). Installed idempotently — uninstall is
+## allowed to fail (nothing installed yet) but install must not.
+HELM_PLATFORM_POSTRENDERER ?= hiro-adaptive-platform-postrenderer
+
+.PHONY: helm-platform-postrenderer-install
+helm-platform-postrenderer-install: ## Install/refresh the umbrella chart's post-renderer plugin.
+	$(HELM) plugin uninstall $(HELM_PLATFORM_POSTRENDERER) >/dev/null 2>&1 || true
+	$(HELM) plugin install $(CURDIR)/$(HELM_PLATFORM_CHART_DIR)/postrender
+
+.PHONY: helm-platform-lint
+helm-platform-lint: ## Lint the full-stack umbrella chart.
+	$(HELM) dependency update $(HELM_PLATFORM_CHART_DIR)
+	$(HELM) lint $(HELM_PLATFORM_CHART_DIR)
+
+.PHONY: helm-platform-template
+helm-platform-template: helm-platform-postrenderer-install ## Render the full-stack umbrella chart (no cluster required).
+	$(HELM) dependency update $(HELM_PLATFORM_CHART_DIR)
+	$(HELM) template $(HELM_PLATFORM_RELEASE) $(HELM_PLATFORM_CHART_DIR) \
+		--post-renderer $(HELM_PLATFORM_POSTRENDERER) \
+		$(HELM_EXTRA_ARGS)
+
+.PHONY: helm-platform-deploy
+helm-platform-deploy: install-helm helm-platform-postrenderer-install ## Deploy the full stack via the umbrella Helm chart.
+	$(HELM) dependency update $(HELM_PLATFORM_CHART_DIR)
+	$(HELM) upgrade --install $(HELM_PLATFORM_RELEASE) $(HELM_PLATFORM_CHART_DIR) \
+		--namespace $(HELM_NAMESPACE) \
+		--create-namespace \
+		--post-renderer $(HELM_PLATFORM_POSTRENDERER) \
+		--wait \
+		--timeout 10m \
+		$(HELM_EXTRA_ARGS)
+
+## Placeholder value for scheduler.plugin.placementServer.url in
+## helm-platform-template-check below — that value has no safe default (see
+## values.yaml), but a real cluster lookup isn't available/needed for a
+## template-only regression check.
+HELM_PLATFORM_CHECK_PLACEMENT_URL ?= http://placeholder.example:8090
+
+.PHONY: helm-platform-template-check
+helm-platform-template-check: helm-platform-postrenderer-install ## Regression-check helm lint/template across representative value combinations.
+	$(HELM) dependency update $(HELM_PLATFORM_CHART_DIR)
+	$(HELM) lint $(HELM_PLATFORM_CHART_DIR)
+	@fail=0; \
+	run() { \
+		echo "--- $$1 ---"; \
+		name="$$1"; shift; \
+		if $(HELM) template $(HELM_PLATFORM_RELEASE) $(HELM_PLATFORM_CHART_DIR) \
+			--post-renderer $(HELM_PLATFORM_POSTRENDERER) "$$@" >/dev/null; then \
+			echo "PASS: $$name"; \
+		else \
+			echo "FAIL: $$name"; \
+			fail=1; \
+		fi; \
+	}; \
+	run "defaults"; \
+	run "webhook + scheduler plugin" \
+		--set webhook.enable=true --set scheduler.mode=plugin \
+		--set scheduler.plugin.image.tag=v0.1.0 \
+		--set scheduler.plugin.placementServer.url=$(HELM_PLATFORM_CHECK_PLACEMENT_URL); \
+	run "scheduler extender" --set scheduler.mode=extender; \
+	run "mock agent" --set mockAgent.enable=true; \
+	run "samples" --set samples.enabled=true; \
+	run "all features on" \
+		--set webhook.enable=true --set scheduler.mode=plugin \
+		--set scheduler.plugin.image.tag=v0.1.0 \
+		--set scheduler.plugin.placementServer.url=$(HELM_PLATFORM_CHECK_PLACEMENT_URL) \
+		--set mockAgent.enable=true --set samples.enabled=true \
+		--set prerequisites.certManager.enable=true \
+		--set prerequisites.metricsServer.enable=true \
+		--set prerequisites.prometheus.enable=true; \
+	if [ "$$fail" -ne 0 ]; then \
+		echo ""; echo "helm-platform-template-check: one or more combinations FAILED (see above)."; \
+		exit 1; \
+	fi; \
+	echo ""; echo "helm-platform-template-check: all combinations passed."
+
+.PHONY: helm-platform-uninstall
+helm-platform-uninstall: ## Uninstall the full-stack Helm release.
+	$(HELM) uninstall $(HELM_PLATFORM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-platform-status
+helm-platform-status: ## Show full-stack Helm release status.
+	$(HELM) status $(HELM_PLATFORM_RELEASE) --namespace $(HELM_NAMESPACE)
 
 ##@ Scheduler Build
 #

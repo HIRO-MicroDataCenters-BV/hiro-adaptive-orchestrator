@@ -1,0 +1,124 @@
+{{- /*
+Unlike the other scheduler-extender templates, this one renders regardless
+of scheduler.mode — it needs to run at two different points depending on
+current mode:
+  - mode == "extender": as a pre-delete hook, so `helm uninstall` restores
+    the original kube-scheduler manifest (mirrors hack/undeploy_extender.sh).
+  - mode != "extender": as a pre-upgrade hook, so switching AWAY from
+    extender mode on `helm upgrade` also restores it — otherwise nothing
+    else in this chart would ever undo the patch job-patch-kube-scheduler.yaml
+    applied while extender mode was previously on.
+Helm only ever fires a pre-upgrade-annotated hook during `helm upgrade`
+(never `helm install`), so this is a harmless no-op on a fresh install
+where extender was never active — the patch script's own backup-presence
+check (see files/patch_scheduler_static_pod.py) already tolerates "nothing
+to restore" cleanly, replicated here.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-hiro-extender-restore
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: hiro-extender
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    {{- if eq .Values.scheduler.mode "extender" }}
+    helm.sh/hook: pre-delete
+    {{- else }}
+    helm.sh/hook: pre-upgrade
+    {{- end }}
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+      volumes:
+        - name: host-manifests
+          hostPath:
+            path: /etc/kubernetes/manifests
+            type: Directory
+        - name: host-etc-kubernetes
+          hostPath:
+            path: /etc/kubernetes
+            type: Directory
+      containers:
+        - name: restorer
+          image: {{ .Values.scheduler.extender.images.patcher }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              MANIFEST=/host-manifests/kube-scheduler.yaml
+              BACKUP=/host-etc-kubernetes/kube-scheduler.yaml.hiro-backup
+              if [ ! -f "$BACKUP" ]; then
+                echo "No backup found at $BACKUP — nothing to restore."
+              else
+                cp "$BACKUP" "$MANIFEST"
+                rm -f "$BACKUP"
+                echo "Restored $MANIFEST from backup."
+              fi
+              CONFIG=/host-etc-kubernetes/hiro-scheduler-config.yaml
+              if [ -f "$CONFIG" ]; then
+                rm -f "$CONFIG"
+                echo "Removed $CONFIG from node filesystem."
+              else
+                echo "No config file at $CONFIG — already clean."
+              fi
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          volumeMounts:
+            - name: host-manifests
+              mountPath: /host-manifests
+            - name: host-etc-kubernetes
+              mountPath: /host-etc-kubernetes
+---
+{{- /*
+hiro-scheduler-config (unlike hiro-patch-script) is created imperatively by
+job-prepare-scheduler-config.yaml's own `kubectl apply`, not as a normal
+Helm-templated resource — so it's outside Helm's release manifest and
+`helm uninstall` won't remove it on its own. Delete it explicitly here,
+matching hack/undeploy_extender.sh's own cleanup_configmaps().
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-hiro-extender-cleanup-configmap
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: hiro-extender
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    {{- if eq .Values.scheduler.mode "extender" }}
+    helm.sh/hook: pre-delete
+    {{- else }}
+    helm.sh/hook: pre-upgrade
+    {{- end }}
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ .Release.Name }}-hiro-extender
+      containers:
+        - name: cleanup
+          image: {{ .Values.scheduler.extender.images.kubectl }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              kubectl delete configmap {{ .Release.Name }}-hiro-scheduler-config \
+                -n kube-system --ignore-not-found

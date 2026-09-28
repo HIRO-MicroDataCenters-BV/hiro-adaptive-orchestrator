@@ -1,0 +1,17 @@
+{{- if eq .Values.scheduler.mode "extender" }}
+# Static (non-hook) ConfigMap — its content doesn't depend on live cluster
+# state, unlike hiro-scheduler-config below, which the prep hook Job
+# creates because it needs the PlacementServer's live ClusterIP.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-hiro-patch-script
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: hiro-extender
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  patch.py: |
+{{ .Files.Get "files/patch_scheduler_static_pod.py" | indent 4 }}
+{{- end }}

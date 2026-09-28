@@ -1,0 +1,59 @@
+{{- if eq .Values.scheduler.mode "plugin" }}
+# KubeSchedulerConfiguration for the HIRO scheduler plugin.
+#
+# schedulerName (scheduler.plugin.schedulerName, default "hiro-scheduler") —
+# pods must set spec.schedulerName to this same value to be scheduled by
+# this scheduler instead of the default kube-scheduler. postrender/render.sh
+# reads the resolved value back out of this rendered ConfigMap and patches
+# it into the operator's HIRO_SCHEDULER_NAME env var, so the two can never
+# drift out of sync — see that script for how.
+#
+# HIROScore is registered at the preFilter, filter, preScore, and score extension points.
+# Default scoring plugins remain active (additive) so resource fit, topology
+# spread, etc. still gate candidate nodes — but HIROScore runs at weight=10,
+# outweighing any single default plugin 10:1 so the AI recommendation dominates.
+#
+# leaderElection: uses kube-system as the lease namespace, matching the
+# kube-scheduler convention. The lease name (hiro-scheduler) is distinct
+# from kube-scheduler's lease so both schedulers coexist safely.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-hiro-scheduler-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: hiro-scheduler
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  scheduler-config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: true
+      resourceName: {{ .Values.scheduler.plugin.schedulerName }}
+      resourceNamespace: kube-system
+    profiles:
+      - schedulerName: {{ .Values.scheduler.plugin.schedulerName }}
+        plugins:
+          preFilter:
+            enabled:
+              - name: HIROScore
+          filter:
+            enabled:
+              - name: HIROScore
+          preScore:
+            enabled:
+              - name: HIROScore
+          score:
+            enabled:
+              - name: HIROScore
+                weight: 10    # HIROScore outweighs any single default plugin 10:1
+        pluginConfig:
+          - name: HIROScore
+            args:
+              placementServerURL: {{ required "scheduler.plugin.placementServer.url must be set when scheduler.mode=plugin (see values.yaml comment for how to look it up)" .Values.scheduler.plugin.placementServer.url | quote }}
+              placementServerPath: {{ .Values.scheduler.plugin.placementServer.path | quote }}
+              filterPath: {{ .Values.scheduler.plugin.placementServer.filterPath | quote }}
+              timeoutSeconds: {{ .Values.scheduler.plugin.placementServer.timeoutSeconds }}
+{{- end }}

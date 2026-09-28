@@ -1,0 +1,15 @@
+# Helm v4 requires --post-renderer to name an installed plugin of type
+# postrenderer/v1 — it no longer accepts a raw executable path like Helm v3
+# did (https://github.com/helm/helm/issues/31340). This file is what turns
+# render.sh into that plugin. Install it locally with:
+#   helm plugin install charts/hiro-adaptive-platform/postrender
+# then reference it by name: --post-renderer hiro-adaptive-platform-postrenderer
+# `make helm-platform-deploy`/`helm-platform-template` do this automatically.
+apiVersion: v1
+type: postrenderer/v1
+name: hiro-adaptive-platform-postrenderer
+version: 0.1.0
+runtime: subprocess
+runtimeConfig:
+  platformCommand:
+    - command: ${HELM_PLUGIN_DIR}/render.sh

@@ -1,0 +1,74 @@
+{{- if eq .Values.scheduler.mode "extender" }}
+# Step 1 of 3 (see job-patch-kube-scheduler.yaml, job-verify-extender.yaml;
+# ordered by helm.sh/hook-weight below). Not privileged — only talks to the
+# Kubernetes API (see rbac.yaml), never touches the control-plane node's
+# filesystem.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-hiro-extender-prep
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: hiro-extender
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ .Release.Name }}-hiro-extender
+      containers:
+        - name: prep
+          image: {{ .Values.scheduler.extender.images.kubectl }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              echo "Resolving PlacementServer Service ClusterIP..."
+              CLUSTER_IP=$(kubectl get svc -n {{ .Release.Namespace }} \
+                -l app.kubernetes.io/component=placement-server,app.kubernetes.io/instance={{ .Release.Name }} \
+                -o jsonpath='{.items[0].spec.clusterIP}')
+              if [ -z "$CLUSTER_IP" ]; then
+                echo "ERROR: could not resolve the PlacementServer Service's ClusterIP" \
+                     "(label selector app.kubernetes.io/component=placement-server," \
+                     "app.kubernetes.io/instance={{ .Release.Name }} in namespace {{ .Release.Namespace }})." >&2
+                exit 1
+              fi
+              echo "  Resolved ClusterIP: ${CLUSTER_IP}"
+              # kube-scheduler's static pod runs with hostNetwork: true, so it uses
+              # the node's /etc/resolv.conf rather than CoreDNS and cannot resolve
+              # svc.cluster.local — embed the ClusterIP directly instead (same
+              # reason hack/deploy_extender.sh does this).
+              URL_PREFIX="http://${CLUSTER_IP}:{{ .Values.scheduler.extender.placementServer.port }}"
+
+              cat <<EOF > /tmp/scheduler-config.yaml
+              apiVersion: kubescheduler.config.k8s.io/v1
+              kind: KubeSchedulerConfiguration
+              clientConnection:
+                kubeconfig: /etc/kubernetes/scheduler.conf
+              profiles:
+                - schedulerName: default-scheduler
+              extenders:
+                - urlPrefix: "${URL_PREFIX}"
+                  filterVerb: "{{ .Values.scheduler.extender.placementServer.filterVerb }}"
+                  prioritizeVerb: "{{ .Values.scheduler.extender.placementServer.prioritizeVerb }}"
+                  weight: {{ .Values.scheduler.extender.placementServer.weight }}
+                  enableHTTPS: {{ .Values.scheduler.extender.placementServer.enableHTTPS }}
+                  ignorable: {{ .Values.scheduler.extender.placementServer.ignorable }}
+                  nodeCacheCapable: {{ .Values.scheduler.extender.placementServer.nodeCacheCapable }}
+                  httpTimeout: {{ .Values.scheduler.extender.placementServer.httpTimeoutSeconds }}s
+              EOF
+
+              echo "Applying hiro-scheduler-config ConfigMap to kube-system..."
+              kubectl create configmap {{ .Release.Name }}-hiro-scheduler-config \
+                --from-file=scheduler-config.yaml=/tmp/scheduler-config.yaml \
+                -n kube-system \
+                --dry-run=client -o yaml | kubectl apply -f -
+              echo "Done."
+{{- end }}
