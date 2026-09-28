@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/orchestration.hiro.io_orchestrationprofiles.yaml
+- bases/temp.orchestration.hiro.io_scaffoldprobes.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 # patches:

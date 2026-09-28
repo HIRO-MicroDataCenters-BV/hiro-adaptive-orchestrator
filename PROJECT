@@ -6,6 +6,7 @@ cliVersion: 4.16.0
 domain: orchestration.hiro.io
 layout:
 - go.kubebuilder.io/v4
+multigroup: true
 plugins:
   helm.kubebuilder.io/v2-alpha:
     manifests: dist/install.yaml
@@ -29,5 +30,18 @@ resources:
   version: v1
   webhooks:
     defaulting: true
+    webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: orchestration.hiro.io
+  group: temp
+  kind: ScaffoldProbe
+  path: github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/temp/v1alpha1
+  version: v1alpha1
+  webhooks:
+    defaulting: true
+    validation: true
     webhookVersion: v1
 version: "3"
