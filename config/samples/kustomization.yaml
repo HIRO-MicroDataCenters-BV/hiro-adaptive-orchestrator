@@ -6,5 +6,4 @@ resources:
 - orchestrationprofile_2.yaml
 - nginx_deployment_1.yaml
 - nginx_deployment_2.yaml
-- temp_v1alpha1_scaffoldprobe.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

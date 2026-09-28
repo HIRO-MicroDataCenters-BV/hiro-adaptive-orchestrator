@@ -1,9 +1,0 @@
-apiVersion: temp.orchestration.hiro.io/v1alpha1
-kind: ScaffoldProbe
-metadata:
-  labels:
-    app.kubernetes.io/name: hiro-adaptive-orchestrator
-    app.kubernetes.io/managed-by: kustomize
-  name: scaffoldprobe-sample
-spec:
-  # TODO(user): Add fields here
