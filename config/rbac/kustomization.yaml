@@ -22,9 +22,6 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the hiro-adaptive-orchestrator itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
-- demoresource_admin_role.yaml
-- demoresource_editor_role.yaml
-- demoresource_viewer_role.yaml
 - orchestrationprofile_admin_role.yaml
 - orchestrationprofile_editor_role.yaml
 - orchestrationprofile_viewer_role.yaml

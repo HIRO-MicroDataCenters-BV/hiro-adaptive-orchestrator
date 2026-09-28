@@ -30,17 +30,4 @@ resources:
   webhooks:
     defaulting: true
     webhookVersion: v1
-- api:
-    crdVersion: v1
-    namespaced: true
-  controller: true
-  domain: orchestration.hiro.io
-  group: orchestration
-  kind: DemoResource
-  path: github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1
-  version: v1alpha1
-  webhooks:
-    defaulting: true
-    validation: true
-    webhookVersion: v1
 version: "3"
