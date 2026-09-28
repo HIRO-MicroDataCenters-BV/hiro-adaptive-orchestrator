@@ -92,7 +92,8 @@ func testKEDAOwnedHPA(name, scaledObjectName string, minReplicas, maxReplicas in
 	return hpa
 }
 
-func ptrInt32(v int32) *int32 { return &v }
+//go:fix inline
+func ptrInt32(v int32) *int32 { return new(v) }
 
 func adjustReplicasResponse(targetReplicas int32, improvement float64) placementserver.RebalanceDecisionResponse {
 	return placementserver.RebalanceDecisionResponse{
@@ -156,7 +157,7 @@ func TestReconciler_ScaleTimeoutWithClosedEnergyGateIsDeferred(t *testing.T) {
 
 	profile := testEnergyAwareProfile()
 	deploy := testScalableDeployment(0) // never reaches 3 ready — fake client, no real rollout
-	eao := testEAO("Waiting", "demo: energy window closed", boolPtr(false))
+	eao := testEAO("Waiting", "demo: energy window closed", new(false))
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile, eao)
 	r.ScaleActionTimeout = 50 * time.Millisecond
 
@@ -187,7 +188,7 @@ func TestReconciler_ScaleTimeoutWithoutEnergyAwarenessStaysFailed(t *testing.T) 
 
 	profile := testProfileWithConditions(TriggerScheduled) // Awareness.Energy: false
 	deploy := testScalableDeployment(0)
-	eao := testEAO("Waiting", "demo: energy window closed", boolPtr(false))
+	eao := testEAO("Waiting", "demo: energy window closed", new(false))
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile, eao)
 	r.ScaleActionTimeout = 50 * time.Millisecond
 
@@ -215,7 +216,7 @@ func TestReconciler_ScaleTimeoutWithOpenEnergyGateStaysFailed(t *testing.T) {
 
 	profile := testEnergyAwareProfile()
 	deploy := testScalableDeployment(0)
-	eao := testEAO("DeployImmediately", "window open", boolPtr(true))
+	eao := testEAO("DeployImmediately", "window open", new(true))
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile, eao)
 	r.ScaleActionTimeout = 50 * time.Millisecond
 

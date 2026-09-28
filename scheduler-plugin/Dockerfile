@@ -14,7 +14,7 @@
 #   Example: hiro-scheduler:v0.1.0-k8sv1.35.0
 
 # ── Build stage ───────────────────────────────────────────────────────────────
-FROM golang:1.25 AS builder
+FROM golang:1.26 AS builder
 
 WORKDIR /workspace
 
