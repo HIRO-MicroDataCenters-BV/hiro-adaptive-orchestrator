@@ -277,11 +277,12 @@ HELM_CHART_DIR ?= dist/chart
 HELM_EXTRA_ARGS ?=
 
 .PHONY: install-helm
-install-helm: ## Install the latest version of Helm.
-	@command -v $(HELM) >/dev/null 2>&1 || { \
-		echo "Installing Helm..." && \
+install-helm: ## Install Helm v4+ (some CI runner images ship an older v3 pre-installed).
+	@major=$$($(HELM) version --template '{{.Version}}' 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/'); \
+	if [ -z "$$major" ] || [ "$$major" -lt 4 ]; then \
+		echo "Installing Helm v4..." && \
 		curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash; \
-	}
+	fi
 
 .PHONY: helm-deploy
 helm-deploy: install-helm ## Deploy manager to the K8s cluster via Helm. Specify an image with IMG.
