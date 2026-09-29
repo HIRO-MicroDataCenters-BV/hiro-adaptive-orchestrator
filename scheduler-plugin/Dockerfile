@@ -14,7 +14,9 @@
 #   Example: hiro-scheduler:v0.1.0-k8sv1.35.0
 
 # ── Build stage ───────────────────────────────────────────────────────────────
-FROM golang:1.26 AS builder
+# --platform=$BUILDPLATFORM keeps the compile step native during a
+# multi-platform buildx build, avoiding QEMU emulation.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 
 WORKDIR /workspace
 
