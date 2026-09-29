@@ -496,7 +496,7 @@ flowchart LR
 
 | Tool | Minimum version | Purpose |
 |------|----------------|---------|
-| Go | 1.25 | Build operator from source |
+| Go | 1.26 | Build operator from source |
 | Docker | any recent | Build container images |
 | kubectl | v1.29+ | Interact with cluster |
 | Kustomize | v5.8+ | Deploy via manifests |
@@ -1372,6 +1372,39 @@ SCHED_K8S_VERSION=v1.36.0 hack/deploy_scheduler.sh
 ```
 
 The `pin_k8s_version.sh` script uses `go mod edit` to surgically update only the `k8s.io/kubernetes` require entry and the staging module replace directives — no full file rewrite.
+
+### Kubebuilder Version
+
+Three places must be kept in sync (not updated automatically by kubebuilder):
+
+| File | Field |
+|------|-------|
+| `PROJECT` | `cliVersion` |
+| `.github/workflows/platform-verify-chart.yml` | "Install kubebuilder vX.Y.Z" step |
+| `.github/workflows/platform-deploy-chart.yml` | "Install kubebuilder vX.Y.Z" step |
+
+Both CI workflows pin to the exact release tag rather than `latest` — see the `manifests-drift-check` job in `platform-verify-chart.yml` — so a kubebuilder tooling bump can never masquerade as a manifest-drift failure.
+
+```bash
+# 1. Update PROJECT's cliVersion, and both workflows' install step + download URL, to vX.Y.Z
+
+# 2. Regenerate against the new scaffolding templates
+IMG_NAME=$(awk '/newName:/{print $2}' config/manager/kustomization.yaml)
+IMG_TAG=$(awk '/newTag:/{print $2}' config/manager/kustomization.yaml)
+export IMG="${IMG_NAME}:${IMG_TAG}"
+make manifests generate
+rm -rf dist && kubebuilder edit --plugins=helm/v2-alpha --force
+
+# 3. Review what actually changed — this should only touch scaffolding
+#    surface (config/, api/**/zz_generated.deepcopy.go,
+#    api/**/groupversion_info.go, dist/, cmd/main.go), never hand-written
+#    business logic under internal/ or scheduler-plugin/
+git diff -- config/ api/ dist/ cmd/main.go
+```
+
+A kubebuilder bump is usually paired with a dependency bump in the `go.mod` it now scaffolds by default (`go`, `sigs.k8s.io/controller-runtime`, `k8s.io/api`, `k8s.io/apimachinery`, `k8s.io/client-go`, `k8s.io/metrics`, and `sigs.k8s.io/controller-tools` via the Makefile's `CONTROLLER_TOOLS_VERSION`). Check the new version's release notes, bump `go.mod` (root module — `scheduler-plugin/`'s `k8s.io/kubernetes` pin tracks the target cluster version instead, see [Kubernetes Version](#kubernetes-version-scheduler-plugin) above, not this), `go mod tidy` both modules, and bump both Dockerfiles' `FROM golang:X.Y` to match.
+
+This project overrides kubebuilder's default `<group>.<domain>` CRD group naming (using `orchestration.hiro.io` rather than the default `orchestration.orchestration.hiro.io`) so existing deployed CRs are never broken by a version bump — preserve the `SchemeGroupVersion`/`+groupName` values in `api/v1alpha1/groupversion_info.go` by hand across any regeneration.
 
 ---
 
