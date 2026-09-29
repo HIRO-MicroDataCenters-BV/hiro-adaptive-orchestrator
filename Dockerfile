@@ -1,5 +1,7 @@
 # Build the manager binary
-FROM golang:1.26 AS builder
+# --platform=$BUILDPLATFORM keeps the compile step native during a
+# multi-platform buildx build, avoiding QEMU emulation.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
