@@ -166,6 +166,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: false
           tags: |
             ghcr.io/${{ env.GHCR_REPO_LC }}/hiro-adaptive-orchestrator-controller:${{ env.VERSION }}
             ghcr.io/${{ env.GHCR_REPO_LC }}/hiro-adaptive-orchestrator-controller:sha-${{ github.sha }}
@@ -196,6 +197,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: K8S_VERSION=${{ env.SCHED_K8S_VERSION }}
           push: true
+          provenance: false
           tags: |
             ghcr.io/${{ env.GHCR_REPO_LC }}/hiro-scheduler:${{ env.VERSION }}-k8s${{ env.SCHED_K8S_VERSION }}
             ghcr.io/${{ env.GHCR_REPO_LC }}/hiro-scheduler:sha-${{ github.sha }}-k8s${{ env.SCHED_K8S_VERSION }}
