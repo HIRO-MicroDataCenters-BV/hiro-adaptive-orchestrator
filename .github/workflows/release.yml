@@ -64,11 +64,17 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolve.outputs.version }}
+      ghcr_repo_lc: ${{ steps.resolve.outputs.ghcr_repo_lc }}
     steps:
       - id: resolve
         env:
           AUTO_TAG_VERSION: ${{ needs.auto-tag.outputs.version }}
-        run: echo "version=${AUTO_TAG_VERSION:-${{ github.ref_name }}}" >> "$GITHUB_OUTPUT"
+        run: |
+          VERSION="${AUTO_TAG_VERSION:-${{ github.ref_name }}}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # GHCR repository names must be lowercase; github.repository isn't
+          # necessarily, and GitHub Actions expressions have no lower() function.
+          echo "ghcr_repo_lc=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
   manifests-drift-check:
     name: Verify generated manifests are up to date
@@ -143,6 +149,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.resolve-version.outputs.version }}
+      GHCR_REPO_LC: ${{ needs.resolve-version.outputs.ghcr_repo_lc }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -160,9 +167,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/hiro-adaptive-orchestrator-controller:${{ env.VERSION }}
-            ghcr.io/${{ github.repository }}/hiro-adaptive-orchestrator-controller:sha-${{ github.sha }}
-            ghcr.io/${{ github.repository }}/hiro-adaptive-orchestrator-controller:latest
+            ghcr.io/${{ env.GHCR_REPO_LC }}/hiro-adaptive-orchestrator-controller:${{ env.VERSION }}
+            ghcr.io/${{ env.GHCR_REPO_LC }}/hiro-adaptive-orchestrator-controller:sha-${{ github.sha }}
+            ghcr.io/${{ env.GHCR_REPO_LC }}/hiro-adaptive-orchestrator-controller:latest
 
   build-push-scheduler:
     name: Build + push scheduler image (multi-arch)
@@ -170,6 +177,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.resolve-version.outputs.version }}
+      GHCR_REPO_LC: ${{ needs.resolve-version.outputs.ghcr_repo_lc }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -189,15 +197,16 @@ jobs:
           build-args: K8S_VERSION=${{ env.SCHED_K8S_VERSION }}
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/hiro-scheduler:${{ env.VERSION }}-k8s${{ env.SCHED_K8S_VERSION }}
-            ghcr.io/${{ github.repository }}/hiro-scheduler:sha-${{ github.sha }}-k8s${{ env.SCHED_K8S_VERSION }}
-            ghcr.io/${{ github.repository }}/hiro-scheduler:latest-k8s${{ env.SCHED_K8S_VERSION }}
+            ghcr.io/${{ env.GHCR_REPO_LC }}/hiro-scheduler:${{ env.VERSION }}-k8s${{ env.SCHED_K8S_VERSION }}
+            ghcr.io/${{ env.GHCR_REPO_LC }}/hiro-scheduler:sha-${{ github.sha }}-k8s${{ env.SCHED_K8S_VERSION }}
+            ghcr.io/${{ env.GHCR_REPO_LC }}/hiro-scheduler:latest-k8s${{ env.SCHED_K8S_VERSION }}
 
   package-push-chart:
     name: Package + push Helm chart
     needs: [resolve-version, helm-lint, helm-template-check]
     runs-on: ubuntu-latest
     env:
+      GHCR_REPO_LC: ${{ needs.resolve-version.outputs.ghcr_repo_lc }}
       VERSION: ${{ needs.resolve-version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
@@ -217,11 +226,78 @@ jobs:
       - name: Push chart to GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
-          helm push "$CHART_OUTPUT_DIR/$CHART_NAME"-*.tgz "oci://ghcr.io/${{ github.repository }}/charts"
+          helm push "$CHART_OUTPUT_DIR/$CHART_NAME"-*.tgz "oci://ghcr.io/$GHCR_REPO_LC/charts"
       - uses: actions/upload-artifact@v4
         with:
           name: helm-chart
           path: ${{ env.CHART_OUTPUT_DIR }}/*.tgz
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # OPTIONAL, disabled by default. Publishes cmd/migrate-rebalance-status as
+  # standalone binaries attached to the Release, so someone upgrading across
+  # the CRD schema change that command's doc comment describes can download
+  # and run it directly instead of `go build`ing from a full checkout. This
+  # is a one-time migration tool, not a normal install path — most releases
+  # don't need it at all. To enable: uncomment this job, then add its name
+  # to publish-release's `needs:` and its output path to `files:` below.
+  # ─────────────────────────────────────────────────────────────────────────
+  # build-migration-binary:
+  #   name: Build migrate-rebalance-status binaries (optional)
+  #   needs: resolve-version
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         ref: ${{ needs.resolve-version.outputs.version }}
+  #     - uses: actions/setup-go@v5
+  #       with:
+  #         go-version-file: go.mod
+  #     - name: Build binaries
+  #       run: |
+  #         mkdir -p bin
+  #         for arch in amd64 arm64; do
+  #           GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build \
+  #             -o bin/migrate-rebalance-status-linux-$arch \
+  #             ./cmd/migrate-rebalance-status
+  #         done
+  #         (cd bin && sha256sum migrate-rebalance-status-* > sha256sums.txt)
+  #     - uses: actions/upload-artifact@v4
+  #       with:
+  #         name: migration-binaries
+  #         path: bin/migrate-rebalance-status-*
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # OPTIONAL, disabled by default. Publishes dist/install.yaml (CRDs +
+  # operator Deployment only, no scheduler/webhook) as a Release asset — the
+  # README's "YAML Bundle" install method, pinned to this release's image.
+  # Not recommended as your primary install path: it's a Helm-free
+  # alternative that skips everything the chart gives you (scheduler,
+  # webhook, prerequisites, config toggles) and doesn't upgrade the way
+  # `helm upgrade` does. To enable: uncomment this job, then add its name to
+  # publish-release's `needs:` and its output path to `files:` below.
+  # ─────────────────────────────────────────────────────────────────────────
+  # build-installer-bundle:
+  #   name: Build install.yaml bundle (optional)
+  #   needs: [resolve-version, build-push-operator]
+  #   runs-on: ubuntu-latest
+  #   env:
+  #     VERSION: ${{ needs.resolve-version.outputs.version }}
+  #     GHCR_REPO_LC: ${{ needs.resolve-version.outputs.ghcr_repo_lc }}
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         ref: ${{ env.VERSION }}
+  #     - uses: actions/setup-go@v5
+  #       with:
+  #         go-version-file: go.mod
+  #     - name: Install kustomize
+  #       run: make kustomize
+  #     - name: Build install.yaml
+  #       run: make build-installer IMG=ghcr.io/${{ env.GHCR_REPO_LC }}/hiro-adaptive-orchestrator-controller:${{ env.VERSION }}
+  #     - uses: actions/upload-artifact@v4
+  #       with:
+  #         name: install-yaml
+  #         path: dist/install.yaml
 
   publish-release:
     name: Publish GitHub Release

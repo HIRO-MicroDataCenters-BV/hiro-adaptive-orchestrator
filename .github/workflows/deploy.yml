@@ -68,6 +68,9 @@ jobs:
       HELM_PLATFORM_RELEASE: ${{ vars.TARGET_RELEASE_NAME || 'hiro-adaptive-platform' }}
       VERSION: ${{ github.event.release.tag_name || inputs.version }}
     steps:
+      - name: Compute lowercase repo
+        run: echo "GHCR_REPO_LC=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
       - name: Install Helm
         run: |
           major=$(helm version --template '{{.Version}}' 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/')
@@ -83,7 +86,7 @@ jobs:
       - name: Pull released chart
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
-          CHART_REF="oci://ghcr.io/${{ github.repository }}/charts/$CHART_NAME"
+          CHART_REF="oci://ghcr.io/$GHCR_REPO_LC/charts/$CHART_NAME"
           helm pull "$CHART_REF" --version "${VERSION#v}" --untar --destination release-chart
 
       - name: Install post-renderer plugin
@@ -132,15 +135,15 @@ jobs:
       - name: Deploy charts/hiro-adaptive-platform (phase 1)
         run: |
           export KUBECONFIG="$HOME/.kube/config"
-          IMAGE_REPO="ghcr.io/${{ github.repository }}/hiro-adaptive-orchestrator-controller:${VERSION}"
-          SCHED_REPO="ghcr.io/${{ github.repository }}/hiro-scheduler:${VERSION}-k8s${SCHED_K8S_VERSION}"
+          ORCHESTRATOR_IMAGE_REPO="ghcr.io/$GHCR_REPO_LC/hiro-adaptive-orchestrator-controller:${VERSION}"
+          SCHED_IMAGE_REPO="ghcr.io/$GHCR_REPO_LC/hiro-scheduler:${VERSION}-k8s${SCHED_K8S_VERSION}"
           SCHED_MODE="${{ vars.SCHEDULER_MODE || 'none' }}"
           EXTRA_ARGS="\
             --reuse-values \
-            --set hiro-operator.manager.image.repository=${IMAGE_REPO%%:*} \
-            --set hiro-operator.manager.image.tag=${IMAGE_REPO##*:} \
-            --set scheduler.plugin.image.repository=${SCHED_REPO%%:*} \
-            --set scheduler.plugin.image.tag=${SCHED_REPO##*:} \
+            --set hiro-operator.manager.image.repository=${ORCHESTRATOR_IMAGE_REPO%%:*} \
+            --set hiro-operator.manager.image.tag=${ORCHESTRATOR_IMAGE_REPO##*:} \
+            --set scheduler.plugin.image.repository=${SCHED_IMAGE_REPO%%:*} \
+            --set scheduler.plugin.image.tag=${SCHED_IMAGE_REPO##*:} \
             --set prerequisites.certManager.enable=${{ vars.PREREQ_CERT_MANAGER_ENABLE || 'false' }} \
             --set prerequisites.metricsServer.enable=${{ vars.PREREQ_METRICS_SERVER_ENABLE || 'false' }} \
             --set prerequisites.prometheus.enable=${{ vars.PREREQ_PROMETHEUS_ENABLE || 'false' }} \
