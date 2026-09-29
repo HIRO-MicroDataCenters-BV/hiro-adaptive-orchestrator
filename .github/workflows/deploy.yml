@@ -1,0 +1,125 @@
+name: Deploy to Target Cluster
+#
+# Triggered when release.yml publishes a GitHub Release, or manually for a
+# redeploy of a past version without rebuilding anything.
+#
+# ─── Secrets ────────────────────────────────────────────────────────────
+#   TARGET_KUBECONFIG   Required. Base64-encoded kubeconfig for the target
+#                       cluster (`kubectl config view --raw | base64`).
+#
+# ─── Repo Variables (Settings > Secrets and variables > Actions) ────────
+#   TARGET_NAMESPACE             k8s namespace for the release  (default: hiro-adaptive-orchestrator-system)
+#   TARGET_RELEASE_NAME          Helm release name              (default: hiro-adaptive-platform)
+#   SCHED_K8S_VERSION            Scheduler image's target K8s minor version (default: v1.35.0)
+#   SCHEDULER_MODE                none | plugin | extender        (default: none)
+#   WEBHOOK_ENABLE                true | false                    (default: false)
+#   WEBHOOK_CERT_MANAGER_ENABLE   true | false                    (default: false)
+#   PREREQ_CERT_MANAGER_ENABLE    true | false                    (default: false)
+#   MOCK_AGENT_ENABLE             true | false                    (default: false)
+#   HELM_EXTRA_VALUES             Catch-all extra --set/-f args, applied on every run
+#
+# ─── workflow_dispatch input ─────────────────────────────────────────────
+#   version   Required for a manual run. Version tag to deploy (e.g. v1.4.0).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to deploy (e.g. v1.4.0)"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  SCHED_K8S_VERSION: ${{ vars.SCHED_K8S_VERSION || 'v1.35.0' }}
+
+jobs:
+  verify-secrets:
+    name: Verify required secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check TARGET_KUBECONFIG is set
+        run: |
+          if [ -z "${{ secrets.TARGET_KUBECONFIG }}" ]; then
+            echo "::error::TARGET_KUBECONFIG secret is not set. Add it in repo Settings > Secrets and variables > Actions (base64-encoded kubeconfig) before running this workflow."
+            exit 1
+          fi
+
+  deploy-target-cluster:
+    name: Deploy to target cluster
+    needs: verify-secrets
+    runs-on: ubuntu-latest
+    env:
+      HELM_NAMESPACE: ${{ vars.TARGET_NAMESPACE || 'hiro-adaptive-orchestrator-system' }}
+      HELM_PLATFORM_RELEASE: ${{ vars.TARGET_RELEASE_NAME || 'hiro-adaptive-platform' }}
+      VERSION: ${{ github.event.release.tag_name || inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VERSION }}
+
+      - name: Install Helm
+        run: make install-helm
+
+      - name: Install kustomize
+        run: make kustomize
+
+      - name: Write kubeconfig
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.TARGET_KUBECONFIG }}" | base64 -d > "$HOME/.kube/config"
+
+      - name: Deploy charts/hiro-adaptive-platform (phase 1)
+        run: |
+          export KUBECONFIG="$HOME/.kube/config"
+          IMAGE_REPO="ghcr.io/${{ github.repository }}/hiro-adaptive-orchestrator-controller:${VERSION}"
+          SCHED_REPO="ghcr.io/${{ github.repository }}/hiro-scheduler:${VERSION}-k8s${SCHED_K8S_VERSION}"
+          SCHED_MODE="${{ vars.SCHEDULER_MODE || 'none' }}"
+          EXTRA_ARGS="\
+            --reuse-values \
+            --set hiro-operator.manager.image.repository=${IMAGE_REPO%%:*} \
+            --set hiro-operator.manager.image.tag=${IMAGE_REPO##*:} \
+            --set scheduler.plugin.image.repository=${SCHED_REPO%%:*} \
+            --set scheduler.plugin.image.tag=${SCHED_REPO##*:} \
+            --set prerequisites.certManager.enable=${{ vars.PREREQ_CERT_MANAGER_ENABLE || 'false' }} \
+            --set mockAgent.enable=${{ vars.MOCK_AGENT_ENABLE || 'false' }} \
+            ${{ vars.HELM_EXTRA_VALUES }}"
+          if [ "$SCHED_MODE" != "plugin" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --set scheduler.mode=$SCHED_MODE --set webhook.enable=false"
+          fi
+          make helm-platform-deploy \
+            HELM_NAMESPACE=$HELM_NAMESPACE \
+            HELM_PLATFORM_RELEASE=$HELM_PLATFORM_RELEASE \
+            HELM_EXTRA_ARGS="$EXTRA_ARGS"
+
+      - name: Resolve PlacementServer Service
+        if: vars.SCHEDULER_MODE == 'plugin'
+        run: |
+          export KUBECONFIG="$HOME/.kube/config"
+          SVC=$(kubectl -n $HELM_NAMESPACE get svc \
+            -l app.kubernetes.io/component=placement-server \
+            -o jsonpath='{.items[0].metadata.name}')
+          echo "PLACEMENT_SERVER_URL=http://${SVC}.${HELM_NAMESPACE}.svc.cluster.local:8090" >> "$GITHUB_ENV"
+
+      - name: Deploy charts/hiro-adaptive-platform (phase 2 — scheduler + webhook)
+        if: vars.SCHEDULER_MODE == 'plugin'
+        run: |
+          export KUBECONFIG="$HOME/.kube/config"
+          make helm-platform-deploy \
+            HELM_NAMESPACE=$HELM_NAMESPACE \
+            HELM_PLATFORM_RELEASE=$HELM_PLATFORM_RELEASE \
+            HELM_EXTRA_ARGS="\
+              --reuse-values \
+              --set scheduler.mode=plugin \
+              --set scheduler.plugin.placementServer.url=$PLACEMENT_SERVER_URL \
+              --set webhook.enable=${{ vars.WEBHOOK_ENABLE || 'false' }} \
+              --set webhook.certManager.enable=${{ vars.WEBHOOK_CERT_MANAGER_ENABLE || 'false' }}"
+
+      - name: Show release status
+        if: always()
+        run: |
+          export KUBECONFIG="$HOME/.kube/config"
+          make helm-platform-status

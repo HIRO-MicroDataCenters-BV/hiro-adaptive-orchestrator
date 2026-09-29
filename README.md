@@ -1381,9 +1381,9 @@ Three places must be kept in sync (not updated automatically by kubebuilder):
 |------|-------|
 | `PROJECT` | `cliVersion` |
 | `.github/workflows/platform-verify-chart.yml` | "Install kubebuilder vX.Y.Z" step |
-| `.github/workflows/platform-deploy-chart.yml` | "Install kubebuilder vX.Y.Z" step |
+| `.github/workflows/release.yml` | "Install kubebuilder vX.Y.Z" step |
 
-Both CI workflows pin to the exact release tag rather than `latest` — see the `manifests-drift-check` job in `platform-verify-chart.yml` — so a kubebuilder tooling bump can never masquerade as a manifest-drift failure.
+Both CI workflows pin to the exact release tag rather than `latest` — see the `manifests-drift-check` job in either file — so a kubebuilder tooling bump can never masquerade as a manifest-drift failure.
 
 ```bash
 # 1. Update PROJECT's cliVersion, and both workflows' install step + download URL, to vX.Y.Z

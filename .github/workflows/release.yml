@@ -1,0 +1,241 @@
+name: Release
+#
+# Triggered by a push to main (auto-tag computes + pushes the next version)
+# or by a manually pushed vX.Y.Z tag (auto-tag is skipped). Either way,
+# resolve-version settles on one version string and everything after it
+# builds images, packages the chart, and publishes a GitHub Release, which
+# triggers deploy.yml.
+#
+# ─── Secrets ────────────────────────────────────────────────────────────
+#   GITHUB_TOKEN   Built-in, provided automatically by Actions. Used to
+#                  push images/chart to GHCR and to create the Release.
+#
+# ─── Repo Variables (Settings > Secrets and variables > Actions) ────────
+#   SCHED_K8S_VERSION   Optional. Target K8s minor version for the
+#                       scheduler image tag. Default: v1.35.0
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  SCHED_K8S_VERSION: ${{ vars.SCHED_K8S_VERSION || 'v1.35.0' }}
+  CHART_OUTPUT_DIR: release-artifacts
+
+jobs:
+  auto-tag:
+    name: Compute next version and tag (merge-to-main only)
+    if: github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: version
+        run: |
+          chmod +x build/version.sh
+          VERSION=$(build/version.sh "${{ github.sha }}")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "refs/tags/$VERSION"
+
+  resolve-version:
+    name: Resolve release version
+    needs: auto-tag
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - id: resolve
+        env:
+          AUTO_TAG_VERSION: ${{ needs.auto-tag.outputs.version }}
+        run: echo "version=${AUTO_TAG_VERSION:-${{ github.ref_name }}}" >> "$GITHUB_OUTPUT"
+
+  manifests-drift-check:
+    name: Verify generated manifests are up to date
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.version }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install kubebuilder v4.16.0
+        run: |
+          curl -Lo kubebuilder "https://github.com/kubernetes-sigs/kubebuilder/releases/download/v4.16.0/kubebuilder_$(go env GOOS)_$(go env GOARCH)"
+          chmod +x kubebuilder
+          sudo mv kubebuilder /usr/local/bin/kubebuilder
+
+      - name: Install kustomize
+        run: make kustomize
+
+      - name: make manifests generate
+        run: make manifests generate
+
+      - name: Regenerate dist/chart
+        run: |
+          IMG_NAME=$(awk '/newName:/{print $2}' config/manager/kustomization.yaml)
+          IMG_TAG=$(awk '/newTag:/{print $2}' config/manager/kustomization.yaml)
+          export IMG="${IMG_NAME}:${IMG_TAG}"
+          rm -rf dist
+          kubebuilder edit --plugins=helm/v2-alpha --force
+
+      - name: Fail if regeneration produced any diff
+        run: |
+          if ! git diff --exit-code -- config/ api/ dist/; then
+            echo "::error::Generated manifests/code are out of date. Run 'make manifests generate' and the kubebuilder edit step locally, then commit."
+            exit 1
+          fi
+
+  helm-lint:
+    name: Helm lint (umbrella chart)
+    needs: [resolve-version, manifests-drift-check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.version }}
+      - name: Install Helm
+        run: make install-helm
+      - run: make helm-platform-lint
+
+  helm-template-check:
+    name: Helm template-check (value combinations)
+    needs: [resolve-version, manifests-drift-check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.version }}
+      - name: Install Helm
+        run: make install-helm
+      - name: Install kustomize
+        run: make kustomize
+      - run: make helm-platform-template-check
+
+  build-push-operator:
+    name: Build + push operator image (multi-arch)
+    needs: [resolve-version, helm-lint, helm-template-check]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.resolve-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VERSION }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/hiro-adaptive-orchestrator-controller:${{ env.VERSION }}
+            ghcr.io/${{ github.repository }}/hiro-adaptive-orchestrator-controller:sha-${{ github.sha }}
+            ghcr.io/${{ github.repository }}/hiro-adaptive-orchestrator-controller:latest
+
+  build-push-scheduler:
+    name: Build + push scheduler image (multi-arch)
+    needs: [resolve-version, helm-lint, helm-template-check]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.resolve-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VERSION }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: scheduler-plugin/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: K8S_VERSION=${{ env.SCHED_K8S_VERSION }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/hiro-scheduler:${{ env.VERSION }}-k8s${{ env.SCHED_K8S_VERSION }}
+            ghcr.io/${{ github.repository }}/hiro-scheduler:sha-${{ github.sha }}-k8s${{ env.SCHED_K8S_VERSION }}
+            ghcr.io/${{ github.repository }}/hiro-scheduler:latest-k8s${{ env.SCHED_K8S_VERSION }}
+
+  package-push-chart:
+    name: Package + push Helm chart
+    needs: [resolve-version, helm-lint, helm-template-check]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.resolve-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VERSION }}
+      - name: Install Helm
+        run: make install-helm
+      - name: helm dependency update
+        run: helm dependency update charts/hiro-adaptive-platform
+      - name: Package chart
+        run: |
+          CHART_VERSION="${VERSION#v}"
+          helm package charts/hiro-adaptive-platform \
+            --version "$CHART_VERSION" \
+            --app-version "$CHART_VERSION" \
+            --destination "$CHART_OUTPUT_DIR"
+      - name: Push chart to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          helm push "$CHART_OUTPUT_DIR"/hiro-adaptive-platform-*.tgz "oci://ghcr.io/${{ github.repository }}/charts"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: ${{ env.CHART_OUTPUT_DIR }}/*.tgz
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [resolve-version, build-push-operator, build-push-scheduler, package-push-chart]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
+          path: ${{ env.CHART_OUTPUT_DIR }}
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-version.outputs.version }}
+          generate_release_notes: true
+          files: ${{ env.CHART_OUTPUT_DIR }}/*.tgz
