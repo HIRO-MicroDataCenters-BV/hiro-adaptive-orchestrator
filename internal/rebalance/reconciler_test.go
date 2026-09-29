@@ -688,7 +688,7 @@ func TestReconciler_MoveTimeoutWithClosedEnergyGateIsDeferred(t *testing.T) {
 
 	profile := testEnergyAwareProfile()
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
-	eao := testEAO("Waiting", "demo: energy window closed", boolPtr(false))
+	eao := testEAO("Waiting", "demo: energy window closed", new(false))
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao)
 	r.MoveActionTimeout = 50 * time.Millisecond
 
@@ -722,7 +722,7 @@ func TestReconciler_MoveTimeoutWithoutEnergyAwarenessStaysFailed(t *testing.T) {
 
 	profile := testProfileWithConditions(TriggerScheduled) // Awareness.Energy: false
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
-	eao := testEAO("Waiting", "demo: energy window closed", boolPtr(false))
+	eao := testEAO("Waiting", "demo: energy window closed", new(false))
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao)
 	r.MoveActionTimeout = 50 * time.Millisecond
 
@@ -753,7 +753,7 @@ func TestReconciler_MoveTimeoutWithOpenEnergyGateStaysFailed(t *testing.T) {
 
 	profile := testEnergyAwareProfile()
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
-	eao := testEAO("DeployImmediately", "window open", boolPtr(true))
+	eao := testEAO("DeployImmediately", "window open", new(true))
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao)
 	r.MoveActionTimeout = 50 * time.Millisecond
 
@@ -789,7 +789,7 @@ func TestReconciler_MoveWrongNodeStaysFailedEvenWithClosedEnergyGate(t *testing.
 
 	profile := testEnergyAwareProfile()
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
-	eao := testEAO("Waiting", "demo: energy window closed", boolPtr(false))
+	eao := testEAO("Waiting", "demo: energy window closed", new(false))
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao)
 	r.MoveActionTimeout = 5 * time.Second
 
