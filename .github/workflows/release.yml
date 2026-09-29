@@ -13,11 +13,6 @@ name: Release
 # ─── Repo Variables (Settings > Secrets and variables > Actions) ────────
 #   SCHED_K8S_VERSION   Optional. Target K8s minor version for the
 #                       scheduler image tag. Default: v1.35.0
-#   CHART_NAME          Optional. Chart directory under charts/ and the name
-#                       it's packaged/pushed as. Same Variable deploy.yml
-#                       reads — the single source of truth between the two,
-#                       since they're separate workflow runs with no direct
-#                       channel to pass this between them. Default: hiro-adaptive-platform
 
 on:
   push:
@@ -31,7 +26,7 @@ permissions:
 
 env:
   SCHED_K8S_VERSION: ${{ vars.SCHED_K8S_VERSION || 'v1.35.0' }}
-  CHART_NAME: ${{ vars.CHART_NAME || 'hiro-adaptive-platform' }}
+  CHART_NAME: hiro-adaptive-platform
   CHART_OUTPUT_DIR: release-artifacts
 
 jobs:
