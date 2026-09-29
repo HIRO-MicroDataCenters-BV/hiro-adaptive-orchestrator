@@ -60,6 +60,7 @@ graph LR
 - [Mock Decision Agent](#mock-decision-agent)
 - [Testing](#testing)
 - [Development Workflow](#development-workflow)
+- [Release Process](#release-process)
 - [Project Structure](#project-structure)
 - [Upgrading Go, Kubernetes, or Kubebuilder Version](#upgrading-go-or-kubernetes-version)
 - [Contributing](#contributing)
@@ -496,7 +497,7 @@ flowchart LR
 
 | Tool | Minimum version | Purpose |
 |------|----------------|---------|
-| Go | 1.25 | Build operator from source |
+| Go | 1.26 | Build operator from source |
 | Docker | any recent | Build container images |
 | kubectl | v1.29+ | Interact with cluster |
 | Kustomize | v5.8+ | Deploy via manifests |
@@ -1216,6 +1217,64 @@ flowchart LR
 
 ---
 
+<a id="release-process"></a>
+## 🚢 <u>Release Process</u>
+
+```mermaid
+flowchart LR
+    Merge["PR merged to main"] --> AutoTag["auto-tag job:<br/>compute next vX.Y.Z<br/>(build/version.sh)"]
+    Manual["git tag vX.Y.Z<br/>git push origin vX.Y.Z"] --> Resolve
+    AutoTag --> Resolve["resolve-version"]
+    Resolve --> Gates["manifests-drift-check<br/>helm-lint / helm-template-check"]
+    Gates --> Build["Build + push images<br/>(linux/amd64 + linux/arm64)"]
+    Gates --> Chart["Package + push chart<br/>(GHCR OCI)"]
+    Build --> Publish["Publish GitHub Release"]
+    Chart --> Publish
+    Publish --> Deploy["deploy.yml:<br/>helm upgrade on target cluster"]
+```
+
+`release.yml` and `deploy.yml` replace the previous `platform-deploy-chart.yml`.
+
+| Workflow | Trigger | Does |
+|---|---|---|
+| `release.yml` | Push to `main`, or a `vX.Y.Z` tag pushed by hand | Resolves the version, builds both images (multi-arch), packages + pushes the Helm chart, publishes the GitHub Release |
+| `deploy.yml` | A GitHub Release is published, or manual `workflow_dispatch` | Deploys that exact version to the target cluster via `helm upgrade --reuse-values` |
+| `platform-verify-chart.yml` | Every push/PR | Unchanged — builds and deploys to a throwaway Kind cluster in CI, no registry involved |
+
+### Versioning
+
+`build/version.sh` computes the next tag:
+1. Finds the latest `vX.Y.Z` tag that's an ancestor of the current commit.
+2. No such tag yet → `v1.0.0`, no bump applied.
+3. Otherwise scans commit messages since that tag for Conventional Commits: `BREAKING CHANGE`/`!:` → major, `feat:` → minor, anything else (including plain messages) → patch.
+
+No PR-title enforcement is in place, so an un-prefixed commit message defaults to a patch bump.
+
+### Manual Release
+
+To cut a release outside the normal merge-to-main flow (e.g. a hotfix from another branch):
+```bash
+git tag v1.4.1 <commit-or-branch>
+git push origin v1.4.1
+```
+This runs the exact same `release.yml` pipeline as an automatic release — only the `auto-tag` job is skipped, since the tag already exists.
+
+### What Gets Published
+
+- **Images** — `ghcr.io/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/hiro-adaptive-orchestrator-controller:vX.Y.Z` and `hiro-scheduler:vX.Y.Z-k8s<SCHED_K8S_VERSION>`, both built for `linux/amd64` and `linux/arm64`. Also tagged `sha-<commit>` and `latest`.
+- **Chart** — `oci://ghcr.io/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/charts/hiro-adaptive-platform`, chart version = the release tag without its leading `v`.
+- **GitHub Release** — auto-generated notes, with the packaged chart `.tgz` attached.
+
+### Deploying
+
+`deploy.yml` needs the `TARGET_KUBECONFIG` repo secret (base64-encoded kubeconfig). See the header comment in [.github/workflows/deploy.yml](.github/workflows/deploy.yml) for the full list of secrets/variables it reads (namespace, release name, scheduler mode, webhook/cert-manager toggles, etc.).
+
+Before deploying, it checks the target cluster against the `prerequisites.*` toggles: it fails outright if the webhook needs cert-manager but neither the bundled prerequisite nor an existing cert-manager is present (that combination can break admission cluster-wide), and warns (without blocking) if metrics-server or Prometheus are missing, since those only degrade rebalance pressure triggers or metrics scraping respectively.
+
+To redeploy a past version without rebuilding anything: **Actions → Deploy to Target Cluster → Run workflow**, supplying the version tag.
+
+---
+
 <a id="project-structure"></a>
 ## 📁 <u>Project Structure</u>
 
@@ -1372,6 +1431,39 @@ SCHED_K8S_VERSION=v1.36.0 hack/deploy_scheduler.sh
 ```
 
 The `pin_k8s_version.sh` script uses `go mod edit` to surgically update only the `k8s.io/kubernetes` require entry and the staging module replace directives — no full file rewrite.
+
+### Kubebuilder Version
+
+Three places must be kept in sync (not updated automatically by kubebuilder):
+
+| File | Field |
+|------|-------|
+| `PROJECT` | `cliVersion` |
+| `.github/workflows/platform-verify-chart.yml` | "Install kubebuilder vX.Y.Z" step |
+| `.github/workflows/release.yml` | "Install kubebuilder vX.Y.Z" step |
+
+Both CI workflows pin to the exact release tag rather than `latest` — see the `manifests-drift-check` job in either file — so a kubebuilder tooling bump can never masquerade as a manifest-drift failure.
+
+```bash
+# 1. Update PROJECT's cliVersion, and both workflows' install step + download URL, to vX.Y.Z
+
+# 2. Regenerate against the new scaffolding templates
+IMG_NAME=$(awk '/newName:/{print $2}' config/manager/kustomization.yaml)
+IMG_TAG=$(awk '/newTag:/{print $2}' config/manager/kustomization.yaml)
+export IMG="${IMG_NAME}:${IMG_TAG}"
+make manifests generate
+rm -rf dist && kubebuilder edit --plugins=helm/v2-alpha --force
+
+# 3. Review what actually changed — this should only touch scaffolding
+#    surface (config/, api/**/zz_generated.deepcopy.go,
+#    api/**/groupversion_info.go, dist/, cmd/main.go), never hand-written
+#    business logic under internal/ or scheduler-plugin/
+git diff -- config/ api/ dist/ cmd/main.go
+```
+
+A kubebuilder bump is usually paired with a dependency bump in the `go.mod` it now scaffolds by default (`go`, `sigs.k8s.io/controller-runtime`, `k8s.io/api`, `k8s.io/apimachinery`, `k8s.io/client-go`, `k8s.io/metrics`, and `sigs.k8s.io/controller-tools` via the Makefile's `CONTROLLER_TOOLS_VERSION`). Check the new version's release notes, bump `go.mod` (root module — `scheduler-plugin/`'s `k8s.io/kubernetes` pin tracks the target cluster version instead, see [Kubernetes Version](#kubernetes-version-scheduler-plugin) above, not this), `go mod tidy` both modules, and bump both Dockerfiles' `FROM golang:X.Y` to match.
+
+This project overrides kubebuilder's default `<group>.<domain>` CRD group naming (using `orchestration.hiro.io` rather than the default `orchestration.orchestration.hiro.io`) so existing deployed CRs are never broken by a version bump — preserve the `SchemeGroupVersion`/`+groupName` values in `api/v1alpha1/groupversion_info.go` by hand across any regeneration.
 
 ---
 

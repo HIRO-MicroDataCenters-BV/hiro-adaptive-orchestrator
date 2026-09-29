@@ -19,6 +19,11 @@ FROM golang:1.26 AS builder
 WORKDIR /workspace
 
 ARG K8S_VERSION=v1.35.0
+# TARGETOS/TARGETARCH are reserved BuildKit build-args, auto-populated for
+# the requested platform (see docker/build-push-action's `platforms:` input
+# in .github/workflows/release.yml) — same names the root Dockerfile uses.
+ARG TARGETOS
+ARG TARGETARCH
 
 # Copy the operator module files — scheduler-plugin depends on them via replace.
 COPY go.mod go.sum ./
@@ -35,7 +40,7 @@ RUN scheduler-plugin/pin_k8s_version.sh "$K8S_VERSION" \
 
 # Build — CGO_ENABLED=0 produces a fully static binary for the distroless image.
 RUN cd scheduler-plugin && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -trimpath \
       -ldflags="-s -w -X 'main.k8sVersion=${K8S_VERSION}'" \
       -o /usr/local/bin/hiro-scheduler \

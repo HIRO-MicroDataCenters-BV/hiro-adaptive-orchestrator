@@ -1,0 +1,189 @@
+name: Deploy to Target Cluster
+#
+# Triggered when release.yml publishes a GitHub Release, or manually for a
+# redeploy of a past version without rebuilding anything. Deploys the chart
+# and images exactly as release.yml published them to GHCR — no checkout of
+# this repo, no dependency on its Makefile. Deliberate: this job should look
+# like what an external CD tool (ArgoCD, Flux, Jenkins) would eventually do
+# against the same published artifacts, not a repo-specific script.
+#
+# ─── Secrets ────────────────────────────────────────────────────────────
+#   TARGET_KUBECONFIG   Required. Base64-encoded kubeconfig for the target
+#                       cluster (`kubectl config view --raw | base64`).
+#   GITHUB_TOKEN        Built-in, provided automatically by Actions. Used to
+#                       pull the chart from GHCR.
+#
+# ─── Repo Variables (Settings > Secrets and variables > Actions) ────────
+#   TARGET_NAMESPACE             k8s namespace for the release  (default: hiro-adaptive-orchestrator-system)
+#   TARGET_RELEASE_NAME          Helm release name              (default: hiro-adaptive-platform)
+#   SCHED_K8S_VERSION            Scheduler image's target K8s minor version (default: v1.35.0)
+#   SCHEDULER_MODE                none | plugin | extender        (default: none)
+#   WEBHOOK_ENABLE                true | false                    (default: false)
+#   WEBHOOK_CERT_MANAGER_ENABLE   true | false                    (default: false)
+#   PREREQ_CERT_MANAGER_ENABLE    true | false                    (default: false)
+#   PREREQ_METRICS_SERVER_ENABLE  true | false                    (default: false)
+#   PREREQ_PROMETHEUS_ENABLE      true | false                    (default: false)
+#   MOCK_AGENT_ENABLE             true | false                    (default: false)
+#   HELM_EXTRA_VALUES             Catch-all extra --set/-f args, applied on every run
+#
+# ─── workflow_dispatch input ─────────────────────────────────────────────
+#   version   Required for a manual run. Version tag to deploy (e.g. v1.4.0).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to deploy (e.g. v1.4.0)"
+        required: true
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  SCHED_K8S_VERSION: ${{ vars.SCHED_K8S_VERSION || 'v1.35.0' }}
+  CHART_NAME: hiro-adaptive-platform
+  POSTRENDERER_NAME: hiro-adaptive-platform-postrenderer
+
+jobs:
+  verify-secrets:
+    name: Verify required secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check TARGET_KUBECONFIG is set
+        run: |
+          if [ -z "${{ secrets.TARGET_KUBECONFIG }}" ]; then
+            echo "::error::TARGET_KUBECONFIG secret is not set. Add it in repo Settings > Secrets and variables > Actions (base64-encoded kubeconfig) before running this workflow."
+            exit 1
+          fi
+
+  deploy-target-cluster:
+    name: Deploy to target cluster
+    needs: verify-secrets
+    runs-on: ubuntu-latest
+    env:
+      HELM_NAMESPACE: ${{ vars.TARGET_NAMESPACE || 'hiro-adaptive-orchestrator-system' }}
+      HELM_PLATFORM_RELEASE: ${{ vars.TARGET_RELEASE_NAME || 'hiro-adaptive-platform' }}
+      VERSION: ${{ github.event.release.tag_name || inputs.version }}
+    steps:
+      - name: Install Helm
+        run: |
+          major=$(helm version --template '{{.Version}}' 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/')
+          if [ -z "$major" ] || [ "$major" -lt 4 ]; then
+            curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash
+          fi
+
+      - name: Write kubeconfig
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.TARGET_KUBECONFIG }}" | base64 -d > "$HOME/.kube/config"
+
+      - name: Pull released chart
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          CHART_REF="oci://ghcr.io/${{ github.repository }}/charts/$CHART_NAME"
+          helm pull "$CHART_REF" --version "${VERSION#v}" --untar --destination release-chart
+
+      - name: Install post-renderer plugin
+        run: |
+          helm plugin uninstall "$POSTRENDERER_NAME" >/dev/null 2>&1 || true
+          helm plugin install "release-chart/$CHART_NAME/postrender"
+
+      - name: Check prerequisites against target cluster
+        env:
+          WEBHOOK_ENABLE: ${{ vars.WEBHOOK_ENABLE || 'false' }}
+          WEBHOOK_CERT_MANAGER_ENABLE: ${{ vars.WEBHOOK_CERT_MANAGER_ENABLE || 'false' }}
+          PREREQ_CERT_MANAGER_ENABLE: ${{ vars.PREREQ_CERT_MANAGER_ENABLE || 'false' }}
+          PREREQ_METRICS_SERVER_ENABLE: ${{ vars.PREREQ_METRICS_SERVER_ENABLE || 'false' }}
+          PREREQ_PROMETHEUS_ENABLE: ${{ vars.PREREQ_PROMETHEUS_ENABLE || 'false' }}
+        run: |
+          export KUBECONFIG="$HOME/.kube/config"
+
+          # certManager: hard failure. The webhook's TLS cert is issued by
+          # cert-manager's Issuer/Certificate CRs (see templates/certmanager/);
+          # with no cert-manager anywhere, those never get reconciled, the
+          # webhook never gets a valid cert, and admission can break cluster-wide.
+          if [ "$WEBHOOK_ENABLE" = "true" ] && [ "$WEBHOOK_CERT_MANAGER_ENABLE" = "true" ] && [ "$PREREQ_CERT_MANAGER_ENABLE" != "true" ]; then
+            if ! kubectl get crd certificates.cert-manager.io >/dev/null 2>&1; then
+              echo "::error::webhook.certManager.enable is on, but prerequisites.certManager.enable=false and no cert-manager was found on the target cluster (missing CRD certificates.cert-manager.io). The webhook's TLS certificate will never be issued, which can block admission cluster-wide. Fix: set PREREQ_CERT_MANAGER_ENABLE=true to bundle cert-manager with this release, or install cert-manager on the target cluster first."
+              exit 1
+            fi
+          fi
+
+          # metricsServer: soft warning. internal/rebalance/pressure.go returns
+          # a descriptive per-call error when metrics.k8s.io is unreachable —
+          # the operator keeps running, only CPU/Memory pressure triggers degrade.
+          if [ "$PREREQ_METRICS_SERVER_ENABLE" != "true" ]; then
+            if ! kubectl get apiservice v1beta1.metrics.k8s.io >/dev/null 2>&1; then
+              echo "::warning::prerequisites.metricsServer.enable=false and no metrics-server was found on the target cluster (missing APIService v1beta1.metrics.k8s.io). The rebalance engine's CPU/Memory pressure triggers will error out until metrics-server is available. Fix: set PREREQ_METRICS_SERVER_ENABLE=true, or install metrics-server on the target cluster yourself."
+            fi
+          fi
+
+          # prometheus: informational only. Nothing in the operator depends on
+          # Prometheus internally — it's just a scrape target for monitoring.
+          if [ "$PREREQ_PROMETHEUS_ENABLE" != "true" ]; then
+            if ! kubectl get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1; then
+              echo "::notice::prerequisites.prometheus.enable=false and no Prometheus Operator was found on the target cluster (missing CRD servicemonitors.monitoring.coreos.com). This only affects metrics scraping — the stack itself will run normally without it."
+            fi
+          fi
+
+      - name: Deploy charts/hiro-adaptive-platform (phase 1)
+        run: |
+          export KUBECONFIG="$HOME/.kube/config"
+          IMAGE_REPO="ghcr.io/${{ github.repository }}/hiro-adaptive-orchestrator-controller:${VERSION}"
+          SCHED_REPO="ghcr.io/${{ github.repository }}/hiro-scheduler:${VERSION}-k8s${SCHED_K8S_VERSION}"
+          SCHED_MODE="${{ vars.SCHEDULER_MODE || 'none' }}"
+          EXTRA_ARGS="\
+            --reuse-values \
+            --set hiro-operator.manager.image.repository=${IMAGE_REPO%%:*} \
+            --set hiro-operator.manager.image.tag=${IMAGE_REPO##*:} \
+            --set scheduler.plugin.image.repository=${SCHED_REPO%%:*} \
+            --set scheduler.plugin.image.tag=${SCHED_REPO##*:} \
+            --set prerequisites.certManager.enable=${{ vars.PREREQ_CERT_MANAGER_ENABLE || 'false' }} \
+            --set prerequisites.metricsServer.enable=${{ vars.PREREQ_METRICS_SERVER_ENABLE || 'false' }} \
+            --set prerequisites.prometheus.enable=${{ vars.PREREQ_PROMETHEUS_ENABLE || 'false' }} \
+            --set mockAgent.enable=${{ vars.MOCK_AGENT_ENABLE || 'false' }} \
+            ${{ vars.HELM_EXTRA_VALUES }}"
+          if [ "$SCHED_MODE" != "plugin" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --set scheduler.mode=$SCHED_MODE --set webhook.enable=false"
+          fi
+          helm upgrade --install "$HELM_PLATFORM_RELEASE" "release-chart/$CHART_NAME" \
+            --namespace "$HELM_NAMESPACE" \
+            --create-namespace \
+            --post-renderer "$POSTRENDERER_NAME" \
+            --wait \
+            --timeout 10m \
+            $EXTRA_ARGS
+
+      - name: Resolve PlacementServer Service
+        if: vars.SCHEDULER_MODE == 'plugin'
+        run: |
+          export KUBECONFIG="$HOME/.kube/config"
+          SVC=$(kubectl -n $HELM_NAMESPACE get svc \
+            -l app.kubernetes.io/component=placement-server \
+            -o jsonpath='{.items[0].metadata.name}')
+          echo "PLACEMENT_SERVER_URL=http://${SVC}.${HELM_NAMESPACE}.svc.cluster.local:8090" >> "$GITHUB_ENV"
+
+      - name: Deploy charts/hiro-adaptive-platform (phase 2 — scheduler + webhook)
+        if: vars.SCHEDULER_MODE == 'plugin'
+        run: |
+          export KUBECONFIG="$HOME/.kube/config"
+          helm upgrade --install "$HELM_PLATFORM_RELEASE" "release-chart/$CHART_NAME" \
+            --namespace "$HELM_NAMESPACE" \
+            --create-namespace \
+            --post-renderer "$POSTRENDERER_NAME" \
+            --wait \
+            --timeout 10m \
+            --reuse-values \
+            --set scheduler.mode=plugin \
+            --set scheduler.plugin.placementServer.url=$PLACEMENT_SERVER_URL \
+            --set webhook.enable=${{ vars.WEBHOOK_ENABLE || 'false' }} \
+            --set webhook.certManager.enable=${{ vars.WEBHOOK_CERT_MANAGER_ENABLE || 'false' }}
+
+      - name: Show release status
+        if: always()
+        run: |
+          export KUBECONFIG="$HOME/.kube/config"
+          helm status "$HELM_PLATFORM_RELEASE" --namespace "$HELM_NAMESPACE"
