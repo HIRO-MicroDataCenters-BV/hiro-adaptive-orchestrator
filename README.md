@@ -60,6 +60,7 @@ graph LR
 - [Mock Decision Agent](#mock-decision-agent)
 - [Testing](#testing)
 - [Development Workflow](#development-workflow)
+- [Release Process](#release-process)
 - [Project Structure](#project-structure)
 - [Upgrading Go, Kubernetes, or Kubebuilder Version](#upgrading-go-or-kubernetes-version)
 - [Contributing](#contributing)
@@ -1213,6 +1214,64 @@ flowchart LR
 ```
 
 > **Never manually edit** auto-generated files: `config/crd/bases/*.yaml`, `config/rbac/role.yaml`, `zz_generated.*.go`, `dist/chart/`, `dist/install.yaml`.
+
+---
+
+<a id="release-process"></a>
+## 🚢 <u>Release Process</u>
+
+```mermaid
+flowchart LR
+    Merge["PR merged to main"] --> AutoTag["auto-tag job:<br/>compute next vX.Y.Z<br/>(build/version.sh)"]
+    Manual["git tag vX.Y.Z<br/>git push origin vX.Y.Z"] --> Resolve
+    AutoTag --> Resolve["resolve-version"]
+    Resolve --> Gates["manifests-drift-check<br/>helm-lint / helm-template-check"]
+    Gates --> Build["Build + push images<br/>(linux/amd64 + linux/arm64)"]
+    Gates --> Chart["Package + push chart<br/>(GHCR OCI)"]
+    Build --> Publish["Publish GitHub Release"]
+    Chart --> Publish
+    Publish --> Deploy["deploy.yml:<br/>helm upgrade on target cluster"]
+```
+
+`release.yml` and `deploy.yml` replace the previous `platform-deploy-chart.yml`.
+
+| Workflow | Trigger | Does |
+|---|---|---|
+| `release.yml` | Push to `main`, or a `vX.Y.Z` tag pushed by hand | Resolves the version, builds both images (multi-arch), packages + pushes the Helm chart, publishes the GitHub Release |
+| `deploy.yml` | A GitHub Release is published, or manual `workflow_dispatch` | Deploys that exact version to the target cluster via `helm upgrade --reuse-values` |
+| `platform-verify-chart.yml` | Every push/PR | Unchanged — builds and deploys to a throwaway Kind cluster in CI, no registry involved |
+
+### Versioning
+
+`build/version.sh` computes the next tag:
+1. Finds the latest `vX.Y.Z` tag that's an ancestor of the current commit.
+2. No such tag yet → `v1.0.0`, no bump applied.
+3. Otherwise scans commit messages since that tag for Conventional Commits: `BREAKING CHANGE`/`!:` → major, `feat:` → minor, anything else (including plain messages) → patch.
+
+No PR-title enforcement is in place, so an un-prefixed commit message defaults to a patch bump.
+
+### Manual Release
+
+To cut a release outside the normal merge-to-main flow (e.g. a hotfix from another branch):
+```bash
+git tag v1.4.1 <commit-or-branch>
+git push origin v1.4.1
+```
+This runs the exact same `release.yml` pipeline as an automatic release — only the `auto-tag` job is skipped, since the tag already exists.
+
+### What Gets Published
+
+- **Images** — `ghcr.io/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/hiro-adaptive-orchestrator-controller:vX.Y.Z` and `hiro-scheduler:vX.Y.Z-k8s<SCHED_K8S_VERSION>`, both built for `linux/amd64` and `linux/arm64`. Also tagged `sha-<commit>` and `latest`.
+- **Chart** — `oci://ghcr.io/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/charts/hiro-adaptive-platform`, chart version = the release tag without its leading `v`.
+- **GitHub Release** — auto-generated notes, with the packaged chart `.tgz` attached.
+
+### Deploying
+
+`deploy.yml` needs the `TARGET_KUBECONFIG` repo secret (base64-encoded kubeconfig). See the header comment in [.github/workflows/deploy.yml](.github/workflows/deploy.yml) for the full list of secrets/variables it reads (namespace, release name, scheduler mode, webhook/cert-manager toggles, etc.).
+
+Before deploying, it checks the target cluster against the `prerequisites.*` toggles: it fails outright if the webhook needs cert-manager but neither the bundled prerequisite nor an existing cert-manager is present (that combination can break admission cluster-wide), and warns (without blocking) if metrics-server or Prometheus are missing, since those only degrade rebalance pressure triggers or metrics scraping respectively.
+
+To redeploy a past version without rebuilding anything: **Actions → Deploy to Target Cluster → Run workflow**, supplying the version tag.
 
 ---
 
