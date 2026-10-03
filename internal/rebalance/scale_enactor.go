@@ -123,7 +123,7 @@ func resolveReplicaBounds(
 		for i := range hpaList.Items {
 			hpa := &hpaList.Items[i]
 			target := hpa.Spec.ScaleTargetRef
-			if target.Kind != ref.Kind || target.Name != ref.Name {
+			if target.Kind != string(ref.Kind) || target.Name != ref.Name {
 				continue
 			}
 			lo := int32(1)
@@ -209,7 +209,7 @@ func scaleEnactor(
 		return scaleResult{}, fmt.Errorf("AdjustReplicas does not support workload kind %q", ref.Kind)
 	}
 
-	if err := awaitReadyReplicas(ctx, c, ref.Kind, key, targetReplicas, timeout); err != nil {
+	if err := awaitReadyReplicas(ctx, c, string(ref.Kind), key, targetReplicas, timeout); err != nil {
 		outcome, reason := classifyScheduleTimeout(ctx, c, eaoGVK, profile, err.Error())
 		return scaleResult{outcome: outcome, reason: reason}, nil
 	}

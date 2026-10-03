@@ -94,18 +94,11 @@ rules:
   - orchestrationprofiles
   verbs:
   - create
-  - delete
   - get
   - list
   - patch
   - update
   - watch
-- apiGroups:
-  - orchestration.hiro.io
-  resources:
-  - orchestrationprofiles/finalizers
-  verbs:
-  - update
 - apiGroups:
   - orchestration.hiro.io
   resources:

@@ -33,7 +33,6 @@ import (
 //     kind must be one of the supported workload kinds.
 //     apiVersion must be parseable as group/version.
 //   - placement.strategy: required and must be one of the supported strategies.
-//     EnergyAware strategy requires awareness.energy = true.
 //   - rebalancing: only validated when enabled = true.
 //     cooldownSeconds must be >= 0.
 //     each triggerCondition must be a supported value.
@@ -127,15 +126,6 @@ func validatePlacement(
 			utils.KeysOf(validStrategies),
 		))
 	}
-
-	// // EnergyAware strategy requires energy awareness explicitly enabled.
-	// if spec.Placement.Strategy == "EnergyAware" && !spec.Placement.Awareness.Energy {
-	// 	errs = append(errs, field.Invalid(
-	// 		placementPath.Child("awareness").Child("energy"),
-	// 		false,
-	// 		"energy awareness must be enabled when strategy is EnergyAware",
-	// 	))
-	// }
 
 	return errs
 }

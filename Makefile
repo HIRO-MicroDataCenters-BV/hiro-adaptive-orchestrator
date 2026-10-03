@@ -323,7 +323,11 @@ HELM_PLATFORM_POSTRENDERER ?= hiro-adaptive-platform-postrenderer
 
 .PHONY: helm-platform-postrenderer-install
 helm-platform-postrenderer-install: ## Install/refresh the umbrella chart's post-renderer plugin.
-	$(HELM) plugin uninstall $(HELM_PLATFORM_POSTRENDERER) >/dev/null 2>&1 || true
+	# Helm v4 names the installed plugin dir after the source folder's
+	# basename, not plugin.yaml's `name:` field — `plugin uninstall
+	# $(HELM_PLATFORM_POSTRENDERER)` can't find it under that name, so
+	# remove the real on-disk dir directly instead.
+	@rm -rf "$$($(HELM) env HELM_PLUGINS)/$(notdir $(HELM_PLATFORM_CHART_DIR)/postrender)"
 	$(HELM) plugin install $(CURDIR)/$(HELM_PLATFORM_CHART_DIR)/postrender
 
 .PHONY: helm-platform-lint

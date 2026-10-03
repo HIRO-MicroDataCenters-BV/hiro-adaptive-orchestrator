@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -206,6 +207,21 @@ func (w *StateWriter) Transition(
 				Details:          rs.Details,
 				StartedAt:        rs.StartedAt,
 				LastTransitionAt: now,
+			})
+
+			escalatedStatus := metav1.ConditionFalse
+			escalatedReason := "NotEscalated"
+			escalatedMessage := "rebalance loop is running normally"
+			if rs.Escalated {
+				escalatedStatus = metav1.ConditionTrue
+				escalatedReason = "Escalated"
+				escalatedMessage = rs.EscalatedReason
+			}
+			apimeta.SetStatusCondition(&profile.Status.Conditions, metav1.Condition{
+				Type:    orchestrationv1alpha1.ConditionRebalancingEscalated,
+				Status:  escalatedStatus,
+				Reason:  escalatedReason,
+				Message: escalatedMessage,
 			})
 		}
 
