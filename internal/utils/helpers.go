@@ -37,11 +37,11 @@ const kindDeployment = "Deployment"
 const kindStatefulSet = "StatefulSet"
 const kindJob = "Job"
 
-// KeysOf extracts the keys of a string→bool map as a slice.
+// KeysOf extracts the keys of a map[K]bool as a slice.
 // Used for generating field.NotSupported error messages with the full list
 // of accepted values.
-func KeysOf(m map[string]bool) []string {
-	keys := make([]string, 0, len(m))
+func KeysOf[K comparable](m map[K]bool) []K {
+	keys := make([]K, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
 	}
@@ -231,7 +231,7 @@ func FindEAOForApp(
 			refNamespace = eao.GetNamespace()
 		}
 
-		if refName == appRef.Name && refNamespace == appRef.Namespace && refKind == appRef.Kind {
+		if refName == appRef.Name && refNamespace == appRef.Namespace && refKind == string(appRef.Kind) {
 			return eao, nil
 		}
 	}

@@ -238,9 +238,14 @@ func buildAOProfileContext(
 	profile *orchestrationv1alpha1.OrchestrationProfile,
 	pod *corev1.Pod,
 ) *AOProfileContext {
+	triggerConditions := make([]string, len(profile.Spec.Rebalancing.TriggerConditions))
+	for i, c := range profile.Spec.Rebalancing.TriggerConditions {
+		triggerConditions[i] = string(c)
+	}
+
 	return &AOProfileContext{
 		ProfileName: profile.Name,
-		Strategy:    profile.Spec.Placement.Strategy,
+		Strategy:    string(profile.Spec.Placement.Strategy),
 		Awareness: AwarenessFlags{
 			CPU:    profile.Spec.Placement.Awareness.CPU,
 			Memory: profile.Spec.Placement.Awareness.Memory,
@@ -251,7 +256,7 @@ func buildAOProfileContext(
 		Rebalancing: RebalancingConfig{
 			Enabled:           profile.Spec.Rebalancing.Enabled,
 			CooldownSeconds:   profile.Spec.Rebalancing.CooldownSeconds,
-			TriggerConditions: profile.Spec.Rebalancing.TriggerConditions,
+			TriggerConditions: triggerConditions,
 		},
 	}
 }
@@ -333,7 +338,7 @@ func (b *DecisionContextBuilder) fetchEAOForPod(
 	}
 
 	appRef := orchestrationv1alpha1.ApplicationReference{
-		Name: appName, Namespace: appNamespace, Kind: appKind,
+		Name: appName, Namespace: appNamespace, Kind: orchestrationv1alpha1.ApplicationKind(appKind),
 	}
 	eao, err := utils.FindEAOForApp(ctx, b.client, b.eaoGVK, appRef)
 	if err != nil {

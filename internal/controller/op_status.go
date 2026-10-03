@@ -18,9 +18,12 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -36,6 +39,11 @@ import (
 // updateStatus applies a mutator function to the profile's Status, stamps
 // LastUpdatedTime, and persists the change via the status subresource.
 //
+// Skips the write entirely if the mutation didn't change anything observable —
+// avoids a self-triggered reconcile loop on every periodic tick.
+// RebalancingStatus is excluded from the comparison: this reconciler never
+// touches it (see the NOTE in Reconcile), it's owned by the rebalance engine.
+//
 // Optimistic concurrency conflicts (another writer updated the resource between
 // our Get and Update) are handled by requeuing rather than hard-failing, so
 // the next reconcile picks up the latest version automatically.
@@ -46,15 +54,26 @@ func (r *OrchestrationProfileReconciler) updateStatus(
 ) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 
-	previousStatus := profile.Status.Status
+	previous := profile.Status.DeepCopy()
 
 	mutate(&profile.Status)
+
+	unchanged := profile.Status.Status == previous.Status &&
+		profile.Status.Reason == previous.Reason &&
+		reflect.DeepEqual(profile.Status.PlacementStatus, previous.PlacementStatus) &&
+		profile.Generation == previous.ObservedGeneration
+	if unchanged {
+		return ctrl.Result{}, nil
+	}
+
 	profile.Status.LastUpdatedTime = metav1.Now()
+	profile.Status.ObservedGeneration = profile.Generation
+	setReadyCondition(profile)
 
 	// Emit an event whenever the status transitions to a new value.
-	if profile.Status.Status != previousStatus {
+	if profile.Status.Status != previous.Status {
 		r.emitStatusTransitionEvent(profile)
-		metrics.ControllerProfileStatusTransitionsTotal.WithLabelValues(previousStatus, profile.Status.Status).Inc()
+		metrics.ControllerProfileStatusTransitionsTotal.WithLabelValues(string(previous.Status), string(profile.Status.Status)).Inc()
 	}
 
 	if err := r.Status().Update(ctx, profile); err != nil {
@@ -69,43 +88,75 @@ func (r *OrchestrationProfileReconciler) updateStatus(
 	return ctrl.Result{}, nil
 }
 
+// placementStatusMessage renders a human-readable summary of status, shared
+// by the recorded Event and the Ready condition so they never drift apart.
+func placementStatusMessage(
+	status orchestrationv1alpha1.ProfileStatus,
+	reason string,
+	ps orchestrationv1alpha1.PlacementStatus,
+) string {
+	switch status {
+	case StatusActive:
+		return fmt.Sprintf("All %d pod(s) are running and ready (%s strategy)", ps.ReadyPods, ps.Strategy)
+	case StatusPending:
+		return fmt.Sprintf("%d pod(s) are still being scheduled (%s strategy)", ps.PendingPods, ps.Strategy)
+	case StatusNoPods:
+		return fmt.Sprintf("Application has no pods yet (%s strategy)", ps.Strategy)
+	case StatusPartial:
+		return fmt.Sprintf("%d/%d pod(s) ready, %d pending, %d failed (%s strategy)",
+			ps.ReadyPods, ps.ObservedPods, ps.PendingPods, ps.FailedPods, ps.Strategy)
+	case StatusDegraded:
+		return fmt.Sprintf("%d pod(s) failed out of %d observed (%s strategy)", ps.FailedPods, ps.ObservedPods, ps.Strategy)
+	case StatusError:
+		return reason
+	default:
+		return "status not yet observed"
+	}
+}
+
 // emitStatusTransitionEvent fires a Kubernetes event describing the new status.
 // Called only when the status value actually changes to avoid event spam.
 func (r *OrchestrationProfileReconciler) emitStatusTransitionEvent(
 	profile *orchestrationv1alpha1.OrchestrationProfile,
 ) {
-	ps := profile.Status.PlacementStatus
+	msg := placementStatusMessage(profile.Status.Status, profile.Status.Reason, profile.Status.PlacementStatus)
 	switch profile.Status.Status {
 	case StatusActive:
-		r.Recorder.Eventf(profile, corev1.EventTypeNormal, EventReasonPlacementActive,
-			"All %d pod(s) are running and ready (%s strategy)",
-			ps.ReadyPods, ps.Strategy,
-		)
+		r.Recorder.Event(profile, corev1.EventTypeNormal, EventReasonPlacementActive, msg)
 	case StatusPending:
-		r.Recorder.Eventf(profile, corev1.EventTypeNormal, EventReasonPlacementPending,
-			"%d pod(s) are still being scheduled (%s strategy)",
-			ps.PendingPods, ps.Strategy,
-		)
+		r.Recorder.Event(profile, corev1.EventTypeNormal, EventReasonPlacementPending, msg)
 	case StatusNoPods:
-		r.Recorder.Eventf(profile, corev1.EventTypeNormal, EventReasonApplicationNoPods,
-			"Application has no pods yet (%s strategy)",
-			ps.Strategy,
-		)
+		r.Recorder.Event(profile, corev1.EventTypeNormal, EventReasonApplicationNoPods, msg)
 	case StatusPartial:
-		r.Recorder.Eventf(profile, corev1.EventTypeWarning, EventReasonPlacementPartial,
-			"%d/%d pod(s) ready, %d pending, %d failed (%s strategy)",
-			ps.ReadyPods, ps.ObservedPods, ps.PendingPods, ps.FailedPods, ps.Strategy,
-		)
+		r.Recorder.Event(profile, corev1.EventTypeWarning, EventReasonPlacementPartial, msg)
 	case StatusDegraded:
-		r.Recorder.Eventf(profile, corev1.EventTypeWarning, EventReasonPlacementDegraded,
-			"%d pod(s) failed out of %d observed (%s strategy)",
-			ps.FailedPods, ps.ObservedPods, ps.Strategy,
-		)
+		r.Recorder.Event(profile, corev1.EventTypeWarning, EventReasonPlacementDegraded, msg)
 	case StatusError:
-		r.Recorder.Eventf(profile, corev1.EventTypeWarning, EventReasonPlacementError,
-			"Profile entered error state: %s", profile.Status.Reason,
-		)
+		r.Recorder.Event(profile, corev1.EventTypeWarning, EventReasonPlacementError, "Profile entered error state: "+msg)
 	}
+}
+
+// setReadyCondition derives the Ready condition from the just-computed
+// Status — True only when Status is Active.
+func setReadyCondition(profile *orchestrationv1alpha1.OrchestrationProfile) {
+	status := profile.Status.Status
+
+	condStatus := metav1.ConditionFalse
+	reason := string(status)
+	switch status {
+	case "":
+		condStatus = metav1.ConditionUnknown
+		reason = "Unknown"
+	case StatusActive:
+		condStatus = metav1.ConditionTrue
+	}
+
+	apimeta.SetStatusCondition(&profile.Status.Conditions, metav1.Condition{
+		Type:    orchestrationv1alpha1.ConditionReady,
+		Status:  condStatus,
+		Reason:  reason,
+		Message: placementStatusMessage(status, profile.Status.Reason, profile.Status.PlacementStatus),
+	})
 }
 
 // -----------------------------------------------------------------------------
@@ -174,7 +225,7 @@ func buildPlacementStatus(
 	readyCount, pendingCount, failedCount, podStatuses := fetchPodStatuses(pods)
 
 	return orchestrationv1alpha1.PlacementStatus{
-		Strategy:     profile.Spec.Placement.Strategy,
+		Strategy:     string(profile.Spec.Placement.Strategy),
 		ObservedPods: len(pods),
 		ReadyPods:    readyCount,
 		PendingPods:  pendingCount,
@@ -195,7 +246,7 @@ func buildPlacementStatus(
 //	any failed pods     → Degraded
 //	mix pending+running → Partial  (partial rollout or mixed health)
 //	all pods pending    → Pending   (still scheduling)
-func deriveProfileStatus(total, running, failed, pending int) string {
+func deriveProfileStatus(total, running, failed, pending int) orchestrationv1alpha1.ProfileStatus {
 	if total == 0 {
 		return StatusNoPods
 	}

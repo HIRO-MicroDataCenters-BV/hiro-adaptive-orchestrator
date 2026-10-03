@@ -111,37 +111,25 @@ var _ = Describe("OrchestrationProfile Reconciler", func() {
 	Context("when the profile spec contains an unsupported applicationRef kind", func() {
 		const profileName = "invalid-kind-profile"
 
-		BeforeEach(func() {
+		// The CRD schema's enum on applicationRef.kind now rejects this at
+		// admission, before Reconcile ever sees it — validateProfile's own
+		// check of the same rule is covered directly in op_validation_test.go.
+		It("is rejected by the API server at admission", func() {
 			profile := &orchestrationv1alpha1.OrchestrationProfile{
 				ObjectMeta: metav1.ObjectMeta{Name: profileName},
 				Spec: orchestrationv1alpha1.OrchestrationProfileSpec{
 					ApplicationRef: orchestrationv1alpha1.ApplicationReference{
 						APIVersion: "apps/v1",
-						Kind:       "DaemonSet", // not in supportedAppKinds
+						Kind:       "DaemonSet", // not a supported ApplicationKind
 						Name:       "my-app",
 						Namespace:  "default",
 					},
 					Placement: orchestrationv1alpha1.PlacementSpec{Strategy: "Balanced"},
 				},
 			}
-			Expect(k8sClient.Create(testCtx, profile)).To(Succeed())
-		})
-
-		AfterEach(func() {
-			profile := &orchestrationv1alpha1.OrchestrationProfile{}
-			if err := k8sClient.Get(testCtx, types.NamespacedName{Name: profileName}, profile); err == nil {
-				Expect(k8sClient.Delete(testCtx, profile)).To(Succeed())
-			}
-		})
-
-		It("sets status to Error with a non-empty reason", func() {
-			_, err := newReconciler().Reconcile(testCtx, reconcileRequest(profileName))
-			Expect(err).NotTo(HaveOccurred())
-
-			profile := &orchestrationv1alpha1.OrchestrationProfile{}
-			Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: profileName}, profile)).To(Succeed())
-			Expect(profile.Status.Status).To(Equal(StatusError))
-			Expect(profile.Status.Reason).NotTo(BeEmpty())
+			err := k8sClient.Create(testCtx, profile)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.applicationRef.kind"))
 		})
 	})
 

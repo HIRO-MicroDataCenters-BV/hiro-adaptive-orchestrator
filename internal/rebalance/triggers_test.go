@@ -42,7 +42,7 @@ func testAppRef() orchestrationv1alpha1.ApplicationReference {
 	}
 }
 
-func testProfileWithConditions(conditions ...string) *orchestrationv1alpha1.OrchestrationProfile {
+func testProfileWithConditions(conditions ...orchestrationv1alpha1.TriggerCondition) *orchestrationv1alpha1.OrchestrationProfile {
 	return &orchestrationv1alpha1.OrchestrationProfile{
 		ObjectMeta: metav1.ObjectMeta{Name: "profile-a"},
 		Spec: orchestrationv1alpha1.OrchestrationProfileSpec{

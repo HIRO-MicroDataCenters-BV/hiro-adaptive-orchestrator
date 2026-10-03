@@ -114,15 +114,15 @@ var _ = Describe("Profile Validation", func() {
 		})
 
 		DescribeTable("accepts all supported applicationRef kinds",
-			func(kind string) {
+			func(kind orchestrationv1alpha1.ApplicationKind) {
 				p := validProfileFixture()
 				p.Spec.ApplicationRef.Kind = kind
 				Expect(r.validateProfile(p)).To(BeEmpty())
 			},
-			Entry("Deployment", "Deployment"),
-			Entry("StatefulSet", "StatefulSet"),
-			Entry("ReplicaSet", "ReplicaSet"),
-			Entry("Job", "Job"),
+			Entry("Deployment", orchestrationv1alpha1.ApplicationKindDeployment),
+			Entry("StatefulSet", orchestrationv1alpha1.ApplicationKindStatefulSet),
+			Entry("ReplicaSet", orchestrationv1alpha1.ApplicationKindReplicaSet),
+			Entry("Job", orchestrationv1alpha1.ApplicationKindJob),
 		)
 	})
 
@@ -148,14 +148,14 @@ var _ = Describe("Profile Validation", func() {
 		})
 
 		DescribeTable("accepts all valid strategies",
-			func(strategy string) {
+			func(strategy orchestrationv1alpha1.PlacementStrategy) {
 				p := validProfileFixture()
 				p.Spec.Placement.Strategy = strategy
 				Expect(r.validateProfile(p)).To(BeEmpty())
 			},
-			Entry("Balanced", "Balanced"),
-			Entry("Packed", "Packed"),
-			Entry("Spread", "Spread"),
+			Entry("Balanced", orchestrationv1alpha1.PlacementStrategyBalanced),
+			Entry("Packed", orchestrationv1alpha1.PlacementStrategyPacked),
+			Entry("Spread", orchestrationv1alpha1.PlacementStrategySpread),
 		)
 	})
 
@@ -167,8 +167,8 @@ var _ = Describe("Profile Validation", func() {
 		It("skips all rebalancing checks when rebalancing is disabled", func() {
 			p := validProfileFixture()
 			p.Spec.Rebalancing.Enabled = false
-			p.Spec.Rebalancing.CooldownSeconds = -99                        // would be invalid if enabled
-			p.Spec.Rebalancing.TriggerConditions = []string{"BadCondition"} // would be invalid if enabled
+			p.Spec.Rebalancing.CooldownSeconds = -99                                                        // would be invalid if enabled
+			p.Spec.Rebalancing.TriggerConditions = []orchestrationv1alpha1.TriggerCondition{"BadCondition"} // would be invalid if enabled
 			Expect(r.validateProfile(p)).To(BeEmpty())
 		})
 
@@ -191,7 +191,7 @@ var _ = Describe("Profile Validation", func() {
 		It("rejects an unsupported trigger condition when rebalancing is enabled", func() {
 			p := validProfileFixture()
 			p.Spec.Rebalancing.Enabled = true
-			p.Spec.Rebalancing.TriggerConditions = []string{"CPUThreshold", "InvalidCondition"}
+			p.Spec.Rebalancing.TriggerConditions = []orchestrationv1alpha1.TriggerCondition{"CPUThreshold", "InvalidCondition"}
 			errs := r.validateProfile(p)
 			Expect(errs).NotTo(BeEmpty())
 			// The invalid entry is at index 1
@@ -199,17 +199,17 @@ var _ = Describe("Profile Validation", func() {
 		})
 
 		DescribeTable("accepts all valid trigger conditions",
-			func(condition string) {
+			func(condition orchestrationv1alpha1.TriggerCondition) {
 				p := validProfileFixture()
 				p.Spec.Rebalancing.Enabled = true
-				p.Spec.Rebalancing.TriggerConditions = []string{condition}
+				p.Spec.Rebalancing.TriggerConditions = []orchestrationv1alpha1.TriggerCondition{condition}
 				Expect(r.validateProfile(p)).To(BeEmpty())
 			},
-			Entry("CPUThreshold", "CPUThreshold"),
-			Entry("MemoryThreshold", "MemoryThreshold"),
-			Entry("EnergyThreshold", "EnergyThreshold"),
-			Entry("NodeFailure", "NodeFailure"),
-			Entry("Scheduled", "Scheduled"),
+			Entry("CPUThreshold", orchestrationv1alpha1.TriggerConditionCPUThreshold),
+			Entry("MemoryThreshold", orchestrationv1alpha1.TriggerConditionMemoryThreshold),
+			Entry("EnergyThreshold", orchestrationv1alpha1.TriggerConditionEnergyThreshold),
+			Entry("NodeFailure", orchestrationv1alpha1.TriggerConditionNodeFailure),
+			Entry("Scheduled", orchestrationv1alpha1.TriggerConditionScheduled),
 		)
 	})
 })
