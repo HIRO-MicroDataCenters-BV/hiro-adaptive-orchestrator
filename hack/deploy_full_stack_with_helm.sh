@@ -14,7 +14,13 @@
 #
 # ─── Options ─────────────────────────────────────────────────────────────────
 #   KIND_CLUSTER_NAME     Kind cluster to create/reuse        (default: hiro-platform-verify)
-#   SCHED_K8S_VERSION      k8s version to build scheduler for  (default: v1.35.0)
+#   SCHED_K8S_VERSION     k8s version to build scheduler for  (default: v1.35.0)
+#   HELM_NAMESPACE        Namespace for the Helm release      (default: hiro-adaptive-orchestrator-system)
+#   HELM_PLATFORM_RELEASE Helm release name                   (default: hiro-adaptive-platform)
+#   SCHED_NAME            schedulerName the webhook injects   (default: hiro-scheduler)
+#
+# No GITHUB_PAT_TOKEN/registry needed — images are built locally and loaded
+# directly into Kind, unlike hack/deploy_full_stack.sh which pushes to GHCR.
 #
 # ─── Usage ───────────────────────────────────────────────────────────────────
 #   hack/deploy_full_stack_with_helm.sh [deploy|clean]

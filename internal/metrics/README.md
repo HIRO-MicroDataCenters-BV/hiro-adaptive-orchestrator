@@ -136,7 +136,7 @@ path (`/extender/*`) in one place — both protocols share the same underlying `
 | `path` | placement metrics | `plugin`, `extender` |
 | `result` | `hiro_placement_score_requests_total` | `store_hit`, `ai_success`, `ai_error` |
 | `allowed` | `hiro_placement_filter_requests_total` | `true`, `false` |
-| `from` / `to` | `hiro_controller_profile_status_transitions_total` | `Pending`, `Active`, `Degraded`, `Error`, `InUse` |
+| `from` / `to` | `hiro_controller_profile_status_transitions_total` | `NoPods`, `Pending`, `Active`, `Partial`, `Degraded`, `Error` |
 | `outcome` | `hiro_webhook_pod_default_outcomes_total` | `mutated`, `already_set`, `no_profile`, `lookup_error` |
 
 All label *values* are named Go constants (`GuardrailThreshold`, `PathPlugin`,

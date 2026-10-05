@@ -354,7 +354,9 @@ template`:
   (operator first, then scheduler plugin + webhook once the operator's
   Service exists), and health-checks the result. Writes a standalone
   kubeconfig to `.kind-kubeconfig-<cluster-name>.yaml` and prints it.
-  Options: `KIND_CLUSTER_NAME`, `SCHED_K8S_VERSION`. Usage:
+  No `GITHUB_PAT_TOKEN`/registry needed — images build and load locally.
+  Options: `KIND_CLUSTER_NAME`, `SCHED_K8S_VERSION`, `HELM_NAMESPACE`,
+  `HELM_PLATFORM_RELEASE`, `SCHED_NAME`. Usage:
   `hack/deploy_full_stack_with_helm.sh [deploy|clean]`.
 - **`.github/workflows/platform-verify-chart.yml`** — same idea in CI, on
   every push/PR, against a throwaway Kind cluster created inside the job.

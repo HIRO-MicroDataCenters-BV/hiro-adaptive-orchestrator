@@ -927,6 +927,13 @@ single subsequent failure could immediately re-cross an already-close-to-thresho
 flag is intentionally never cleared automatically: auto-clearing would defeat the point of
 requiring a human to have actually looked at it.
 
+**The `RebalancingEscalated` status condition lags behind this patch.** It mirrors `rs.Escalated`,
+but is only recomputed inside `StateWriter.Transition`'s own terminal-write branch — so right
+after the patch above, the condition still reads `True` until the *next* rebalance cycle reaches
+`Watching` and rewrites it. This is a real but harmless window: nothing reads the condition to
+decide whether the loop is paused (that's `rs.Escalated` itself, checked directly), so the lag is
+cosmetic, self-heals on the next cycle, and never blocks recovery.
+
 <a id="wiring-into-the-system"></a>
 ## 🔌 <u>Wiring into the system</u>
 
