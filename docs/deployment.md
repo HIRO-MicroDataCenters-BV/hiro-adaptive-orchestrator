@@ -2,7 +2,7 @@
 
 Every way to deploy this project: the recommended Helm umbrella chart, the shell-script full stack, and every standalone single-component path (operator only, scheduler only, extender only, mock agent, manual Kustomize, YAML bundle), plus the full parameter reference.
 
-Referenced from the main [README](../README.md#deployment) and [Quick Start](../README.md#quick-start), which only cover the single recommended command — this file has the full detail.
+Referenced from the main [README's Quick Start](../README.md#quick-start), which only covers the single recommended command — this file has the full detail.
 
 ```mermaid
 flowchart LR

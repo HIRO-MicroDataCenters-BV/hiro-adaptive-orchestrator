@@ -34,7 +34,6 @@ graph LR
 - [Features](#features)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
-- [Deployment](#deployment)
 - [Development Workflow](#development-workflow)
   - [Unit & Integration Tests](#unit--integration-tests)
   - [End-to-End Tests](#end-to-end-tests)
@@ -142,17 +141,15 @@ Some paths need more — cert-manager for the scheduler webhook's TLS, a reachab
 hack/deploy_full_stack_with_helm.sh deploy
 ```
 
-Installs the operator, webhook, scheduler, and mock agent as one Helm release against a local Kind cluster — no registry needed. See [Deployment](#deployment) for every other way to deploy.
+Installs the operator, webhook, scheduler, and mock agent as one Helm release against a local Kind cluster — no registry needed, via the Helm umbrella chart at `charts/hiro-adaptive-platform`. For a real cluster (not Kind), use `make helm-platform-deploy` instead.
 
----
+Every parameter — cluster name, namespace, scheduler mode (plugin/extender), mock vs. real AI agent, and more — has a sane default and can be overridden via environment variables, e.g.:
 
-<a id="deployment"></a>
+```bash
+KIND_CLUSTER_NAME=my-cluster hack/deploy_full_stack_with_helm.sh deploy
+```
 
-## 📦 <u>Deployment</u>
-
-**`hack/deploy_full_stack_with_helm.sh deploy`** (local Kind) or **`make helm-platform-deploy`** (real cluster) is the recommended way to deploy the full stack, via the Helm umbrella chart at `charts/hiro-adaptive-platform`.
-
-Every other path — shell scripts, operator-only, scheduler-only, extender-only, mock agent, manual Kustomize, YAML bundle — plus the full parameter reference and phase-by-phase breakdown, is documented in **[docs/deployment.md](docs/deployment.md)**.
+Every other deployment path — shell scripts, operator-only, scheduler-only, extender-only, mock agent, manual Kustomize, YAML bundle — plus the full environment-variable reference and phase-by-phase breakdown, is documented in **[docs/deployment.md](docs/deployment.md)**.
 
 ---
 
