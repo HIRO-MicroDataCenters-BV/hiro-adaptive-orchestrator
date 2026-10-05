@@ -21,12 +21,23 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+// ApplicationKind enumerates the workload kinds an OrchestrationProfile can reference.
+type ApplicationKind string
+
+const (
+	ApplicationKindDeployment  ApplicationKind = "Deployment"
+	ApplicationKindStatefulSet ApplicationKind = "StatefulSet"
+	ApplicationKindReplicaSet  ApplicationKind = "ReplicaSet"
+	ApplicationKindJob         ApplicationKind = "Job"
+)
+
 // Application Reference
 type ApplicationReference struct {
 	APIVersion string `json:"apiVersion"`
-	Kind       string `json:"kind"`
-	Name       string `json:"name"`
-	Namespace  string `json:"namespace"`
+	// +kubebuilder:validation:Enum=Deployment;StatefulSet;ReplicaSet;Job
+	Kind      ApplicationKind `json:"kind"`
+	Name      string          `json:"name"`
+	Namespace string          `json:"namespace"`
 }
 
 // Placement Awareness
@@ -37,18 +48,40 @@ type Awareness struct {
 	Energy bool `json:"energy,omitempty"`
 }
 
+// PlacementStrategy enumerates the supported placement strategies.
+type PlacementStrategy string
+
+const (
+	PlacementStrategyBalanced PlacementStrategy = "Balanced"
+	PlacementStrategyPacked   PlacementStrategy = "Packed"
+	PlacementStrategySpread   PlacementStrategy = "Spread"
+)
+
 // Placement Spec
 type PlacementSpec struct {
-	Strategy  string    `json:"strategy"`
-	Awareness Awareness `json:"awareness,omitempty"`
+	// +kubebuilder:validation:Enum=Balanced;Packed;Spread
+	Strategy  PlacementStrategy `json:"strategy"`
+	Awareness Awareness         `json:"awareness,omitempty"`
 }
+
+// TriggerCondition enumerates the supported rebalancing trigger conditions.
+// +kubebuilder:validation:Enum=CPUThreshold;MemoryThreshold;EnergyThreshold;NodeFailure;Scheduled
+type TriggerCondition string
+
+const (
+	TriggerConditionCPUThreshold    TriggerCondition = "CPUThreshold"
+	TriggerConditionMemoryThreshold TriggerCondition = "MemoryThreshold"
+	TriggerConditionEnergyThreshold TriggerCondition = "EnergyThreshold"
+	TriggerConditionNodeFailure     TriggerCondition = "NodeFailure"
+	TriggerConditionScheduled       TriggerCondition = "Scheduled"
+)
 
 // Rebalancing Spec
 type RebalancingSpec struct {
-	Enabled           bool     `json:"enabled"`
-	TriggerConditions []string `json:"triggerConditions,omitempty"`
-	CooldownSeconds   int      `json:"cooldownSeconds,omitempty"`
-	DryRun            bool     `json:"dryRun,omitempty"`
+	Enabled           bool               `json:"enabled"`
+	TriggerConditions []TriggerCondition `json:"triggerConditions,omitempty"`
+	CooldownSeconds   int                `json:"cooldownSeconds,omitempty"`
+	DryRun            bool               `json:"dryRun,omitempty"`
 
 	// escalationThreshold is how many consecutive Failed/Deferred decision
 	// cycles this workload may have before the rebalance loop escalates and
@@ -217,10 +250,23 @@ type RebalancingStatus struct {
 	EscalatedReason string `json:"escalatedReason,omitempty"`
 }
 
+// ProfileStatus enumerates the OrchestrationProfile's overall status values.
+// +kubebuilder:validation:Enum=NoPods;Partial;Active;Pending;Degraded;Error
+type ProfileStatus string
+
+const (
+	ProfileStatusNoPods   ProfileStatus = "NoPods"
+	ProfileStatusPartial  ProfileStatus = "Partial"
+	ProfileStatusActive   ProfileStatus = "Active"
+	ProfileStatusPending  ProfileStatus = "Pending"
+	ProfileStatusDegraded ProfileStatus = "Degraded"
+	ProfileStatusError    ProfileStatus = "Error"
+)
+
 // OrchestrationProfileStatus defines the observed state of OrchestrationProfile.
 type OrchestrationProfileStatus struct {
-	// status indicates the status of the orchestration profile (e.g., "Pending", "Active", "Error", "InUse").
-	Status string `json:"status,omitempty"`
+	// status indicates the status of the orchestration profile.
+	Status ProfileStatus `json:"status,omitempty"`
 
 	// reason provides additional details when the status is not "Active" (e.g., error messages).
 	Reason string `json:"reason,omitempty"`
@@ -233,7 +279,25 @@ type OrchestrationProfileStatus struct {
 	// +optional
 	RebalancingStatus RebalancingStatus `json:"rebalancingStatus,omitempty"`
 	LastUpdatedTime   metav1.Time       `json:"lastUpdatedTime,omitempty"`
+
+	// observedGeneration is the .metadata.generation last processed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// conditions represent the latest available observations of the profile's state.
+	// +optional
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
+
+// ConditionReady reports the profile's overall readiness, mirroring Status.
+const ConditionReady = "Ready"
+
+// ConditionRebalancingEscalated mirrors RebalancingStatus.Escalated.
+const ConditionRebalancingEscalated = "RebalancingEscalated"
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

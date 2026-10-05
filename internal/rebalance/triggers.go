@@ -32,15 +32,13 @@ import (
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
 )
 
-// Trigger condition names — must match validTriggerConditions in
-// internal/controller/op_constants.go. These are the only values a user can
-// declare in spec.rebalancing.triggerConditions.
+// Trigger condition names, aliased from the canonical api/v1alpha1 enum.
 const (
-	TriggerEnergyThreshold = "EnergyThreshold"
-	TriggerCPUThreshold    = "CPUThreshold"
-	TriggerMemoryThreshold = "MemoryThreshold"
-	TriggerNodeFailure     = "NodeFailure"
-	TriggerScheduled       = "Scheduled"
+	TriggerEnergyThreshold = orchestrationv1alpha1.TriggerConditionEnergyThreshold
+	TriggerCPUThreshold    = orchestrationv1alpha1.TriggerConditionCPUThreshold
+	TriggerMemoryThreshold = orchestrationv1alpha1.TriggerConditionMemoryThreshold
+	TriggerNodeFailure     = orchestrationv1alpha1.TriggerConditionNodeFailure
+	TriggerScheduled       = orchestrationv1alpha1.TriggerConditionScheduled
 )
 
 // ActionRetryPendingSchedule is NOT a trigger condition — it never appears
@@ -59,7 +57,7 @@ const ActionRetryPendingSchedule = "RetryPendingSchedule"
 type TriggerResult struct {
 	// Condition is the CRD-declared trigger condition that matched (one of
 	// the Trigger* constants above).
-	Condition string
+	Condition orchestrationv1alpha1.TriggerCondition
 
 	// Reason is a human-readable explanation, surfaced in status and events.
 	Reason string

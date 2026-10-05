@@ -47,9 +47,8 @@ type OrchestrationProfileReconciler struct {
 // If you need to change the permissions,
 // modify the verbs and resources in the comments below and then run "make generate" to update the generated code.
 
-// +kubebuilder:rbac:groups=orchestration.hiro.io,resources=orchestrationprofiles,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=orchestration.hiro.io,resources=orchestrationprofiles,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=orchestration.hiro.io,resources=orchestrationprofiles/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=orchestration.hiro.io,resources=orchestrationprofiles/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="apps",resources=deployments;replicasets;statefulsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="batch",resources=jobs,verbs=get;list;watch
@@ -86,12 +85,6 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// err := r.Get(ctx, req.NamespacedName, profile)
-	// if err != nil {
-	// 	logger.Error(err, "failed to reconcile OrchestrationProfile")
-	// 	return ctrl.Result{}, err
-	// }
-
 	logger.Info("reconciler: reconciling profile",
 		"name", profile.Name,
 		"strategy", profile.Spec.Placement.Strategy,
@@ -102,15 +95,6 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 			profile.Spec.ApplicationRef.Name,
 		),
 	)
-
-	// profile.Status.Status = "Active"
-	// profile.Status.LastUpdatedTime = metav1.Now()
-
-	// if err := r.Status().Update(ctx, profile); err != nil {
-	// 	logger.Error(err, "failed to update OrchestrationProfile status")
-	// 	return ctrl.Result{}, err
-	// }
-	// return ctrl.Result{}, nil
 
 	// -------------------------------------------------------------------------
 	// Step 2: Validate the spec.
@@ -124,7 +108,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 			s.Status = StatusError
 			s.Reason = msg
 			s.PlacementStatus = orchestrationv1alpha1.PlacementStatus{
-				Strategy: profile.Spec.Placement.Strategy,
+				Strategy: string(profile.Spec.Placement.Strategy),
 			}
 		})
 	}
@@ -152,7 +136,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 			s.Status = StatusError
 			s.Reason = msg
 			s.PlacementStatus = orchestrationv1alpha1.PlacementStatus{
-				Strategy: profile.Spec.Placement.Strategy,
+				Strategy: string(profile.Spec.Placement.Strategy),
 			}
 		})
 	}
@@ -172,7 +156,7 @@ func (r *OrchestrationProfileReconciler) Reconcile(ctx context.Context, req ctrl
 		return r.updateStatus(ctx, profile, func(s *orchestrationv1alpha1.OrchestrationProfileStatus) {
 			s.Status = StatusNoPods
 			s.PlacementStatus = orchestrationv1alpha1.PlacementStatus{
-				Strategy:     profile.Spec.Placement.Strategy,
+				Strategy:     string(profile.Spec.Placement.Strategy),
 				ObservedPods: 0,
 				ReadyPods:    0,
 				PendingPods:  0,

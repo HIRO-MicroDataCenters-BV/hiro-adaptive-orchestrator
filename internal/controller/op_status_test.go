@@ -49,7 +49,7 @@ var _ = Describe("deriveProfileStatus", func() {
 	// Parameters: (total, ready, failed, pending) → expected status string.
 	// "ready" maps to ReadyPods (the running+ready count), not all Running pods.
 	DescribeTable("maps pod counts to the correct status",
-		func(total, ready, failed, pending int, expected string) {
+		func(total, ready, failed, pending int, expected orchestrationv1alpha1.ProfileStatus) {
 			Expect(deriveProfileStatus(total, ready, failed, pending)).To(Equal(expected))
 		},
 		Entry("no pods at all → NoPods", 0, 0, 0, 0, StatusNoPods),

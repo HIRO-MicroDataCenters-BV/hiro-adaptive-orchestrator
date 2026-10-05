@@ -16,28 +16,21 @@ limitations under the License.
 
 package controller
 
+import (
+	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+)
+
 // -----------------------------------------------------------------------------
-// Profile Status Constants
+// Profile Status Constants — aliases of the canonical api/v1alpha1 enum values.
 // -----------------------------------------------------------------------------
 
 const (
-	// app exists but no pods scheduled yet
-	StatusNoPods = "NoPods"
-
-	// Few Pods are running and few are in pending
-	StatusPartial = "Partial"
-
-	// StatusActive indicates all pods of the referenced application are running and ready.
-	StatusActive = "Active"
-
-	// StatusPending indicates the application or its pods do not exist yet. All pods pending (still scheduling)
-	StatusPending = "Pending"
-
-	// StatusDegraded indicates the application is partially running (some pods failed or pending).
-	StatusDegraded = "Degraded"
-
-	// StatusError indicates the profile spec is invalid or an unrecoverable error occurred.
-	StatusError = "Error"
+	StatusNoPods   = orchestrationv1alpha1.ProfileStatusNoPods
+	StatusPartial  = orchestrationv1alpha1.ProfileStatusPartial
+	StatusActive   = orchestrationv1alpha1.ProfileStatusActive
+	StatusPending  = orchestrationv1alpha1.ProfileStatusPending
+	StatusDegraded = orchestrationv1alpha1.ProfileStatusDegraded
+	StatusError    = orchestrationv1alpha1.ProfileStatusError
 )
 
 // ProfileByAppRefIndex is the field index key for OrchestrationProfile applicationRef lookups
@@ -85,26 +78,26 @@ const (
 // -----------------------------------------------------------------------------
 
 // validStrategies defines the supported placement strategies.
-var validStrategies = map[string]bool{
-	"Balanced": true,
-	"Packed":   true,
-	"Spread":   true,
+var validStrategies = map[orchestrationv1alpha1.PlacementStrategy]bool{
+	orchestrationv1alpha1.PlacementStrategyBalanced: true,
+	orchestrationv1alpha1.PlacementStrategyPacked:   true,
+	orchestrationv1alpha1.PlacementStrategySpread:   true,
 }
 
 // validTriggerConditions defines the supported rebalancing trigger conditions.
-var validTriggerConditions = map[string]bool{
-	"CPUThreshold":    true,
-	"MemoryThreshold": true,
-	"EnergyThreshold": true,
-	"NodeFailure":     true,
-	"Scheduled":       true,
+var validTriggerConditions = map[orchestrationv1alpha1.TriggerCondition]bool{
+	orchestrationv1alpha1.TriggerConditionCPUThreshold:    true,
+	orchestrationv1alpha1.TriggerConditionMemoryThreshold: true,
+	orchestrationv1alpha1.TriggerConditionEnergyThreshold: true,
+	orchestrationv1alpha1.TriggerConditionNodeFailure:     true,
+	orchestrationv1alpha1.TriggerConditionScheduled:       true,
 }
 
 // supportedAppKinds defines the workload kinds the controller can resolve
 // label selectors for.
-var supportedAppKinds = map[string]bool{
-	"Deployment":  true,
-	"StatefulSet": true,
-	"ReplicaSet":  true,
-	"Job":         true,
+var supportedAppKinds = map[orchestrationv1alpha1.ApplicationKind]bool{
+	orchestrationv1alpha1.ApplicationKindDeployment:  true,
+	orchestrationv1alpha1.ApplicationKindStatefulSet: true,
+	orchestrationv1alpha1.ApplicationKindReplicaSet:  true,
+	orchestrationv1alpha1.ApplicationKindJob:         true,
 }

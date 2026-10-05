@@ -14,7 +14,13 @@
 #
 # ─── Options ─────────────────────────────────────────────────────────────────
 #   KIND_CLUSTER_NAME     Kind cluster to create/reuse        (default: hiro-platform-verify)
-#   SCHED_K8S_VERSION      k8s version to build scheduler for  (default: v1.35.0)
+#   SCHED_K8S_VERSION     k8s version to build scheduler for  (default: v1.35.0)
+#   HELM_NAMESPACE        Namespace for the Helm release      (default: hiro-adaptive-orchestrator-system)
+#   HELM_PLATFORM_RELEASE Helm release name                   (default: hiro-adaptive-platform)
+#   SCHED_NAME            schedulerName the webhook injects   (default: hiro-scheduler)
+#
+# No GITHUB_PAT_TOKEN/registry needed — images are built locally and loaded
+# directly into Kind, unlike hack/deploy_full_stack.sh which pushes to GHCR.
 #
 # ─── Usage ───────────────────────────────────────────────────────────────────
 #   hack/deploy_full_stack_with_helm.sh [deploy|clean]
@@ -119,12 +125,42 @@ regenerate_manifests() {
   echo "  Regenerated with IMG=${img_name}:${img_tag}"
 }
 
+# kind_cluster_config prints the Kind Cluster config — same topology/
+# networking as hack/create_kind_cluster.sh.
+kind_cluster_config() {
+  cat <<EOF
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  apiServerAddress: "0.0.0.0"
+  podSubnet: "10.245.0.0/16"
+  serviceSubnet: "10.97.0.0/12"
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30010
+        hostPort: 30010
+        protocol: TCP
+      - containerPort: 30015
+        hostPort: 30015
+        protocol: TCP
+      - containerPort: 30016
+        hostPort: 30016
+        protocol: TCP
+      - containerPort: 30018
+        hostPort: 30018
+        protocol: TCP
+  - role: worker
+  - role: worker
+EOF
+}
+
 ensure_kind_cluster() {
   if kind get clusters 2>/dev/null | grep -qx "$KIND_CLUSTER_NAME"; then
     step "Reusing existing Kind cluster: $KIND_CLUSTER_NAME"
   else
     step "Creating Kind cluster: $KIND_CLUSTER_NAME"
-    kind create cluster --name "$KIND_CLUSTER_NAME"
+    kind create cluster --name "$KIND_CLUSTER_NAME" --config <(kind_cluster_config)
   fi
   kubectl config use-context "kind-${KIND_CLUSTER_NAME}"
 
@@ -167,7 +203,8 @@ deploy_operator_phase() {
       --set hiro-operator.manager.image.tag=${OPERATOR_TAG} \
       --set hiro-operator.manager.image.pullPolicy=IfNotPresent \
       --set prerequisites.certManager.enable=true \
-      --set mockAgent.enable=true"
+      --set mockAgent.enable=true \
+      --set samples.enabled=true"
 }
 
 # Same lookup charts/hiro-adaptive-platform/README.md documents doing by
