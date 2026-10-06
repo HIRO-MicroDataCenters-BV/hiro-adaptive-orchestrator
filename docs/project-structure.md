@@ -101,3 +101,23 @@ dist/
   install.yaml                         # Generated single-file install bundle
 test/e2e/                              # End-to-end tests (Kind)
 ```
+
+## How this layout was scaffolded
+
+Generated with [Kubebuilder](https://book.kubebuilder.io/):
+
+```bash
+kubebuilder init \
+  --domain orchestration.hiro.io \
+  --repo github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator \
+  --owner "HIRO Adaptive Orchestrator"
+
+kubebuilder create api \
+  --group orchestration --version v1alpha1 --kind OrchestrationProfile \
+  --resource=true --controller=true
+
+kubebuilder edit --plugins=helm/v2-alpha
+```
+
+> Do **not** re-run these on an existing checkout — they modify project scaffolding. For
+> regenerating against a newer Kubebuilder release, see [upgrading.md](upgrading.md#kubebuilder-version).
