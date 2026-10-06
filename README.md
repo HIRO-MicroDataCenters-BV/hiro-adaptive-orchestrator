@@ -1,10 +1,20 @@
 # HIRO Adaptive Orchestrator
 
-A Kubernetes operator that provides intelligent, AI-driven pod placement and adaptive workload orchestration. It introduces the `OrchestrationProfile` custom resource to bind placement strategies to workloads, and integrates with the Kubernetes scheduler to score nodes using an external AI decision agent.
+Kubernetes decides where a pod runs using fixed, built-in rules, and once a pod is placed it stays
+put even if that node later becomes a poor choice. HIRO replaces both halves of that with decisions
+delegated to an external AI agent: it scores candidate nodes at scheduling time, then keeps watching
+placed workloads and moves them when conditions change.
+
+You describe intent with one custom resource — an `OrchestrationProfile` says "spread this Deployment,
+and care about energy" — and the operator handles the rest. It's for platform teams running clusters
+where placement quality matters: energy cost, resource pressure, or hardware heterogeneity.
 
 <a id="at-a-glance"></a>
 
 ### <u>At a glance</u>
+
+Two independent flows. **Placement** (P1→P4) scores nodes for a pod being scheduled;
+**rebalancing** (R1→R4) moves workloads that are already running.
 
 ```mermaid
 graph LR
@@ -15,25 +25,25 @@ graph LR
     RE["Rebalance Engine"]
     AI["AI Agent"]
 
-    Profiles -->|"① profile + EAO data"| PS
-    Sched -->|"① PreScore"| PS
-    PS <-->|"② request / ③ NodeScores"| AI
-    PS -->|"④ score"| Sched
+    Profiles -->|"P1 profile + EAO data"| PS
+    Sched -->|"P1 PreScore"| PS
+    PS <-->|"P2 request / P3 NodeScores"| AI
+    PS -->|"P4 score"| Sched
 
-    Profiles -->|"① profile + EAO data"| RE
-    Triggers -->|"① trigger fires"| RE
-    RE <-->|"② context / ③ action"| AI
-    RE -->|"④ enact, then repeat"| RE
+    Profiles -->|"R1 profile + EAO data"| RE
+    Triggers -->|"R1 trigger fires"| RE
+    RE <-->|"R2 context / R3 action"| AI
+    RE -->|"R4 enact, then repeat"| RE
 ```
 
 ---
 
 ## Table of Contents
 
+- [Quick Start](#quick-start)
 - [Architecture](#architecture)
 - [Features](#features)
 - [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
 - [Development Workflow](#development-workflow)
   - [Unit & Integration Tests](#unit--integration-tests)
   - [End-to-End Tests](#end-to-end-tests)
@@ -41,9 +51,64 @@ graph LR
 - [Release Process](#release-process)
 - [Project Structure](#project-structure)
 - [Upgrading Go, Kubernetes, or Kubebuilder Version](#upgrading-go-or-kubernetes-version)
-- [Project Initialization](#project-initialization)
 - [Contributing](#contributing)
 - [License](#license)
+
+---
+
+<a id="quick-start"></a>
+
+## 🚀 <u>Quick Start</u>
+
+Needs Go, Docker, kubectl, Helm, and Kind on your machine — see [Prerequisites](#prerequisites)
+for versions. No Kubernetes cluster required up front; step 1 creates a local Kind one.
+
+**1. Deploy.** Installs the operator, webhook, scheduler, and mock agent as one Helm release
+against a local Kind cluster — no registry or GHCR token needed, since images build locally and
+load straight into Kind:
+
+```bash
+hack/deploy_full_stack_with_helm.sh deploy
+```
+
+**2. Verify.** The script health-checks itself and prints the pods at the end, so this is just to
+re-check later:
+
+```bash
+kubectl -n hiro-adaptive-orchestrator-system get pods
+```
+
+**3. Try it.** Apply a sample workload plus a profile that governs it, then watch the status fill in:
+
+```bash
+kubectl apply -f config/samples/nginx_deployment_1.yaml \
+              -f config/samples/orchestrationprofile_1.yaml
+
+kubectl get orchestrationprofile orchestrationprofile-1 -o yaml
+```
+
+`status.status` moves `NoPods → Pending → Active` as the pods come up; status transitions are also
+recorded as Kubernetes Events on the profile (`kubectl describe orchestrationprofile orchestrationprofile-1`).
+
+**4. Clean up.** Tears down the Kind cluster the script created:
+
+```bash
+hack/deploy_full_stack_with_helm.sh clean
+```
+
+### Beyond the defaults
+
+For a real cluster (not Kind), deploy the same umbrella chart at `charts/hiro-adaptive-platform`
+with `make helm-platform-deploy` instead of step 1.
+
+Every parameter — cluster name, namespace, scheduler mode (plugin/extender), mock vs. real AI
+agent, and more — has a sane default and can be overridden via environment variables:
+
+```bash
+KIND_CLUSTER_NAME=my-cluster hack/deploy_full_stack_with_helm.sh deploy
+```
+
+Every other deployment path — shell scripts, operator-only, scheduler-only, extender-only, mock agent, manual Kustomize, YAML bundle — plus the full environment-variable reference and phase-by-phase breakdown, is documented in **[docs/deployment.md](docs/deployment.md)**.
 
 ---
 
@@ -57,19 +122,25 @@ graph LR
 
 ### <u>Components</u>
 
-The system consists of two independently deployed binaries plus an optional mock AI agent:
+Two binaries get deployed, plus an optional mock AI agent for local testing:
 
-| Component               | Binary / File                   | Description                                                                                                                                                                                                                                                                                                                                                                          |
-| ----------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Operator**            | `cmd/main.go`                   | Single pod running three cooperating parts in one process: the placement Reconciler, the Rebalance Engine, and the PlacementServer HTTP service (`:8090`) serving 4 routes — plugin path, extender filter, extender prioritize, healthz                                                                                                                                              |
-| **PlacementServer**     | `internal/placement-server/`    | Single HTTP listener on `:8090` inside the operator pod, serving 4 routes: `/api/v1/placement/decision`, `/extender/filter`, `/extender/prioritize`, `/healthz` — see [PlacementServer](docs/architecture.md#placementserver)                                                                                                                                                        |
-| **Scheduler Plugin**    | `scheduler-plugin/cmd/main.go`  | Custom `kube-scheduler` binary with `HIROScore` plugin registered                                                                                                                                                                                                                                                                                                                    |
-| **Rebalance Engine**    | `internal/rebalance/`           | Hybrid periodic + event-driven trigger detection → AI-consulted decision lifecycle (`Watching → Triggered → Evaluating → Decided → Enacting`) → action enactment (`Move`, `RetryPendingSchedule`); shares a `DecisionStore` with the PlacementServer so an accepted `Move` biases where the replacement pod lands — see [internal/rebalance/README.md](internal/rebalance/README.md) |
-| **Mock Decision Agent** | `hack/mock_decision_agent.yaml` | Lightweight Python HTTP server for local/CI testing; scores placement candidates randomly and responds to rebalance evaluations (Move/NoOp)                                                                                                                                                                                                                                          |
+| Deployed unit            | Binary                         | What it is                                                                                                                                                                 |
+| ------------------------ | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Operator**             | `cmd/main.go`                  | One pod, one process, three cooperating parts (below)                                                                                                                      |
+| **Scheduler Plugin**     | `scheduler-plugin/cmd/main.go` | A custom `kube-scheduler` build with the `HIROScore` plugin registered. Only needed for the plugin path — the extender path uses the cluster's existing default scheduler. |
+| **Mock Decision Agent**  | `hack/mock_decision_agent.yaml` | Python HTTP server standing in for a real AI agent in local/CI runs: random placement scores, random `Move`/`NoOp` rebalance answers                                       |
 
-The `OrchestrationProfile` CRD binds a placement strategy (`Balanced`/`Packed`/`Spread`) and
-optional resource awareness (CPU/Memory/GPU/Energy) to a workload; its status reports
-`NoPods → Pending → Active/Partial/Degraded/Error`.
+Inside the operator process:
+
+| Part                 | Package                      | Role                                                                                                                                                                                       |
+| -------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Reconciler**       | `internal/controller/`       | Watches `OrchestrationProfile` and its referenced workloads, computes `status`                                                                                                             |
+| **PlacementServer**  | `internal/placement-server/` | HTTP listener on `:8090` serving 4 routes — `/api/v1/placement/decision` (plugin), `/extender/filter`, `/extender/prioritize`, `/healthz` — see [docs/architecture.md](docs/architecture.md#placementserver) |
+| **Rebalance Engine** | `internal/rebalance/`        | Detects triggers, consults the AI, enacts `Move`/`RetryPendingSchedule`. Shares a `DecisionStore` with the PlacementServer so an accepted `Move` biases where the replacement pod lands — see [internal/rebalance/README.md](internal/rebalance/README.md) |
+
+The `OrchestrationProfile` CRD is how you drive all of it: it binds a placement strategy
+(`Balanced`/`Packed`/`Spread`) and optional resource awareness (CPU/Memory/GPU/Energy) to one
+workload, and reports what happened back in its `status`.
 
 See **[docs/architecture.md](docs/architecture.md)** for the component wiring diagram, the
 reconciliation flow, the Plugin and Extender request paths, and the full `OrchestrationProfile`
@@ -102,7 +173,7 @@ graph TB
 - **Custom scheduler plugin** — `HIROScore` runs as a separate `hiro-scheduler` binary; pods opt in via `schedulerName: hiro-scheduler`
 - **Pod scheduler webhook** — `MutatingAdmissionWebhook` auto-sets `spec.schedulerName: hiro-scheduler` on pods governed by an `OrchestrationProfile`; TLS provisioned automatically by cert-manager; enabled with `DEPLOY_SCHEDULER_PLUGIN=true`
 - **Scheduler extender support** — for managed clusters where a custom scheduler pod cannot be deployed; uses ClusterIP for reliable reachability from `hostNetwork` kube-scheduler
-- **Status observability** — `NoPods` → `Pending` → `Active` → `Partial` → `Degraded` → `Error`
+- **Status observability** — every profile reports `status.status`, standard `status.conditions`, and `observedGeneration`, so `kubectl wait --for=condition=Ready` and GitOps health checks work out of the box
 - **Kubernetes events** — status transitions and errors recorded as events on `OrchestrationProfile`
 - **Production-ready** — leader election, HTTPS metrics (:8443), Prometheus/ServiceMonitor support, restricted pod security
 
@@ -133,60 +204,15 @@ Some paths need more — cert-manager for the scheduler webhook's TLS, a reachab
 
 ---
 
-<a id="quick-start"></a>
-
-## 🚀 <u>Quick Start</u>
-
-```bash
-hack/deploy_full_stack_with_helm.sh deploy
-```
-
-Installs the operator, webhook, scheduler, and mock agent as one Helm release against a local Kind cluster — no registry needed, via the Helm umbrella chart at `charts/hiro-adaptive-platform`. For a real cluster (not Kind), use `make helm-platform-deploy` instead.
-
-Every parameter — cluster name, namespace, scheduler mode (plugin/extender), mock vs. real AI agent, and more — has a sane default and can be overridden via environment variables, e.g.:
-
-```bash
-KIND_CLUSTER_NAME=my-cluster hack/deploy_full_stack_with_helm.sh deploy
-```
-
-Every other deployment path — shell scripts, operator-only, scheduler-only, extender-only, mock agent, manual Kustomize, YAML bundle — plus the full environment-variable reference and phase-by-phase breakdown, is documented in **[docs/deployment.md](docs/deployment.md)**.
-
----
-
 <a id="development-workflow"></a>
 
 ## 🛠️ <u>Development Workflow</u>
 
-```
-Edit *_types.go or markers
-        ├── make manifests   (regenerate CRDs / RBAC)
-        └── make generate    (regenerate DeepCopy)
-
-Edit *.go files
-        ├── make lint-fix    (auto-fix style)
-        └── make test        (unit + integration tests)
-
-Deploy
-        └── see docs/deployment.md for every deployment path
-```
-
-```mermaid
-flowchart LR
-    T1["Edit *_types.go<br/>or markers"] --> T1a["make manifests<br/>(regenerate CRDs / RBAC)"]
-    T1 --> T1b["make generate<br/>(regenerate DeepCopy)"]
-
-    T2["Edit *.go files"] --> T2a["make lint-fix<br/>(auto-fix style)"]
-    T2 --> T2b["make test<br/>(unit + integration tests)"]
-
-    T3["Deploy"] --> T3a["docs/deployment.md"]
-```
-
-```mermaid
-flowchart LR
-    Unit["make test<br/>Ginkgo/Gomega + envtest"] --> Fast["fast, no real cluster"]
-    E2E["make test-e2e<br/>Kind cluster"] --> Real["real cluster,<br/>created + torn down"]
-    Lint["make lint / lint-fix"] --> Style["style + static analysis"]
-```
+| After editing…            | Run                                                              |
+| ------------------------- | ---------------------------------------------------------------- |
+| `*_types.go` or markers   | `make manifests` (regenerate CRDs / RBAC) + `make generate` (regenerate DeepCopy) |
+| any `*.go` file           | `make lint-fix` (auto-fix style) + `make test` (unit + integration) |
+| anything you want running | see **[docs/deployment.md](docs/deployment.md)** for every deployment path |
 
 <a id="unit--integration-tests"></a>
 
@@ -259,29 +285,6 @@ See **[docs/project-structure.md](docs/project-structure.md)** for the full anno
 Each of these requires keeping 2-3 files in sync by hand (not done automatically by kubebuilder) —
 see **[docs/upgrading.md](docs/upgrading.md)** for the exact files and step-by-step procedure for
 bumping Go, the scheduler plugin's Kubernetes pin, or Kubebuilder.
-
----
-
-<a id="project-initialization"></a>
-
-## 🌱 <u>Project Initialization</u>
-
-Scaffolded using [Kubebuilder](https://book.kubebuilder.io/):
-
-```bash
-kubebuilder init \
-  --domain orchestration.hiro.io \
-  --repo github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator \
-  --owner "HIRO Adaptive Orchestrator"
-
-kubebuilder create api \
-  --group orchestration --version v1alpha1 --kind OrchestrationProfile \
-  --resource=true --controller=true
-
-kubebuilder edit --plugins=helm/v2-alpha
-```
-
-> Do **not** re-run these on an existing checkout — they modify project scaffolding.
 
 ---
 
