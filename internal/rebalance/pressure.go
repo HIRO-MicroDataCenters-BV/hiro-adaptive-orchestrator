@@ -25,6 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 )
 
 // DefaultNodePressureThreshold is the fraction of a node's allocatable
@@ -95,8 +97,10 @@ func (e *NodePressureEvaluator) evaluate(
 
 	nodeMetrics, err := e.metricsClient.MetricsV1beta1().NodeMetricses().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
+		metrics.RebalancePressureQueriesTotal.WithLabelValues(metrics.PressureResultUnavailable).Inc()
 		return false, "", fmt.Errorf("fetching metrics-server usage for node %s: %w", nodeName, err)
 	}
+	metrics.RebalancePressureQueriesTotal.WithLabelValues(metrics.PressureResultSuccess).Inc()
 
 	usage := nodeMetrics.Usage[resourceName]
 	ratio := float64(usage.MilliValue()) / float64(allocatable.MilliValue())

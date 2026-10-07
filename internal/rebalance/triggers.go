@@ -19,6 +19,7 @@ package rebalance
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -29,6 +30,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
 )
 
@@ -118,16 +120,19 @@ func (e *TriggerEvaluator) Evaluate(
 		case TriggerEnergyThreshold:
 			ok, r, bypass = e.evaluateEnergyThreshold(ctx, profile, pods)
 		case TriggerCPUThreshold:
-			ok, r = e.evaluateNodeResource(ctx, pods, e.pressure.EvaluateCPUPressure)
+			ok, r = e.evaluateNodeResource(ctx, pods, cond, e.pressure.EvaluateCPUPressure)
 		case TriggerMemoryThreshold:
-			ok, r = e.evaluateNodeResource(ctx, pods, e.pressure.EvaluateMemoryPressure)
+			ok, r = e.evaluateNodeResource(ctx, pods, cond, e.pressure.EvaluateMemoryPressure)
 		case TriggerNodeFailure:
-			ok, r = e.evaluateNodeFailure(ctx, pods)
+			ok, r = e.evaluateNodeFailure(ctx, pods, cond)
 		case TriggerScheduled:
 			ok, r = true, "scheduled rebalance window reached"
 		default:
 			continue // unrecognized condition — spec validation should have already caught this
 		}
+
+		metrics.RebalanceTriggerEvaluationsTotal.
+			WithLabelValues(string(cond), strconv.FormatBool(ok)).Inc()
 
 		if ok {
 			return true, TriggerResult{Condition: cond, Reason: r, BypassAction: bypass}, nil
@@ -144,6 +149,7 @@ func (e *TriggerEvaluator) Evaluate(
 func (e *TriggerEvaluator) evaluateNodeResource(
 	ctx context.Context,
 	pods []corev1.Pod,
+	cond orchestrationv1alpha1.TriggerCondition,
 	check func(ctx context.Context, nodeName string) (bool, string, error),
 ) (bool, string) {
 	logger := logf.FromContext(ctx)
@@ -158,6 +164,7 @@ func (e *TriggerEvaluator) evaluateNodeResource(
 
 		ok, reason, err := check(ctx, nodeName)
 		if err != nil {
+			metrics.RebalanceTriggerErrorsTotal.WithLabelValues(string(cond)).Inc()
 			logger.V(1).Info("rebalance: node pressure check unavailable, skipping",
 				"node", nodeName, "err", err)
 			continue
@@ -171,7 +178,11 @@ func (e *TriggerEvaluator) evaluateNodeResource(
 
 // evaluateNodeFailure reports whether any node hosting one of the
 // profile's pods currently reports NotReady.
-func (e *TriggerEvaluator) evaluateNodeFailure(ctx context.Context, pods []corev1.Pod) (bool, string) {
+func (e *TriggerEvaluator) evaluateNodeFailure(
+	ctx context.Context,
+	pods []corev1.Pod,
+	cond orchestrationv1alpha1.TriggerCondition,
+) (bool, string) {
 	logger := logf.FromContext(ctx)
 
 	seen := map[string]bool{}
@@ -184,6 +195,7 @@ func (e *TriggerEvaluator) evaluateNodeFailure(ctx context.Context, pods []corev
 
 		node := &corev1.Node{}
 		if err := e.client.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
+			metrics.RebalanceTriggerErrorsTotal.WithLabelValues(string(cond)).Inc()
 			logger.V(1).Info("rebalance: could not fetch node for NodeFailure check, skipping",
 				"node", nodeName, "err", err)
 			continue
@@ -227,6 +239,7 @@ func (e *TriggerEvaluator) evaluateEnergyThreshold(
 	if err != nil {
 		// EnergyAwareOrchestration is an optional component — soft-fail like
 		// internal/placement-server's DecisionContextBuilder.fetchEAOProfile.
+		metrics.RebalanceTriggerErrorsTotal.WithLabelValues(string(TriggerEnergyThreshold)).Inc()
 		logger.V(1).Info("rebalance: EAO unavailable, skipping EnergyThreshold check", "err", err)
 		return false, "", ""
 	}

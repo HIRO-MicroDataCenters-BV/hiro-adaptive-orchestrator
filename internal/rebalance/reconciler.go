@@ -470,6 +470,8 @@ func (r *Reconciler) recoverStuckCycle(
 	reason := fmt.Sprintf("watchdog: recovered after being stuck in %s for %s, likely an operator restart mid-cycle",
 		rs.State, stuckFor.Round(time.Second))
 
+	metrics.RebalanceWatchdogRecoveriesTotal.Inc()
+
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
 		TransitionOptions{Outcome: OutcomeFailed, Cooldown: cooldown}); err != nil {
 		logger.Error(err, "rebalance: watchdog recovery transition to Watching failed", "profile", profile.Name)
