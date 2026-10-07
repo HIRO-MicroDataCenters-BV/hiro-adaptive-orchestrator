@@ -1,0 +1,30 @@
+{{- if and (eq .Values.scheduler.mode "plugin") .Values.scheduler.plugin.metrics.serviceMonitor.enabled }}
+# The operator's ServiceMonitor selects control-plane: controller-manager and
+# so does not cover this pod. Without this the hiro_scheduler_plugin_* metrics
+# are exposed but never collected.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Release.Name }}-hiro-scheduler-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: hiro-scheduler
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  endpoints:
+    - path: /metrics
+      port: https
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      interval: {{ .Values.scheduler.plugin.metrics.serviceMonitor.interval }}
+      tlsConfig:
+        # kube-scheduler self-signs its serving cert on startup, so there is no
+        # CA to verify against without provisioning one.
+        insecureSkipVerify: {{ .Values.scheduler.plugin.metrics.serviceMonitor.insecureSkipVerify }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hiro-scheduler
+      app.kubernetes.io/component: scheduler-metrics
+      app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

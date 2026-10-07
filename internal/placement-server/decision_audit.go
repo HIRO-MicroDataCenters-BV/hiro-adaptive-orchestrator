@@ -23,6 +23,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/audit"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/tracing"
 )
 
 // logInitialPlacementDecision records a successful initial-placement AI
@@ -49,7 +50,8 @@ func logInitialPlacementDecision(ctx context.Context, req *DecisionRequest, resp
 		Reason:      resp.Reason,
 	}
 
-	logger.Info("audit: decision recorded", "record", record)
+	logger.Info("audit: decision recorded",
+		append([]any{"record", record}, tracing.LogValues(ctx)...)...)
 }
 
 // topScoreNodeName returns the plain name of the highest-scored node, or ""

@@ -34,6 +34,21 @@ spec:
           args:
             - --config=/etc/kubernetes/hiro-scheduler/scheduler-config.yaml
             - --v=2
+          {{- with .Values.scheduler.plugin.tracing }}
+          {{- if .endpoint }}
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .endpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .serviceName | quote }}
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: {{ .sampleRatio | quote }}
+            {{- if .resourceAttributes }}
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: {{ .resourceAttributes | quote }}
+            {{- end }}
+          {{- end }}
+          {{- end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

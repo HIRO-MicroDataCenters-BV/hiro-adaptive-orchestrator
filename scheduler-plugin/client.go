@@ -23,9 +23,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
 
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
@@ -70,13 +73,28 @@ type PlacementClient struct {
 
 // NewPlacementClient creates a PlacementClient with explicit parameters.
 // Prefer NewPlacementClientFromEnv in production; use this constructor in tests.
+//
+// otelhttp transport propagates traceparent to the PlacementServer; no-op
+// when no TracerProvider is configured.
 func NewPlacementClient(serverURL, scorePath, filterPath string, timeout time.Duration) *PlacementClient {
 	return &PlacementClient{
 		serverURL:  serverURL,
 		scorePath:  scorePath,
 		filterPath: filterPath,
-		httpClient: &http.Client{Timeout: timeout},
+		httpClient: &http.Client{
+			Timeout:   timeout,
+			Transport: otelhttp.NewTransport(http.DefaultTransport),
+		},
 	}
+}
+
+// recordFailure counts and logs a failed request. Callers soft-fail open, so
+// this is the only signal that anything went wrong.
+func recordFailure(endpoint, reason string, err error) {
+	PlacementRequestsTotal.WithLabelValues(endpoint, resultError).Inc()
+	PlacementErrorsTotal.WithLabelValues(endpoint, reason).Inc()
+	klog.ErrorS(err, PluginName+": PlacementServer request failed",
+		"endpoint", endpoint, "reason", reason)
 }
 
 // NewPlacementClientFromEnv creates a PlacementClient from environment variables:
@@ -114,35 +132,52 @@ func (c *PlacementClient) CheckFilter(
 	ctx context.Context,
 	pod *corev1.Pod,
 ) (allowed bool, reason string, err error) {
+	start := time.Now()
+	defer func() {
+		PlacementRequestDuration.WithLabelValues(endpointFilter).Observe(time.Since(start).Seconds())
+	}()
+
 	reqBody := placement.EnergyGateRequest{Pod: pod}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return true, "", fmt.Errorf("marshalling EnergyGateRequest: %w", err)
+		err = fmt.Errorf("marshalling EnergyGateRequest: %w", err)
+		recordFailure(endpointFilter, reasonMarshal, err)
+		return true, "", err
 	}
 
 	url := c.serverURL + c.filterPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return true, "", fmt.Errorf("building filter request: %w", err)
+		err = fmt.Errorf("building filter request: %w", err)
+		recordFailure(endpointFilter, reasonRequestBuild, err)
+		return true, "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Request-ID", string(pod.UID))
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return true, "", fmt.Errorf("calling placement filter at %s: %w", url, err)
+		err = fmt.Errorf("calling placement filter at %s: %w", url, err)
+		recordFailure(endpointFilter, reasonTransport, err)
+		return true, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return true, "", fmt.Errorf("placement filter returned HTTP %d", resp.StatusCode)
+		err = fmt.Errorf("placement filter returned HTTP %d", resp.StatusCode)
+		recordFailure(endpointFilter, reasonHTTPStatus, err)
+		return true, "", err
 	}
 
 	var result placement.EnergyGateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return true, "", fmt.Errorf("decoding EnergyGateResponse: %w", err)
+		err = fmt.Errorf("decoding EnergyGateResponse: %w", err)
+		recordFailure(endpointFilter, reasonDecode, err)
+		return true, "", err
 	}
 
+	PlacementRequestsTotal.WithLabelValues(endpointFilter, resultSuccess).Inc()
+	EnergyGateDecisionsTotal.WithLabelValues(strconv.FormatBool(result.Allowed)).Inc()
 	return result.Allowed, result.Reason, nil
 }
 
@@ -159,37 +194,52 @@ func (c *PlacementClient) Decide(
 	ctx context.Context,
 	placementCtx *placement.PlacementContext,
 ) (*placement.DecisionResponse, error) {
+	start := time.Now()
+	defer func() {
+		PlacementRequestDuration.WithLabelValues(endpointScore).Observe(time.Since(start).Seconds())
+	}()
+
 	requestID := string(placementCtx.Pod.UID)
 
 	body, err := json.Marshal(placementCtx)
 	if err != nil {
-		return nil, fmt.Errorf("marshalling PlacementContext (requestId=%s): %w", requestID, err)
+		err = fmt.Errorf("marshalling PlacementContext (requestId=%s): %w", requestID, err)
+		recordFailure(endpointScore, reasonMarshal, err)
+		return nil, err
 	}
 
 	url := c.serverURL + c.scorePath
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("building request to placement server (requestId=%s): %w", requestID, err)
+		err = fmt.Errorf("building request to placement server (requestId=%s): %w", requestID, err)
+		recordFailure(endpointScore, reasonRequestBuild, err)
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Request-ID", requestID)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("calling placement server at %s (requestId=%s): %w",
-			url, requestID, err)
+		err = fmt.Errorf("calling placement server at %s (requestId=%s): %w", url, requestID, err)
+		recordFailure(endpointScore, reasonTransport, err)
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("placement server returned HTTP %d (requestId=%s)",
-			resp.StatusCode, requestID)
+		err = fmt.Errorf("placement server returned HTTP %d (requestId=%s)", resp.StatusCode, requestID)
+		recordFailure(endpointScore, reasonHTTPStatus, err)
+		return nil, err
 	}
 
 	var decisionResp placement.DecisionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decisionResp); err != nil {
-		return nil, fmt.Errorf("decoding DecisionResponse (requestId=%s): %w", requestID, err)
+		err = fmt.Errorf("decoding DecisionResponse (requestId=%s): %w", requestID, err)
+		recordFailure(endpointScore, reasonDecode, err)
+		return nil, err
 	}
 
+	PlacementRequestsTotal.WithLabelValues(endpointScore, resultSuccess).Inc()
+	NodesScored.Observe(float64(len(decisionResp.NodeScores)))
 	return &decisionResp, nil
 }

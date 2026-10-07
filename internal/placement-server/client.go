@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -76,6 +77,9 @@ func NewDecisionClient(agentURL, agentPath string, timeout time.Duration) *Decis
 		agentPath: agentPath,
 		httpClient: &http.Client{
 			Timeout: timeout,
+			// Continues the caller's trace into the AI agent call, so the
+			// agent's share of latency is visible as its own span.
+			Transport: otelhttp.NewTransport(http.DefaultTransport),
 		},
 	}
 }

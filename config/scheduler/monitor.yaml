@@ -1,0 +1,30 @@
+# The operator's own ServiceMonitor (config/prometheus/monitor.yaml) selects
+# control-plane: controller-manager, so it does not cover this pod. Without
+# this, the hiro_scheduler_plugin_* metrics are exposed but never collected.
+#
+# Token-based rather than loosening the scheduler's authz with
+# --authorization-always-allow-paths. kube-scheduler authorizes /metrics via
+# SubjectAccessReview on the nonResourceURL; kube-prometheus-stack's Prometheus
+# ClusterRole already grants that.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: hiro-scheduler-metrics-monitor
+  namespace: system
+  labels:
+    app.kubernetes.io/name: hiro-scheduler
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  endpoints:
+    - path: /metrics
+      port: https
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        # kube-scheduler generates a self-signed serving cert on startup, so
+        # there is no CA to verify against without provisioning one.
+        insecureSkipVerify: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hiro-scheduler
+      app.kubernetes.io/component: scheduler-metrics

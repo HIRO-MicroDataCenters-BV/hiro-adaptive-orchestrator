@@ -28,6 +28,17 @@ hiro-operator:
         value: /api/v1/placement/filter
       - name: PLACEMENT_SERVER_HEALTH_PATH
         value: /healthz
+      # Tracing (OpenTelemetry). Empty endpoint = off, and nothing is
+      # exported. Set it to an OTLP gRPC collector, e.g. Grafana Alloy or
+      # Tempo at otel-collector.observability.svc.cluster.local:4317.
+      # The scheduler has its own copy under scheduler.plugin.tracing —
+      # set both to get one trace spanning scheduler → operator → AI agent.
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: ""
+      - name: OTEL_SERVICE_NAME
+        value: hiro-adaptive-orchestrator
+      - name: OTEL_TRACES_SAMPLER_ARG
+        value: "1.0"
       # EnergyAwareOrchestration CRD coordinates (external, optional CRD).
       - name: EAO_GROUP
         value: eas.hiro.io
@@ -197,6 +208,30 @@ scheduler:
       path: /api/v1/placement/score
       filterPath: /api/v1/placement/filter
       timeoutSeconds: 8
+    ## The hiro_scheduler_plugin_* metrics live on the scheduler pod, not the
+    ## operator — the operator's own ServiceMonitor does not cover them, so
+    ## without serviceMonitor.enabled they are exposed but never scraped.
+    metrics:
+      # kube-scheduler's secure port, shared with the health probes.
+      port: 10259
+      serviceMonitor:
+        # Needs the Prometheus Operator CRDs in the cluster.
+        enabled: false
+        interval: 30s
+        # kube-scheduler self-signs its serving cert on startup.
+        insecureSkipVerify: true
+    ## Tracing (OpenTelemetry). Empty endpoint = off. kube-scheduler has no
+    ## tracing config of its own, so the plugin sets this up itself. Mirror
+    ## the operator's values under hiro-operator.manager.env — both must point
+    ## at the same collector for one trace to span both processes.
+    tracing:
+      endpoint: ""
+      # service.name on spans, so two releases are distinguishable.
+      serviceName: hiro-scheduler
+      # Fraction of traces sampled, 0.0–1.0.
+      sampleRatio: "1.0"
+      # Extra resource attributes, comma-separated k=v (OTEL spec format).
+      resourceAttributes: ""
   # Runs 3 hook Jobs with real cluster access after install/upgrade, so
   # unlike plugin mode it resolves the PlacementServer by label selector —
   # no required url. Needs privileged access to the control-plane node

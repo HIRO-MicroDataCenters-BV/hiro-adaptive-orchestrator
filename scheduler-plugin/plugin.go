@@ -153,6 +153,7 @@ func (h *HIROScore) PreFilter(
 	allowed, reason, err := h.client.CheckFilter(ctx, pod)
 	if err != nil {
 		// Infrastructure failure — never block a pod; let the scheduler proceed.
+		SoftFailTotal.WithLabelValues(phasePreFilter).Inc()
 		state.Write(energyGateStateKey, energyGateDecision{allowed: true})
 		return nil, nil
 	}
@@ -213,6 +214,11 @@ func (h *HIROScore) PreScore(
 	}
 	resp, err := h.client.Decide(ctx, &placementCtx)
 	if err != nil {
+		// Soft-fail: every node scores 0, so the framework's own scores decide.
+		SoftFailTotal.WithLabelValues(phasePreScore).Inc()
+		klog.V(2).InfoS(PluginName+": scoring unavailable, falling back to neutral scores",
+			append([]any{"pod", klog.KObj(pod), "candidateNodes", len(candidateNodes)},
+				logTrace(ctx)...)...)
 		state.Write(cycleStateKey, nodeScoreMap{})
 		return nil
 	}
@@ -233,10 +239,12 @@ func (h *HIROScore) PreScore(
 		}
 	}
 	klog.InfoS(PluginName+": AI node scores",
-		"pod", klog.KObj(pod),
-		"scores", map[string]int64(scores),
-		"recommendedNode", topNode,
-		"recommendedScore", topScore,
+		append([]any{
+			"pod", klog.KObj(pod),
+			"scores", map[string]int64(scores),
+			"recommendedNode", topNode,
+			"recommendedScore", topScore,
+		}, logTrace(ctx)...)...,
 	)
 	return nil
 }
@@ -256,13 +264,17 @@ func (h *HIROScore) Score(
 	nodeName := nodeInfo.Node().Name
 	data, err := state.Read(cycleStateKey)
 	if err != nil {
+		SoftFailTotal.WithLabelValues(phaseScore).Inc()
 		return 0, nil
 	}
 	scores, ok := data.(nodeScoreMap)
 	if !ok {
 		return 0, fwk.AsStatus(fmt.Errorf("%s: unexpected CycleState type %T", PluginName, data))
 	}
-	score := scores[nodeName]
+	score, scored := scores[nodeName]
+	if !scored {
+		UnscoredNodesTotal.Inc()
+	}
 	klog.V(2).InfoS(PluginName+": node score contribution",
 		"pod", klog.KObj(pod),
 		"node", nodeName,

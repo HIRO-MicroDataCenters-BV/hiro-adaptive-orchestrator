@@ -11,6 +11,9 @@ resources:
 - clusterrolebinding.yaml
 - configmap.yaml
 - deployment.yaml
+- service.yaml
+# Needs the Prometheus Operator CRDs. Comment out on a cluster without them.
+- monitor.yaml
 
 images:
 - name: hiro-scheduler

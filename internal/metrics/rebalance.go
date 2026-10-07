@@ -33,6 +33,28 @@ const (
 	GuardrailBounds    = "bounds"
 )
 
+// Result label values for RebalanceAIRequestsTotal.
+const (
+	AIResultSuccess      = "success"
+	AIResultContextError = "context_error"
+	AIResultAIError      = "ai_error"
+)
+
+// Result label values for RebalancePressureQueriesTotal.
+const (
+	PressureResultSuccess     = "success"
+	PressureResultUnavailable = "unavailable"
+)
+
+// Stage label values for RebalanceEnactmentFailuresTotal — which step of
+// carrying out an accepted decision failed.
+const (
+	EnactStageEvict           = "evict"
+	EnactStagePatch           = "patch"
+	EnactStageWaitReplacement = "wait_replacement"
+	EnactStageResize          = "resize"
+)
+
 // RebalanceTransitionsTotal is deliberately NOT labeled by the transition's
 // free-text reason: reason is a full sentence (e.g. a specific node's
 // wattage), so as a label it would be unbounded cardinality. Action/outcome
@@ -72,6 +94,23 @@ var RebalanceImprovementScore = prometheus.NewHistogramVec(prometheus.HistogramO
 	Buckets: prometheus.LinearBuckets(0, 10, 11), // 0,10,...,100
 }, []string{"action"})
 
+// RebalanceAIRequestsTotal separates the two ways consulting the AI can fail
+// — assembling the request (context_error) vs the round trip itself (ai_error)
+// — which RebalanceTransitionsTotal collapses into a single outcome=Failed
+// alongside the AI simply declining to act.
+var RebalanceAIRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "hiro_rebalance_ai_requests_total",
+	Help: "Total rebalance AI consultations, by result (success, context_error, ai_error).",
+}, []string{"result"})
+
+// RebalanceAIDuration mirrors hiro_placement_score_duration_seconds so the
+// two AI call paths are directly comparable.
+var RebalanceAIDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+	Name:    "hiro_rebalance_ai_duration_seconds",
+	Help:    "Duration of rebalance AI consultations, including context assembly.",
+	Buckets: prometheus.DefBuckets,
+})
+
 func init() {
 	metrics.Registry.MustRegister(
 		RebalanceTransitionsTotal,
@@ -79,6 +118,8 @@ func init() {
 		RebalanceRateLimitExhaustedTotal,
 		RebalanceCooldownSkipsTotal,
 		RebalanceImprovementScore,
+		RebalanceAIRequestsTotal,
+		RebalanceAIDuration,
 	)
 }
 
