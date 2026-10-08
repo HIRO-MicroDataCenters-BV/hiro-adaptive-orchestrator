@@ -258,7 +258,8 @@ Every parameter can be set as an environment variable before calling any deploy 
 |----------|---------|-------------|
 | `PLACEMENT_SERVICE_NAME` | `<NAME_PREFIX>controller-manager-placement-service` | k8s Service name for the PlacementServer |
 | `PLACEMENT_SERVER_PORT` | `:8090` | Port the PlacementServer listens on |
-| `PLACEMENT_SERVER_PATH` | `/api/v1/placement/decision` | HTTP path for placement decisions |
+| `PLACEMENT_SCORE_PATH` | `/api/v1/placement/score` | HTTP path for AI node scoring |
+| `PLACEMENT_FILTER_PATH` | `/api/v1/placement/filter` | HTTP path for the energy-gate filter check |
 | `PLACEMENT_SERVER_HEALTH_PATH` | `/healthz` | HTTP path for health probes |
 | `PLACEMENT_TIMEOUT_SECS` | `8` | Scheduler plugin → PlacementServer request timeout (seconds) |
 
@@ -376,7 +377,8 @@ The operator pod reads configuration exclusively from environment variables — 
 | `DECISION_AGENT_URL` | `http://mock-decision-agent:8080` | `decision.NewDecisionClient` |
 | `DECISION_AGENT_PATH` | `/api/v1/agent/placement/decision` | `decision.NewDecisionClient` |
 | `PLACEMENT_SERVER_PORT` | `:8090` | `decision.NewPlacementServer` |
-| `PLACEMENT_SERVER_PATH` | `/api/v1/placement/decision` | `decision.NewPlacementServer` |
+| `PLACEMENT_SCORE_PATH` | `/api/v1/placement/score` | `decision.NewPlacementServer` |
+| `PLACEMENT_FILTER_PATH` | `/api/v1/placement/filter` | `decision.NewPlacementServer` |
 | `PLACEMENT_SERVER_HEALTH_PATH` | `/healthz` | `decision.NewPlacementServer` |
 | `EXTENDER_FILTER_PATH` | `/extender/filter` | `decision.NewPlacementServer` |
 | `EXTENDER_PRIORITIZE_PATH` | `/extender/prioritize` | `decision.NewPlacementServer` |
@@ -450,7 +452,8 @@ pluginConfig:
   - name: HIROScore
     args:
       placementServerURL:  "http://<PLACEMENT_SERVICE_NAME>.<NAMESPACE>.svc.cluster.local<PLACEMENT_SERVER_PORT>"
-      placementServerPath: "/api/v1/placement/decision"   # PLACEMENT_SERVER_PATH
+      placementServerPath: "/api/v1/placement/score"      # PLACEMENT_SCORE_PATH
+      filterPath:          "/api/v1/placement/filter"     # PLACEMENT_FILTER_PATH
       timeoutSeconds:      8                              # PLACEMENT_TIMEOUT_SECS
 ```
 
@@ -625,8 +628,8 @@ sequenceDiagram
 For local and CI testing a mock agent is included at `hack/mock_decision_agent.yaml`. It handles two kinds of requests on the same path, distinguished by whether the body carries a `rebalanceContext` (see [internal/rebalance/README.md](../internal/rebalance/README.md#dispatch--acting-on-the-ais-decision)): initial placement gets every candidate node scored randomly in `[0, 100]`; a rebalance evaluation gets a randomly chosen `Move` or `NoOp` recommendation.
 
 ```
-POST /api/v1/placement/decision  (no rebalanceContext) →  nodeScores: [{nodeName, score}, ...]
-POST /api/v1/placement/decision  (rebalanceContext set) →  action: Move | NoOp
+POST /api/v1/agent/placement/decision  (no rebalanceContext) →  nodeScores: [{nodeName, score}, ...]
+POST /api/v1/agent/placement/decision  (rebalanceContext set) →  action: Move | NoOp
 GET  /healthz                                           →  200 ok
 ```
 

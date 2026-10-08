@@ -155,7 +155,7 @@ Inside the operator process:
 | Part                 | Package                      | Role                                                                                                                                                                                       |
 | -------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Reconciler**       | `internal/controller/`       | Watches `OrchestrationProfile` and its referenced workloads, computes `status`                                                                                                             |
-| **PlacementServer**  | `internal/placement-server/` | HTTP listener on `:8090` serving 4 routes — `/api/v1/placement/decision` (plugin), `/extender/filter`, `/extender/prioritize`, `/healthz` — see [docs/architecture.md](docs/architecture.md#placementserver) |
+| **PlacementServer**  | `internal/placement-server/` | HTTP listener on `:8090` serving 5 routes — `/api/v1/placement/score` + `/api/v1/placement/filter` (plugin), `/extender/filter`, `/extender/prioritize`, `/healthz` — see [docs/architecture.md](docs/architecture.md#placementserver) |
 | **Rebalance Engine** | `internal/rebalance/`        | Detects triggers, consults the AI, enacts `Move`/`RetryPendingSchedule`. Shares a `DecisionStore` with the PlacementServer so an accepted `Move` biases where the replacement pod lands — see [internal/rebalance/README.md](internal/rebalance/README.md) |
 
 The `OrchestrationProfile` CRD is how you drive all of it: it binds a placement strategy
