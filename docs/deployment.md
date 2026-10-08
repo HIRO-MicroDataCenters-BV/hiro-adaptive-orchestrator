@@ -25,8 +25,18 @@ All deploy scripts and charts share the same parameter model: every variable has
 ## Full-Stack via Helm — umbrella chart (recommended)
 
 ```bash
-hack/deploy_full_stack_with_helm.sh [deploy|clean]
+hack/deploy_full_stack_with_helm.sh [deploy|clean|destroy]
 ```
+
+| Action | Effect |
+|--------|--------|
+| `deploy` (default) | Build images, load into Kind, deploy in two phases, health-check |
+| `clean` | Uninstall the Helm release, keep the Kind cluster |
+| `destroy` | Delete the Kind cluster |
+
+Prefer `clean` over `destroy` in extender mode: the chart's kube-scheduler restore Job is a
+`pre-delete` hook, so only a Helm uninstall reverts the patch. The `OrchestrationProfile` CRD is
+annotated `helm.sh/resource-policy: keep`, so it and any profiles you created survive a `clean`.
 
 Deploys everything — operator, webhook, scheduler (plugin or extender), mock agent, samples, optional bundled prerequisites — as one Helm release via the umbrella chart at `charts/hiro-adaptive-platform`, against a local Kind cluster. Creates (or reuses) the Kind cluster, builds the operator + scheduler-plugin images, loads them straight into the cluster (no registry needed), deploys in two phases (operator first, then scheduler + webhook once the operator's Service is live), and health-checks the result.
 
@@ -40,9 +50,29 @@ Deploys everything — operator, webhook, scheduler (plugin or extender), mock a
 | `HELM_PLATFORM_RELEASE` | `hiro-adaptive-platform` | Helm release name |
 | `SCHED_NAME` | `hiro-scheduler` | `schedulerName` the webhook injects |
 
+Each of these drives both the Helm values and the script's end-of-run summary, so what it prints
+always matches what was deployed:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCHEDULER_MODE` | `plugin` | `plugin` (scheduler Deployment + webhook), `extender` (patches the cluster's own kube-scheduler), or `none` (operator only) |
+| `USE_MOCK_AGENT` | `true` | Deploy the bundled mock decision agent |
+| `DEPLOY_SAMPLES` | `true` | Deploy the nginx + `OrchestrationProfile` samples |
+| `DEPLOY_PROMETHEUS` | `false` | Bundle kube-prometheus-stack and turn on both ServiceMonitors, so the `hiro_*` metrics are scraped rather than just exposed |
+| `OTLP_ENDPOINT` | *(empty)* | OTLP gRPC collector for traces, e.g. `alloy.observability.svc:4317`. Empty disables tracing entirely |
+
 ```bash
 KIND_CLUSTER_NAME=hiro-platform-verify hack/deploy_full_stack_with_helm.sh deploy
-hack/deploy_full_stack_with_helm.sh clean   # tear down the Kind cluster it created
+
+# scrape the metrics with the bundled Prometheus, and export traces
+DEPLOY_PROMETHEUS=true OTLP_ENDPOINT=alloy.observability.svc:4317 \
+  hack/deploy_full_stack_with_helm.sh deploy
+
+# extender instead of the scheduler plugin — no scheduler pod, no webhook
+SCHEDULER_MODE=extender hack/deploy_full_stack_with_helm.sh deploy
+
+hack/deploy_full_stack_with_helm.sh clean     # release only, cluster stays
+hack/deploy_full_stack_with_helm.sh destroy   # delete the Kind cluster
 ```
 
 For a real cluster (not Kind), deploy the same chart directly — no Kind-specific env vars apply here; instead, configuration is the Helm chart's own `values.yaml` (scheduler mode, webhook, mock agent, bundled prerequisites, etc.):

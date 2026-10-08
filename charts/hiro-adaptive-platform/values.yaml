@@ -1,9 +1,61 @@
-## hiro-adaptive-platform — umbrella chart values.
+## ╔═════════════════════════════════════════════════════════════════════╗
+## ║  hiro-adaptive-platform — umbrella chart values                     ║
+## ╚═════════════════════════════════════════════════════════════════════╝
 ##
-## The operator is configured via `hiro-operator` below, which passes
-## straight through to the dist/chart subchart. Everything else (scheduler,
-## mock agent, bundled prerequisites, samples) is this chart's own.
+## A top-level key matching a Chart.yaml alias (hiro-operator,
+## cert-manager, metrics-server, prometheus) is passthrough config for
+## that subchart. Everything else belongs to this chart's templates/.
 
+## ╔═════════════════════════════════════════════════════════════════════╗
+## ║  PREREQUISITES · bundled subcharts, all off by default              ║
+## ╚═════════════════════════════════════════════════════════════════════╝
+## Cluster-wide infra this stack can use — bundled here only for
+## convenience on a demo/Kind cluster, off by default. Production posture:
+## install these yourself, shared across the cluster. `helm uninstall` on
+## this release removes anything bundled here too.
+prerequisites:
+  # Needed when webhook.certManager.enable below is true.
+  certManager:
+    enable: false
+  # Powers the rebalance engine's CPU/Memory pressure triggers.
+  metricsServer:
+    enable: false
+  # Lets a Prometheus instance scrape this stack's metrics.
+  prometheus:
+    enable: false
+
+## ─── cert-manager ─────────────────────────────────────────────────────
+## Passthrough config for the three above — harmless while the matching
+## prerequisites.* stays off. The enable flags live in prerequisites, not
+## here, because cert-manager's chart schema rejects unknown keys like
+## "enable".
+cert-manager:
+  # cert-manager's chart doesn't install its own CRDs by default.
+  crds:
+    enabled: true
+
+## ─── metrics-server ───────────────────────────────────────────────────
+metrics-server:
+  # Kind/minikube/k3d only — kubelet certs aren't trusted there.
+  args:
+    - --kubelet-insecure-tls
+
+## ─── prometheus · kube-prometheus-stack ───────────────────────────────
+prometheus:
+  prometheus:
+    prometheusSpec:
+      # Empty selectors = scrape ServiceMonitors everywhere, not just ones
+      # with this release's Helm labels (needed to see the operator's own).
+      # serviceMonitorSelectorNilUsesHelmValues must also be false, or this
+      # chart treats an empty {} as "unset" and auto-generates one anyway.
+      serviceMonitorSelectorNilUsesHelmValues: false
+      serviceMonitorSelector: {}
+      serviceMonitorNamespaceSelector: {}
+
+## ╔═════════════════════════════════════════════════════════════════════╗
+## ║  HIRO-OPERATOR · the operator, via the dist/chart subchart          ║
+## ╚═════════════════════════════════════════════════════════════════════╝
+## Passes straight through to the kubebuilder-generated dist/chart.
 hiro-operator:
   enabled: true
   # manager.env is one list — Helm replaces it wholesale, it can't merge
@@ -19,7 +71,8 @@ hiro-operator:
       - name: DECISION_AGENT_PATH
         value: /api/v1/agent/placement/decision
       # PlacementServer — this operator's scoring endpoint, called by the
-      # scheduler plugin/extender (see scheduler: below).
+      # scheduler plugin/extender (see scheduler: below). The Service and
+      # containerPort follow this via postrender/render.sh.
       - name: PLACEMENT_SERVER_PORT
         value: ":8090"
       - name: PLACEMENT_SCORE_PATH
@@ -98,23 +151,9 @@ hiro-operator:
       - name: HIRO_SCHEDULER_NAME
         value: hiro-scheduler
 
-## Mock decision agent — opt-in demo/eval only. Off by default; when on,
-## DECISION_AGENT_URL above already points at it by default.
-mockAgent:
-  enable: false
-  serviceName: mock-decision-agent
-  # Safe to change on its own — templated into the Service, the container
-  # port, and the script's own listener (files/mock_decision_agent_server.py).
-  port: 8080
-  image: python:3.11-slim
-  resources:
-    requests:
-      cpu: 50m
-      memory: 64Mi
-    limits:
-      cpu: 200m
-      memory: 128Mi
-
+## ╔═════════════════════════════════════════════════════════════════════╗
+## ║  WEBHOOK · pod mutator that sets schedulerName                      ║
+## ╚═════════════════════════════════════════════════════════════════════╝
 ## Pod-mutating webhook (auto-sets schedulerName on new pods). Lives in this
 ## chart's own templates (templates/webhook/), not dist/chart — patches the
 ## operator Deployment via the Helm post-renderer (postrender/render.sh).
@@ -128,50 +167,13 @@ webhook:
     - kube-node-lease
   # Self-signed Issuer + Certificate for the webhook's TLS — needs
   # cert-manager already running (your own, or prerequisites.certManager
-  # below). Set false if you provide your own `webhook-server-cert` Secret.
+  # above). Set false if you provide your own `webhook-server-cert` Secret.
   certManager:
     enable: false
 
-## Cluster-wide infra this stack can use — bundled here only for
-## convenience on a demo/Kind cluster, off by default. Production posture:
-## install these yourself, shared across the cluster. `helm uninstall` on
-## this release removes anything bundled here too.
-prerequisites:
-  # Needed when webhook.certManager.enable above is true.
-  certManager:
-    enable: false
-  # Powers the rebalance engine's CPU/Memory pressure triggers.
-  metricsServer:
-    enable: false
-  # Lets a Prometheus instance scrape this stack's metrics.
-  prometheus:
-    enable: false
-
-## Passthrough config for the bundled dependencies above (keyed by their
-## Chart.yaml alias) — harmless while the matching prerequisites.* stays
-## off. The enable flags live in prerequisites above, not here, because
-## cert-manager's chart schema rejects unknown keys like "enable".
-cert-manager:
-  # cert-manager's chart doesn't install its own CRDs by default.
-  crds:
-    enabled: true
-
-metrics-server:
-  # Kind/minikube/k3d only — kubelet certs aren't trusted there.
-  args:
-    - --kubelet-insecure-tls
-
-prometheus:
-  prometheus:
-    prometheusSpec:
-      # Empty selectors = scrape ServiceMonitors everywhere, not just ones
-      # with this release's Helm labels (needed to see the operator's own).
-      # serviceMonitorSelectorNilUsesHelmValues must also be false, or this
-      # chart treats an empty {} as "unset" and auto-generates one anyway.
-      serviceMonitorSelectorNilUsesHelmValues: false
-      serviceMonitorSelector: {}
-      serviceMonitorNamespaceSelector: {}
-
+## ╔═════════════════════════════════════════════════════════════════════╗
+## ║  SCHEDULER · plugin or extender integration                         ║
+## ╚═════════════════════════════════════════════════════════════════════╝
 ## Custom scheduler. "plugin" runs a standalone Deployment (in-process
 ## HIROScore plugin) for pods with schedulerName: hiro-scheduler. "extender"
 ## instead patches the cluster's existing kube-scheduler to call the same
@@ -242,6 +244,7 @@ scheduler:
       kubectl: alpine/k8s:1.31.13
       patcher: python:3-slim
     placementServer:
+      # Must match hiro-operator's PLACEMENT_SERVER_PORT above.
       port: 8090
       filterVerb: extender/filter
       prioritizeVerb: extender/prioritize
@@ -251,6 +254,40 @@ scheduler:
       ignorable: true
       nodeCacheCapable: false
 
+## ╔═════════════════════════════════════════════════════════════════════╗
+## ║  OBSERVABILITY · who may read /metrics                              ║
+## ╚═════════════════════════════════════════════════════════════════════╝
+## Observability. Tracing itself is configured per-process — see
+## hiro-operator.manager.env (OTEL_*) and scheduler.plugin.tracing.
+observability:
+  ## ServiceAccounts allowed to GET /metrics, as "namespace:serviceaccount".
+  ## Empty means nothing can read either endpoint. The bundled Prometheus
+  ## (prerequisites.prometheus) already grants itself this.
+  metricsReaders: []
+
+## ╔═════════════════════════════════════════════════════════════════════╗
+## ║  MOCK AGENT · demo decision agent                                   ║
+## ╚═════════════════════════════════════════════════════════════════════╝
+## Mock decision agent — opt-in demo/eval only. Off by default; when on,
+## hiro-operator's DECISION_AGENT_URL already points at it by default.
+mockAgent:
+  enable: false
+  serviceName: mock-decision-agent
+  # Safe to change on its own — templated into the Service, the container
+  # port, and the script's own listener (files/mock_decision_agent_server.py).
+  port: 8080
+  image: python:3.11-slim
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+## ╔═════════════════════════════════════════════════════════════════════╗
+## ║  SAMPLES · demo workloads and profiles                              ║
+## ╚═════════════════════════════════════════════════════════════════════╝
 ## Sample OrchestrationProfile CRs + nginx Deployments, for demos/eval. Off
 ## by default (production installs shouldn't get demo workloads).
 ## rebalancing.enabled/dryRun are per-CR fields, unrelated to

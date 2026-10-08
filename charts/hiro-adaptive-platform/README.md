@@ -245,7 +245,7 @@ whether the scheduler plugin is being deployed.
 
 ## Post-renderer plugin (Helm v4)
 
-Two things can't be expressed as plain Helm values, because the operator's
+Three things can't be expressed as plain Helm values, because the operator's
 `manager.env` is a flat list Helm can't merge into by key, and its
 Deployment (from the `dist/chart` subchart) can't be hand-edited:
 
@@ -253,15 +253,25 @@ Deployment (from the `dist/chart` subchart) can't be hand-edited:
    operator container, and `ENABLE_WEBHOOKS` forced to `"true"`.
 2. `scheduler.mode=plugin` needs `HIRO_SCHEDULER_NAME` forced to match
    `scheduler.plugin.schedulerName`.
+3. A `PLACEMENT_SERVER_PORT` other than `8090` needs the placement Service's
+   `port`/`targetPort` and the manager's `containerPort` rewritten to match.
+   Only the env var is a chart value; the other two are literals the
+   kubebuilder helm plugin emits from the kustomize output, so all three
+   would otherwise disagree and placement traffic would be routed to a port
+   nothing listens on.
 
-`postrender/render.sh` handles both: it self-detects which feature(s) are
+`postrender/render.sh` handles all three: it self-detects which feature(s) are
 active by scanning Helm's own rendered output (no separate values needed),
-and patches the operator's already-rendered Deployment via `kustomize`
-strategic-merge patches, which override `manager.env`'s static defaults by
-matching on each entry's `name` in place — not a plain JSON6902 append,
-which would produce two entries with the same `name` and make `helm
-upgrade`'s patch computation fail outright. When neither feature is active
-it passes the input straight through.
+and patches Helm's already-rendered output via `kustomize`. The env-var
+patches (1 and 2) are strategic merges, which override `manager.env`'s
+static defaults by matching on each entry's `name` in place — not a plain
+JSON6902 append, which would produce two entries with the same `name` and
+make `helm upgrade`'s patch computation fail outright. The port patches (3)
+are JSON6902 instead, because both port lists key on the port number itself,
+so a merge would add a second entry rather than change the existing one;
+they carry `test` ops so an upstream reordering fails loudly rather than
+rewriting the wrong port. When no feature is active it passes the input
+straight through.
 
 **Helm v4 changed what `--post-renderer` accepts**: it now takes the name
 of an installed plugin (type `postrenderer/v1`), not a raw script path like
@@ -356,8 +366,11 @@ template`:
   kubeconfig to `.kind-kubeconfig-<cluster-name>.yaml` and prints it.
   No `GITHUB_PAT_TOKEN`/registry needed — images build and load locally.
   Options: `KIND_CLUSTER_NAME`, `SCHED_K8S_VERSION`, `HELM_NAMESPACE`,
-  `HELM_PLATFORM_RELEASE`, `SCHED_NAME`. Usage:
-  `hack/deploy_full_stack_with_helm.sh [deploy|clean]`.
+  `HELM_PLATFORM_RELEASE`, `SCHED_NAME`, `SCHEDULER_MODE`,
+  `USE_MOCK_AGENT`, `DEPLOY_SAMPLES`, `DEPLOY_PROMETHEUS` and
+  `OTLP_ENDPOINT` to pick which components get deployed. Usage:
+  `hack/deploy_full_stack_with_helm.sh [deploy|clean|destroy]` — `clean`
+  uninstalls the release and keeps the cluster, `destroy` deletes it.
 - **`.github/workflows/platform-verify-chart.yml`** — same idea in CI, on
   every push/PR, against a throwaway Kind cluster created inside the job.
   Runs a manifests-drift check first (fails if `dist/chart`/`config`/`api`

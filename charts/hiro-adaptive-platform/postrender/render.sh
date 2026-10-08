@@ -12,6 +12,11 @@
 #   2. scheduler.mode=plugin → appends HIRO_SCHEDULER_NAME matching
 #      scheduler.plugin.schedulerName, read back out of the scheduler
 #      plugin's own already-rendered ConfigMap so the two can never drift.
+#   3. PLACEMENT_SERVER_PORT != 8090 → rewrites the placement Service's
+#      port/targetPort and the manager's containerPort to match. Those three
+#      must agree or placement traffic is routed to a port nothing listens
+#      on; only the env var is a chart value, the other two are literals in
+#      the generated subchart.
 #
 # Both rely on Kubernetes allowing duplicate env-var names in a PodSpec and
 # using the last one — appending an override is enough, no need to find and
@@ -76,8 +81,20 @@ fi
 scheduler_name=""
 scheduler_name="$(grep -m1 '^      - schedulerName: ' "$WORK_DIR/all.yaml" | sed 's/^      - schedulerName: //' || true)"
 
-if [ "$webhook_active" = "false" ] && [ -z "$scheduler_name" ]; then
-  # Neither feature active — nothing to patch, pass through as-is.
+# Last occurrence wins: manager.envOverrides renders after manager.env, and
+# Kubernetes honours the last duplicate — reading the first would pick up the
+# static default and patch the Service to the wrong port. Strips an optional
+# host part ("0.0.0.0:9090") and the leading colon.
+placement_port=""
+placement_port="$(grep -A1 'name: PLACEMENT_SERVER_PORT' "$WORK_DIR/all.yaml" \
+  | grep -E '^[[:space:]]+value:' | tail -1 \
+  | sed -E 's/.*value:[[:space:]]*//; s/^"(.*)"$/\1/; s/.*://' || true)"
+if [ "$placement_port" = "8090" ]; then
+  placement_port=""
+fi
+
+if [ "$webhook_active" = "false" ] && [ -z "$scheduler_name" ] && [ -z "$placement_port" ]; then
+  # No feature active — nothing to patch, pass through as-is.
   cat "$WORK_DIR/all.yaml"
   exit 0
 fi
@@ -89,6 +106,9 @@ fi
 # that one, since it has none of those arrays pre-populated the same way.
 OPERATOR_DEPLOYMENT_TARGET='    kind: Deployment
     labelSelector: "app.kubernetes.io/name=hiro-operator,control-plane=controller-manager"'
+
+PLACEMENT_SERVICE_TARGET='    kind: Service
+    labelSelector: "app.kubernetes.io/component=placement-server"'
 
 patches=""
 
@@ -117,6 +137,35 @@ spec:
               value: "${scheduler_name}"
 EOF
   patches+=$'- path: '"$WORK_DIR/manager_scheduler_name_patch.yaml"$'\n  target:\n'"${OPERATOR_DEPLOYMENT_TARGET}"$'\n'
+fi
+
+# JSON6902 rather than a strategic merge: both of these lists key on the port
+# number itself (containerPort / port), so a merge patch would add a second
+# entry instead of changing the existing one. The `test` ops assert the index
+# still holds the port we mean, so a reordering upstream fails loudly here
+# rather than silently rewriting the health probe or metrics port.
+if [ -n "$placement_port" ]; then
+  cat > "$WORK_DIR/placement_port_container_patch.yaml" <<EOF
+- op: test
+  path: /spec/template/spec/containers/0/ports/0/name
+  value: placement-srv
+- op: replace
+  path: /spec/template/spec/containers/0/ports/0/containerPort
+  value: ${placement_port}
+EOF
+  cat > "$WORK_DIR/placement_port_service_patch.yaml" <<EOF
+- op: test
+  path: /spec/ports/0/name
+  value: placement-api
+- op: replace
+  path: /spec/ports/0/port
+  value: ${placement_port}
+- op: replace
+  path: /spec/ports/0/targetPort
+  value: ${placement_port}
+EOF
+  patches+=$'- path: '"$WORK_DIR/placement_port_container_patch.yaml"$'\n  target:\n'"${OPERATOR_DEPLOYMENT_TARGET}"$'\n'
+  patches+=$'- path: '"$WORK_DIR/placement_port_service_patch.yaml"$'\n  target:\n'"${PLACEMENT_SERVICE_TARGET}"$'\n'
 fi
 
 cat > "$WORK_DIR/kustomization.yaml" <<EOF

@@ -1,0 +1,43 @@
+{{- if .Values.observability.metricsReaders }}
+# Own ClusterRole rather than binding the hiro-operator subchart's equivalent:
+# that one's name comes from a kubebuilder-generated helper keyed on the
+# subchart's alias, which this chart can't compute without faking its context.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-metrics-reader
+  labels:
+    app.kubernetes.io/component: metrics-reader
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+rules:
+  - nonResourceURLs:
+      - /metrics
+    verbs:
+      - get
+---
+# One binding covers both /metrics endpoints — the operator and kube-scheduler
+# both authorize via a SubjectAccessReview on this same nonResourceURL.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-metrics-reader
+  labels:
+    app.kubernetes.io/component: metrics-reader
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-metrics-reader
+subjects:
+{{- range .Values.observability.metricsReaders }}
+  {{- $parts := splitList ":" . }}
+  {{- if ne (len $parts) 2 }}
+  {{- fail (printf "observability.metricsReaders entry %q must be \"namespace:serviceaccount\"" .) }}
+  {{- end }}
+  - kind: ServiceAccount
+    namespace: {{ index $parts 0 }}
+    name: {{ index $parts 1 }}
+{{- end }}
+{{- end }}

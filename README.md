@@ -90,10 +90,12 @@ kubectl get orchestrationprofile orchestrationprofile-1 -o yaml
 `status.status` moves `NoPods → Pending → Active` as the pods come up; status transitions are also
 recorded as Kubernetes Events on the profile (`kubectl describe orchestrationprofile orchestrationprofile-1`).
 
-**4. Clean up.** Tears down the Kind cluster the script created:
+**4. Clean up.** `clean` removes the Helm release and leaves the Kind cluster running, so a
+redeploy skips cluster creation. `destroy` deletes the cluster outright:
 
 ```bash
-hack/deploy_full_stack_with_helm.sh clean
+hack/deploy_full_stack_with_helm.sh clean     # release only
+hack/deploy_full_stack_with_helm.sh destroy   # the whole Kind cluster
 ```
 
 ### Beyond the defaults
