@@ -71,12 +71,19 @@ load straight into Kind:
 hack/deploy_full_stack_with_helm.sh deploy
 ```
 
-**2. Verify.** The script health-checks itself and prints the pods at the end, so this is just to
-re-check later:
+**2. Verify.** The deploy health-checks the PlacementServer and prints the pods, then ends with
+copy-pasteable port-forward commands and access URLs — the PlacementServer, the mock agent, and
+both `hiro_*` metrics endpoints, with a bearer token already granted so the `curl`s work as
+printed. To re-check the pods later:
 
 ```bash
 kubectl -n hiro-adaptive-orchestrator-system get pods
 ```
+
+Metrics live on two endpoints, not one: the operator's on `:8443` and the scheduler plugin's on
+`:10259`, in separate processes with separate registries. What exists on each, how to turn
+scraping and tracing on, and how to read either one is in
+**[docs/instrumentation.md](docs/instrumentation.md)**.
 
 **3. Try it.** Apply a sample workload plus a profile that governs it, then watch the status fill in:
 
@@ -89,6 +96,10 @@ kubectl get orchestrationprofile orchestrationprofile-1 -o yaml
 
 `status.status` moves `NoPods → Pending → Active` as the pods come up; status transitions are also
 recorded as Kubernetes Events on the profile (`kubectl describe orchestrationprofile orchestrationprofile-1`).
+
+This is also what first exercises the scheduler plugin, so it's worth checking that the AI was
+actually consulted — if `hiro_scheduler_plugin_nodes_scored_count` stays at `0` after a pod is
+scheduled, the plugin never reached the PlacementServer and fell back to neutral scores silently.
 
 **4. Clean up.** `clean` removes the Helm release and leaves the Kind cluster running, so a
 redeploy skips cluster creation. `destroy` deletes the cluster outright:
@@ -103,12 +114,19 @@ hack/deploy_full_stack_with_helm.sh destroy   # the whole Kind cluster
 For a real cluster (not Kind), deploy the same umbrella chart at `charts/hiro-adaptive-platform`
 with `make helm-platform-deploy` instead of step 1.
 
-Every parameter — cluster name, namespace, scheduler mode (plugin/extender), mock vs. real AI
-agent, and more — has a sane default and can be overridden via environment variables:
+Every parameter has a sane default and can be overridden via environment variables:
 
 ```bash
 KIND_CLUSTER_NAME=my-cluster hack/deploy_full_stack_with_helm.sh deploy
+
+SCHEDULER_MODE=extender    hack/deploy_full_stack_with_helm.sh deploy   # patch kube-scheduler instead
+DEPLOY_PROMETHEUS=true     hack/deploy_full_stack_with_helm.sh deploy   # bundle Prometheus and scrape hiro_*
+OTLP_ENDPOINT=alloy:4317   hack/deploy_full_stack_with_helm.sh deploy   # export traces
+USE_MOCK_AGENT=false       hack/deploy_full_stack_with_helm.sh deploy   # point at a real AI agent
 ```
+
+Each of these drives both the Helm values and the script's closing summary, so what it prints
+always matches what was deployed.
 
 Every other deployment path — shell scripts, operator-only, scheduler-only, extender-only, mock agent, manual Kustomize, YAML bundle — plus the full environment-variable reference and phase-by-phase breakdown, is documented in **[docs/deployment.md](docs/deployment.md)**.
 
