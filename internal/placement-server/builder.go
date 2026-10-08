@@ -28,6 +28,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
 )
 
@@ -115,10 +116,12 @@ func (b *DecisionContextBuilder) Build(
 	// -------------------------------------------------------------------------
 	profile, err := b.FindProfileForPod(ctx, pod)
 	if err != nil {
+		metrics.PlacementContextBuildTotal.WithLabelValues(metrics.BuildResultProfileError).Inc()
 		return nil, fmt.Errorf("finding profile for pod %s/%s: %w",
 			pod.Namespace, pod.Name, err)
 	}
 	if profile == nil {
+		metrics.PlacementContextBuildTotal.WithLabelValues(metrics.BuildResultProfileNotFound).Inc()
 		return nil, fmt.Errorf("no OrchestrationProfile found for pod %s/%s — "+
 			"pod's application is not governed by any profile",
 			pod.Namespace, pod.Name)
@@ -144,6 +147,7 @@ func (b *DecisionContextBuilder) Build(
 	var eaoProfile *EAOProfileContext
 	if profile.Spec.Placement.Awareness.Energy {
 		eaoProfile, err = b.fetchEAOProfile(ctx, pod)
+		observeEAOFetch(metrics.EAOCallerScore, eaoProfile, err)
 		if err != nil {
 			// Log and continue — energy context is optional
 			logger.Info("builder: EAO unavailable, skipping energy data",
@@ -165,7 +169,7 @@ func (b *DecisionContextBuilder) Build(
 		EAOProfile:     eaoProfile,
 	}
 
-	logger.Info("builder: request assembled",
+	logValues := []any{
 		"requestId", requestID,
 		"pod", pod.Name,
 		"profile", profile.Name,
@@ -176,13 +180,37 @@ func (b *DecisionContextBuilder) Build(
 		"currentPlacementNode", aoProfile.CurrentPlacement.NodeName,
 		"energyEnabled", profile.Spec.Placement.Awareness.Energy,
 		"eaoDataAttached", eaoProfile != nil,
-		"eaoAction", eaoProfile.Decision.Action,
-		"eaoReason", eaoProfile.Decision.Reason,
-		"eaoPriority", eaoProfile.Priority,
-		"eaoEnergyConsumptionWatts", eaoProfile.EnergyConsumptionWatts,
-	)
+	}
+	// nil when energy awareness is off or no EAO object exists for the pod.
+	if eaoProfile != nil {
+		logValues = append(logValues,
+			"eaoPriority", eaoProfile.Priority,
+			"eaoEnergyConsumptionWatts", eaoProfile.EnergyConsumptionWatts,
+		)
+		// nil until the EnergyAwareOrchestrator has populated the EAO's status.
+		if eaoProfile.Decision != nil {
+			logValues = append(logValues,
+				"eaoAction", eaoProfile.Decision.Action,
+				"eaoReason", eaoProfile.Decision.Reason,
+			)
+		}
+	}
+	logger.Info("builder: request assembled", logValues...)
 
+	metrics.PlacementContextBuildTotal.WithLabelValues(metrics.BuildResultSuccess).Inc()
 	return req, nil
+}
+
+// observeEAOFetch records one EAO lookup; nil with no error means none exists.
+func observeEAOFetch(caller string, eao *EAOProfileContext, err error) {
+	result := metrics.EAOResultFound
+	switch {
+	case err != nil:
+		result = metrics.EAOResultError
+	case eao == nil:
+		result = metrics.EAOResultNotFound
+	}
+	metrics.PlacementEAOFetchTotal.WithLabelValues(caller, result).Inc()
 }
 
 // =============================================================================
@@ -445,6 +473,7 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 	var eaoProfile *EAOProfileContext
 	if profile.Spec.Placement.Awareness.Energy {
 		eaoProfile, err = b.fetchEAOProfileForApp(ctx, profile.Spec.ApplicationRef)
+		observeEAOFetch(metrics.EAOCallerRebalance, eaoProfile, err)
 		if err != nil {
 			// Energy context is optional — log and continue, matching Build's posture.
 			logger.Info("builder: EAO unavailable for rebalance context, skipping",
@@ -610,6 +639,7 @@ func (b *DecisionContextBuilder) CheckEnergyGate(
 	}
 
 	eaoProfile, err := b.fetchEAOProfile(ctx, pod)
+	observeEAOFetch(metrics.EAOCallerFilter, eaoProfile, err)
 	if err != nil || eaoProfile == nil {
 		// EAO data unavailable -- allow scheduling (best-effort energy gating)
 		return EnergyGateResponse{Allowed: true}, nil

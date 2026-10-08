@@ -59,11 +59,111 @@ separately.
 
 ### Operator (`:8443`)
 
-Full reference — every metric, label, and label value — is in
-**[internal/metrics/README.md](../internal/metrics/README.md)**, alongside the catalogue of
-free metrics that controller-runtime, client-go, and the Go runtime provide for nothing.
+Defined in [internal/metrics/](../internal/metrics/), one file per subsystem.
 
-Subsystems: `hiro_rebalance_*`, `hiro_placement_*`, `hiro_controller_*`, `hiro_webhook_*`.
+**Rebalance engine** — `rebalance.go`
+
+| Metric | Type | Labels | What it tells you |
+|---|---|---|---|
+| `hiro_rebalance_transitions_total` | counter | `from`, `to`, `action`, `outcome` | Every state transition that actually landed. Deliberately not labelled by the free-text reason |
+| `hiro_rebalance_trigger_evaluations_total` | counter | `condition`, `fired` | Detection — every trigger condition checked |
+| `hiro_rebalance_trigger_errors_total` | counter | `condition` | A condition that couldn't be evaluated. Those paths report "did not fire", so without this a condition that can never match looks like one that simply didn't |
+| `hiro_rebalance_pressure_queries_total` | counter | `result` | metrics-server lookups. A missing metrics-server otherwise silently disables the CPU/Memory triggers |
+| `hiro_rebalance_ai_requests_total` | counter | `result` | Rebalance AI consultations, separating a context-assembly failure from a failed round trip |
+| `hiro_rebalance_ai_duration_seconds` | histogram | — | AI consultation latency, including context assembly. Default buckets |
+| `hiro_rebalance_improvement_score` | histogram | `action` | Improvement scores the AI returns, whether or not a guardrail accepts them. Buckets `0, 10, … 100` |
+| `hiro_rebalance_guardrail_rejections_total` | counter | `action`, `guardrail` | A recommendation a guardrail refused before reaching `Decided` |
+| `hiro_rebalance_cooldown_skips_total` | counter | — | A reconcile that skipped the AI because the profile is in cooldown |
+| `hiro_rebalance_rate_limit_exhausted_total` | counter | `action` | An accepted Move that still failed the cluster-wide rate-limit wait |
+| `hiro_rebalance_enactment_duration_seconds` | histogram | `action` | Time to carry out a decision. Buckets run to 300s, since enactment waits on a replacement pod |
+| `hiro_rebalance_enactment_failures_total` | counter | `action`, `stage` | Which step of enactment failed — transitions alone only record that the cycle failed |
+| `hiro_rebalance_resize_outcomes_total` | counter | `result` | How much of an in-place resize took effect. A shortfall is still reported as Enacted |
+| `hiro_rebalance_watchdog_recoveries_total` | counter | — | A cycle force-recovered after going stale — otherwise indistinguishable from a normal return to Watching |
+| `hiro_rebalance_profiles_by_state` | gauge | `state` | Live count per state, recomputed on every scrape rather than incremented, so it can't drift after a restart |
+| `hiro_rebalance_profiles_escalated` | gauge | — | Profiles currently paused by escalation. A status flag orthogonal to `state` |
+
+**PlacementServer** — `placement.go`. Plugin (`/api/v1/placement/*`) and extender (`/extender/*`)
+share the same `score()` / `filter()` methods, so one set of metrics covers both, split by `path`.
+
+| Metric | Type | Labels | What it tells you |
+|---|---|---|---|
+| `hiro_placement_score_requests_total` | counter | `path`, `result` | Every scoring request |
+| `hiro_placement_score_duration_seconds` | histogram | `path` | A DecisionStore hit (near zero) or the full AI round trip. Default buckets |
+| `hiro_placement_filter_requests_total` | counter | `path`, `allowed` | Every energy-gate check that returned without error |
+| `hiro_placement_filter_errors_total` | counter | `path` | An energy-gate error soft-failed open |
+| `hiro_placement_decision_store_hits_total` | counter | — | DecisionStore lookups that found a live entry |
+| `hiro_placement_decision_store_misses_total` | counter | — | Lookups that found nothing or an expired entry. Derive a ratio in PromQL |
+| `hiro_placement_context_build_total` | counter | `result` | Scoring-context assembly. "Pod isn't governed" and "profile lookup broke" reach the caller as one error |
+| `hiro_placement_eao_fetch_total` | counter | `caller`, `result` | EnergyAwareOrchestration lookups. Every caller soft-fails a missing EAO — see below |
+
+**OrchestrationProfile controller** — `controller.go`
+
+| Metric | Type | Labels | What it tells you |
+|---|---|---|---|
+| `hiro_controller_profile_status_transitions_total` | counter | `from`, `to` | A change to `status.status`. Fires only on an actual change |
+
+**Pod-defaulting webhook** — `webhook.go`
+
+| Metric | Type | Labels | What it tells you |
+|---|---|---|---|
+| `hiro_webhook_pod_default_outcomes_total` | counter | `outcome` | What the webhook did on each admission |
+
+#### Energy awareness degrades silently
+
+All three placement paths treat a missing or unreachable EAO as "carry on without energy data",
+and none of them report an error:
+
+| `caller` | What happens without the EAO |
+|---|---|
+| `score` | Energy data is dropped from the AI request |
+| `filter` | The gate allows the pod — and `filter_requests_total` counts it as `allowed="true"`, identical to "energy checked and sufficient" |
+| `rebalance` | Energy data is dropped from the rebalance AI request |
+
+`hiro_placement_eao_fetch_total{result="not_found"|"error"}` is the only signal that energy-aware
+placement is running blind. It isn't counted at all when a profile has energy awareness off.
+
+#### Label values
+
+| Label | Metric | Values |
+|---|---|---|
+| `from` / `to` / `state` | rebalance | `Watching`, `Triggered`, `Evaluating`, `Decided`, `Enacting` |
+| `action` | `transitions_total` | `Move`, `AdjustReplicas`, `AdjustResources`, `NoOp`, `Defer`, `Reject`, `Escalate`, or `""` before a decision |
+| `action` | `improvement_score`, `guardrail_rejections_total`, `enactment_*` | `Move`, `AdjustReplicas`, `AdjustResources` |
+| `action` | `rate_limit_exhausted_total` | `Move` — the rate limiter applies to Moves only |
+| `outcome` | `transitions_total` | `Enacted`, `NoOp`, `Rejected`, `Deferred`, `Failed`, `Escalated`, or `""` while non-terminal |
+| `condition` | `trigger_*` | `CPUThreshold`, `MemoryThreshold`, `EnergyThreshold`, `NodeFailure`, `Scheduled` |
+| `fired` | `trigger_evaluations_total` | `true`, `false` |
+| `guardrail` | `guardrail_rejections_total` | `threshold`, `bounds` |
+| `stage` | `enactment_failures_total` | `evict`, `patch`, `wait_replacement` |
+| `result` | `ai_requests_total` | `success`, `context_error`, `ai_error` |
+| `result` | `pressure_queries_total` | `success`, `unavailable` |
+| `result` | `resize_outcomes_total` | `all_resized`, `partial`, `none` |
+| `path` | placement | `plugin`, `extender` |
+| `result` | `score_requests_total` | `store_hit`, `ai_success`, `ai_error` |
+| `allowed` | `filter_requests_total` | `true`, `false` |
+| `result` | `context_build_total` | `success`, `profile_not_found`, `profile_error` |
+| `caller` | `eao_fetch_total` | `score`, `filter`, `rebalance` |
+| `result` | `eao_fetch_total` | `found`, `not_found`, `error` |
+| `from` / `to` | `profile_status_transitions_total` | `NoPods`, `Pending`, `Active`, `Partial`, `Degraded`, `Error` |
+| `outcome` | `pod_default_outcomes_total` | `mutated`, `already_set`, `no_profile`, `lookup_error` |
+
+#### Free metrics
+
+controller-runtime, client-go and the Go runtime expose these with no code from us. Check here
+before adding a `hiro_*` metric — reconcile latency, for one, already exists.
+
+| Source | Metrics |
+|---|---|
+| Reconcilers, labelled `controller=` (`orchestrationprofile`, `rebalance-detection`) | `controller_runtime_reconcile_total{result}`, `_reconcile_errors_total`, `_reconcile_panics_total`, `_reconcile_time_seconds`, `_active_workers`, `_max_concurrent_reconciles` |
+| Workqueue, labelled `name=` | `workqueue_depth`, `_adds_total`, `_queue_duration_seconds`, `_work_duration_seconds`, `_retries_total`, `_longest_running_processor_seconds`, `_unfinished_work_seconds` |
+| Webhook, labelled `webhook=` — only with `webhook.enable=true` | `controller_runtime_webhook_requests_total{code}`, `_requests_in_flight`, `_latency_seconds` |
+| client-go | `rest_client_requests_total{code,method,host}`, `_request_duration_seconds`, `_request_size_bytes`, `_response_size_bytes` |
+| Leader election | `leader_election_master_status{name}` |
+| Cert reload | `certwatcher_read_certificate_total`, `_errors_total` — metrics cert, and the webhook cert when enabled |
+| Go runtime / process | `go_goroutines`, `go_threads`, `go_gc_duration_seconds`, `go_memstats_*`, `process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_open_fds`, … |
+
+kube-scheduler similarly exposes its own `scheduler_*` metrics on `:10259`, including per-plugin
+extension-point latency for `HIROScore`.
 
 ### Scheduler plugin (`:10259`)
 
@@ -267,8 +367,10 @@ Conventions, in both processes:
    has no `Desc`, so read it from `legacyregistry.DefaultGatherer` rather than
    `GetHistogramMetricCount`.
 
-The bar for a new metric is that it distinguishes states the existing ones collapse. Two were
-dropped during this work for failing that bar, rather than being shoehorned in.
+The bar for a new metric is that it distinguishes states the existing ones collapse. Three were
+dropped during this work for failing that bar, rather than being shoehorned in — among them an
+audit-write counter: `internal/placement-server/decision_audit.go` is a log line that can't fail,
+and is documented as deliberately not a metric, so the counter could only ever read `success`.
 
 ---
 

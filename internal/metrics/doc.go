@@ -39,18 +39,17 @@ limitations under the License.
 //   - The pod-defaulting webhook is registered via ctrl.NewWebhookManagedBy,
 //     which auto-exposes controller_runtime_webhook_requests_total and
 //     _webhook_latency_seconds the same way.
-//   - The kube-scheduler HIROScore plugin (scheduler-plugin/) runs inside
-//     kube-scheduler's own process, not this operator's — it's a separate
-//     binary with its own /metrics endpoint, and the scheduling framework
-//     itself already instruments every plugin's Filter/Score/PreScore
-//     extension-point latency and outcome. Out of scope for this package.
+//   - The kube-scheduler HIROScore plugin (scheduler-plugin/) runs in
+//     kube-scheduler's process, which never serves this package's registry.
+//     Its metrics live in scheduler-plugin/metrics.go, registered against
+//     component-base's legacyregistry instead — registering one here would
+//     compile, increment, and never be exposed.
 //
 // What IS covered here is the domain-specific "why" that those generic
 // request/error/duration metrics can't express — e.g. not just "how many
 // rebalance reconciles happened" but "how many were rejected by which
 // guardrail."
 //
-// See README.md in this directory for the full reference: every custom
-// metric with its labels and meaning, the complete list of free metrics
-// (controller-runtime / client-go / Go runtime), and every label value.
+// docs/instrumentation.md is the full reference: every metric on both
+// endpoints, every label value, and the free metrics this package relies on.
 package metrics

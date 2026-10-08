@@ -573,7 +573,7 @@ print_access_urls() {
     echo "      Nothing is scheduled yet (DEPLOY_SAMPLES=false), so expect"
     echo "      empty output until you apply a workload with a profile."
   fi
-  echo "      See internal/metrics/README.md."
+  echo "      See docs/instrumentation.md."
   echo ""
 }
 
