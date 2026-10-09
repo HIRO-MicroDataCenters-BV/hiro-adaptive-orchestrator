@@ -1,4 +1,4 @@
-{{- if .Values.webhook.certManager.enable }}
+{{- if and .Values.webhook.enable (eq .Values.webhook.tls.mode "certManager") }}
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:

@@ -2,11 +2,54 @@
 {{- if ne .Values.scheduler.mode "plugin" }}
 {{- fail (include "hiro-adaptive-platform.errors.webhookRequiresPlugin" .) }}
 {{- end }}
+{{- $mode := .Values.webhook.tls.mode }}
+{{- if not (has $mode (list "helm" "certManager" "existingSecret")) }}
+{{- fail (printf "webhook.tls.mode must be helm, certManager or existingSecret, got %q" $mode) }}
+{{- end }}
+{{- if and (eq $mode "certManager") .Values.prerequisites.certManager.enable }}
+{{- fail "webhook.tls.mode=certManager with prerequisites.certManager.enable=true cannot work in one install: cert-manager's CRDs and the Issuer/Certificate that use them can't be created together. Install cert-manager first (or use webhook.tls.mode=helm)." }}
+{{- end }}
+{{- $svc := printf "%s-webhook-service" .Release.Name }}
+{{- $caBundle := "" }}
+{{- if eq $mode "helm" }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace "webhook-server-cert" }}
+{{- $crt := "" }}
+{{- $key := "" }}
+{{- if and $existing $existing.data (hasKey $existing.data "tls.crt") (hasKey $existing.data "tls.key") (hasKey $existing.data "ca.crt") }}
+{{- /* Reuse across upgrades so the CA, and with it caBundle, stays stable. */}}
+{{- $crt = index $existing.data "tls.crt" }}
+{{- $key = index $existing.data "tls.key" }}
+{{- $caBundle = index $existing.data "ca.crt" }}
+{{- else }}
+{{- $days := int .Values.webhook.tls.validityDays }}
+{{- $ca := genCA (printf "%s-webhook-ca" .Release.Name) $days }}
+{{- $cert := genSignedCert $svc nil (list (printf "%s.%s.svc" $svc .Release.Namespace) (printf "%s.%s.svc.cluster.local" $svc .Release.Namespace)) $days $ca }}
+{{- $crt = b64enc $cert.Cert }}
+{{- $key = b64enc $cert.Key }}
+{{- $caBundle = b64enc $ca.Cert }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: webhook-server-cert
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ $crt }}
+  tls.key: {{ $key }}
+  ca.crt: {{ $caBundle }}
+---
+{{- else if eq $mode "existingSecret" }}
+{{- $caBundle = required "webhook.tls.caBundle (base64 CA certificate) is required when webhook.tls.mode=existingSecret" .Values.webhook.tls.caBundle }}
+{{- end }}
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
   name: {{ .Release.Name }}-mutating-webhook-configuration
-  {{- if .Values.webhook.certManager.enable }}
+  {{- if eq $mode "certManager" }}
   annotations:
     cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ .Release.Name }}-serving-cert
   {{- end }}
@@ -14,6 +57,9 @@ webhooks:
   - admissionReviewVersions:
       - v1
     clientConfig:
+      {{- if $caBundle }}
+      caBundle: {{ $caBundle }}
+      {{- end }}
       service:
         name: {{ .Release.Name }}-webhook-service
         namespace: {{ .Release.Namespace }}

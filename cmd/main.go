@@ -157,6 +157,9 @@ func main() {
 		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
+	// Never read: the Helm chart sets it to a hash of the operator config so a
+	// config change alters the pod spec and rolls the Deployment.
+	flag.String("config-checksum", "", "Ignored; changes when the Helm-rendered operator config changes.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	opts := zap.Options{

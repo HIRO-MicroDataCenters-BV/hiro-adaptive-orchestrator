@@ -65,6 +65,13 @@ spec:
           - --health-probe-bind-address=:8081
         image: controller:latest
         name: manager
+        # Optional: the Helm umbrella chart renders this ConfigMap from one values
+        # map so a single key can be overridden with --set. Inline env below wins
+        # on a name clash, so the umbrella chart empties manager.env.
+        envFrom:
+        - configMapRef:
+            name: hiro-operator-config
+            optional: true
         env:
         - name: DECISION_AGENT_URL
           value: "http://mock-decision-agent:8080"

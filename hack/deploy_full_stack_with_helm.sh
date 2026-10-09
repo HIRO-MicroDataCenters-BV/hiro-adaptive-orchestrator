@@ -108,6 +108,7 @@ SCHEDULER_METRICS_PORT=10259
 
 METRICS_READER_SA=${METRICS_READER_SA:-}
 METRICS_READER=""
+GRANT_OPERATOR_SA=false
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -267,40 +268,70 @@ load_images_into_kind() {
   fi
 }
 
-# Phase 1: operator only. scheduler.mode stays "none" and webhook.enable
-# stays "false" here on purpose — scheduler.plugin.placementServer.url has
-# no default (the operator's Service name depends on Helm's own
-# name-truncation logic, so it can't be known before the operator exists),
-# and webhook.enable requires scheduler.mode=plugin. Both get turned on in
-# phase 2, once the Service this chart needs to point at is actually live.
-deploy_operator_phase() {
-  step "Phase 1: deploying operator (scheduler + webhook off for now)"
+# One install: operator, scheduler (plugin or extender), webhook and the rest
+# come up together. Everything that used to need a second pass is computed by
+# the chart itself — the PlacementServer URL from the release name, the webhook
+# certificate generated in-chart, ENABLE_WEBHOOKS / HIRO_SCHEDULER_NAME derived
+# from the same flags — so this is just values.
+deploy_stack() {
+  step "Deploying charts/hiro-adaptive-platform (single helm run)"
 
-  # envOverrides is a map the operator subchart appends after manager.env, so
-  # this overrides values.yaml's empty default without touching that list.
-  local tracing_args=""
+  local operator_args scheduler_args="" tracing_args="" reader_args=""
+  operator_args="\
+      --set hiro-operator.manager.image.repository=${OPERATOR_REPO} \
+      --set hiro-operator.manager.image.tag=${OPERATOR_TAG} \
+      --set hiro-operator.manager.image.pullPolicy=IfNotPresent \
+      --set hiro-operator.metrics.port=${OPERATOR_METRICS_PORT} \
+      --set prerequisites.prometheus.enable=${DEPLOY_PROMETHEUS} \
+      --set hiro-operator.prometheus.enabled=${DEPLOY_PROMETHEUS} \
+      --set mockAgent.enable=${USE_MOCK_AGENT} \
+      --set samples.enabled=${DEPLOY_SAMPLES}"
+
+  # Settings are keys of one map, so a single --set changes one of them.
   if [ -n "$OTLP_ENDPOINT" ]; then
-    tracing_args="--set hiro-operator.manager.envOverrides.OTEL_EXPORTER_OTLP_ENDPOINT=${OTLP_ENDPOINT}"
+    tracing_args="--set hiro-operator.config.OTEL_EXPORTER_OTLP_ENDPOINT=${OTLP_ENDPOINT}"
+  fi
+
+  case "$SCHEDULER_MODE" in
+    plugin)
+      scheduler_args="\
+      --set scheduler.mode=plugin \
+      --set scheduler.plugin.schedulerName=${SCHED_NAME} \
+      --set scheduler.plugin.image.repository=${SCHED_REPO} \
+      --set scheduler.plugin.image.tag=${SCHED_TAG} \
+      --set scheduler.plugin.image.pullPolicy=IfNotPresent \
+      --set scheduler.plugin.metrics.port=${SCHEDULER_METRICS_PORT} \
+      --set scheduler.plugin.metrics.serviceMonitor.enabled=${DEPLOY_PROMETHEUS} \
+      --set webhook.enable=true"
+      if [ -n "$OTLP_ENDPOINT" ]; then
+        tracing_args="${tracing_args} \
+      --set scheduler.plugin.tracing.endpoint=${OTLP_ENDPOINT} \
+      --set scheduler.plugin.tracing.serviceName=${SCHED_NAME}"
+      fi
+      ;;
+    extender)
+      scheduler_args="--set scheduler.mode=extender"
+      ;;
+  esac
+
+  # {a,b} replaces the whole list, where [0]= would merge into index 0 and
+  # leave any other entries behind. Quote-free on purpose: HELM_EXTRA_ARGS is
+  # re-parsed by the shell in the Makefile recipe, which would eat the quotes
+  # --set-json needs and leave invalid JSON.
+  if [ -n "$METRICS_READER" ]; then
+    reader_args="--set observability.metricsReaders={${METRICS_READER}}"
+  elif [ "$GRANT_OPERATOR_SA" = "true" ]; then
+    reader_args="--set observability.grantOperatorServiceAccount=true"
   fi
 
   make -C "$REPO_ROOT" helm-platform-deploy \
     HELM_NAMESPACE="$HELM_NAMESPACE" \
     HELM_PLATFORM_RELEASE="$HELM_PLATFORM_RELEASE" \
-    HELM_EXTRA_ARGS="\
-      --set hiro-operator.manager.image.repository=${OPERATOR_REPO} \
-      --set hiro-operator.manager.image.tag=${OPERATOR_TAG} \
-      --set hiro-operator.manager.image.pullPolicy=IfNotPresent \
-      --set hiro-operator.metrics.port=${OPERATOR_METRICS_PORT} \
-      --set prerequisites.certManager.enable=true \
-      --set prerequisites.prometheus.enable=${DEPLOY_PROMETHEUS} \
-      --set hiro-operator.prometheus.enabled=${DEPLOY_PROMETHEUS} \
-      --set mockAgent.enable=${USE_MOCK_AGENT} \
-      --set samples.enabled=${DEPLOY_SAMPLES} \
-      ${tracing_args}"
+    HELM_EXTRA_ARGS="${operator_args} ${scheduler_args} ${tracing_args} ${reader_args}"
 }
 
-# Same lookup charts/hiro-adaptive-platform/README.md documents doing by
-# hand: find the PlacementServer Service by label, now that it exists.
+# Read back, not guessed: the chart named the Service, so ask the cluster for
+# it to health-check and to print port-forward commands.
 resolve_placement_server_url() {
   step "Resolving PlacementServer Service"
   local svc
@@ -314,65 +345,6 @@ resolve_placement_server_url() {
   PLACEMENT_SERVER_URL="http://${svc}.${HELM_NAMESPACE}.svc.cluster.local:8090"
   echo "  Service : $svc"
   echo "  URL     : $PLACEMENT_SERVER_URL"
-}
-
-# Phase 2: now that PLACEMENT_SERVER_URL is known, turn on the scheduler
-# plugin and the webhook. --reuse-values keeps phase 1's settings (operator
-# image, mockAgent, cert-manager) — without it this `helm upgrade` would
-# reset everything not repeated below back to values.yaml's defaults.
-deploy_scheduler_phase() {
-  if [ "$SCHEDULER_MODE" = "none" ]; then
-    step "Phase 2: skipped (SCHEDULER_MODE=none — operator only)"
-    return
-  fi
-
-  # Extender mode patches the cluster's own kube-scheduler via hook Jobs, so
-  # there is no scheduler pod to point anywhere and no webhook to enable —
-  # the chart's Jobs resolve the PlacementServer by label themselves.
-  if [ "$SCHEDULER_MODE" = "extender" ]; then
-    step "Phase 2: enabling scheduler extender"
-    make -C "$REPO_ROOT" helm-platform-deploy \
-      HELM_NAMESPACE="$HELM_NAMESPACE" \
-      HELM_PLATFORM_RELEASE="$HELM_PLATFORM_RELEASE" \
-      HELM_EXTRA_ARGS="\
-        --reuse-values \
-        --set scheduler.mode=extender"
-    return
-  fi
-
-  step "Phase 2: enabling scheduler plugin + webhook"
-
-  local tracing_args=""
-  if [ -n "$OTLP_ENDPOINT" ]; then
-    tracing_args="--set scheduler.plugin.tracing.endpoint=${OTLP_ENDPOINT} \
-      --set scheduler.plugin.tracing.serviceName=${SCHED_NAME}"
-  fi
-
-  # {a,b} replaces the whole list, where [0]= would merge into index 0 and
-  # leave any other entries behind. Quote-free on purpose: HELM_EXTRA_ARGS is
-  # re-parsed by the shell in the Makefile recipe, which would eat the quotes
-  # --set-json needs and leave invalid JSON.
-  local reader_args=""
-  if [ -n "$METRICS_READER" ]; then
-    reader_args="--set observability.metricsReaders={${METRICS_READER}}"
-  fi
-
-  make -C "$REPO_ROOT" helm-platform-deploy \
-    HELM_NAMESPACE="$HELM_NAMESPACE" \
-    HELM_PLATFORM_RELEASE="$HELM_PLATFORM_RELEASE" \
-    HELM_EXTRA_ARGS="\
-      --reuse-values \
-      --set scheduler.mode=plugin \
-      --set scheduler.plugin.schedulerName=${SCHED_NAME} \
-      --set scheduler.plugin.image.repository=${SCHED_REPO} \
-      --set scheduler.plugin.image.tag=${SCHED_TAG} \
-      --set scheduler.plugin.image.pullPolicy=IfNotPresent \
-      --set scheduler.plugin.placementServer.url=${PLACEMENT_SERVER_URL} \
-      --set scheduler.plugin.metrics.port=${SCHEDULER_METRICS_PORT} \
-      --set scheduler.plugin.metrics.serviceMonitor.enabled=${DEPLOY_PROMETHEUS} \
-      --set webhook.enable=true \
-      --set webhook.certManager.enable=true \
-      ${tracing_args} ${reader_args}"
 }
 
 check_placement_server_health() {
@@ -419,8 +391,8 @@ operator_sa_name() {
 # Which ServiceAccount the chart should grant /metrics read access to. Bundled
 # Prometheus grants itself, so nothing is needed there.
 resolve_metrics_reader() {
+  # Prometheus (bundled) grants itself, so no reader is needed there.
   if [ "$DEPLOY_PROMETHEUS" = "true" ] && [ -z "$METRICS_READER_SA" ]; then
-    METRICS_READER=""
     return
   fi
 
@@ -435,9 +407,9 @@ resolve_metrics_reader() {
     return
   fi
 
-  local sa
-  sa="$(operator_sa_name)"
-  METRICS_READER="${sa:+${HELM_NAMESPACE}:${sa}}"
+  # The chart names the operator's SA itself, so it can grant it in the same
+  # install; the name is read back after deploy for the printed commands.
+  GRANT_OPERATOR_SA=true
 }
 
 print_summary() {
@@ -452,7 +424,7 @@ print_summary() {
   case "$SCHEDULER_MODE" in
     plugin)
       echo -e "\033[32m    Scheduler plugin  : deployed  (schedulerName: $SCHED_NAME)\033[0m"
-      echo -e "\033[32m    Webhook           : deployed  (TLS via cert-manager)\033[0m"
+      echo -e "\033[32m    Webhook           : deployed  (TLS generated by the chart)\033[0m"
       ;;
     extender)
       echo -e "\033[32m    Scheduler extender: deployed  (patched kube-scheduler, all pods)\033[0m"
@@ -643,10 +615,12 @@ run_deploy() {
   build_operator_image
   build_scheduler_image
   load_images_into_kind
-  deploy_operator_phase
-  resolve_placement_server_url
   resolve_metrics_reader
-  deploy_scheduler_phase
+  deploy_stack
+  resolve_placement_server_url
+  if [ "$GRANT_OPERATOR_SA" = "true" ]; then
+    METRICS_READER="${HELM_NAMESPACE}:$(operator_sa_name)"
+  fi
   check_placement_server_health
   print_summary
   print_port_forward_guide

@@ -1,4 +1,4 @@
-{{- if .Values.observability.metricsReaders }}
+{{- if or .Values.observability.metricsReaders .Values.observability.grantOperatorServiceAccount }}
 # Own ClusterRole rather than binding the hiro-operator subchart's equivalent:
 # that one's name comes from a kubebuilder-generated helper keyed on the
 # subchart's alias, which this chart can't compute without faking its context.
@@ -31,6 +31,11 @@ roleRef:
   kind: ClusterRole
   name: {{ .Release.Name }}-metrics-reader
 subjects:
+{{- if .Values.observability.grantOperatorServiceAccount }}
+  - kind: ServiceAccount
+    namespace: {{ .Release.Namespace }}
+    name: {{ include "hiro-adaptive-platform.operatorResourceName" (dict "suffix" "controller-manager" "context" .) }}
+{{- end }}
 {{- range .Values.observability.metricsReaders }}
   {{- $parts := splitList ":" . }}
   {{- if ne (len $parts) 2 }}

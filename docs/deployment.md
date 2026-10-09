@@ -30,7 +30,7 @@ hack/deploy_full_stack_with_helm.sh [deploy|clean|destroy]
 
 | Action | Effect |
 |--------|--------|
-| `deploy` (default) | Build images, load into Kind, deploy in two phases, health-check |
+| `deploy` (default) | Build images, load into Kind, deploy in one Helm run, health-check |
 | `clean` | Uninstall the Helm release, keep the Kind cluster |
 | `destroy` | Delete the Kind cluster |
 
@@ -38,7 +38,7 @@ Prefer `clean` over `destroy` in extender mode: the chart's kube-scheduler resto
 `pre-delete` hook, so only a Helm uninstall reverts the patch. The `OrchestrationProfile` CRD is
 annotated `helm.sh/resource-policy: keep`, so it and any profiles you created survive a `clean`.
 
-Deploys everything — operator, webhook, scheduler (plugin or extender), mock agent, samples, optional bundled prerequisites — as one Helm release via the umbrella chart at `charts/hiro-adaptive-platform`, against a local Kind cluster. Creates (or reuses) the Kind cluster, builds the operator + scheduler-plugin images, loads them straight into the cluster (no registry needed), deploys in two phases (operator first, then scheduler + webhook once the operator's Service is live), and health-checks the result.
+Deploys everything — operator, webhook, scheduler (plugin or extender), mock agent, samples, optional bundled prerequisites — as one Helm release via the umbrella chart at `charts/hiro-adaptive-platform`, against a local Kind cluster. Creates (or reuses) the Kind cluster, builds the operator + scheduler-plugin images, loads them straight into the cluster (no registry needed), deploys everything with one `helm upgrade --install`, and health-checks the result.
 
 **No `GITHUB_PAT_TOKEN` or registry needed** — images build locally and load directly into Kind. This is the one deploy path in this document that doesn't require a GHCR token.
 

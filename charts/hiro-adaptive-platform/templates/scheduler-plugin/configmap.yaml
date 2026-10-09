@@ -3,10 +3,9 @@
 #
 # schedulerName (scheduler.plugin.schedulerName, default "hiro-scheduler") —
 # pods must set spec.schedulerName to this same value to be scheduled by
-# this scheduler instead of the default kube-scheduler. postrender/render.sh
-# reads the resolved value back out of this rendered ConfigMap and patches
-# it into the operator's HIRO_SCHEDULER_NAME env var, so the two can never
-# drift out of sync — see that script for how.
+# this scheduler instead of the default kube-scheduler. The operator's
+# HIRO_SCHEDULER_NAME is rendered from the same value
+# (templates/operator/configmap.yaml), so the two can never drift apart.
 #
 # HIROScore is registered at the preFilter, filter, preScore, and score extension points.
 # Default scoring plugins remain active (additive) so resource fit, topology
@@ -52,7 +51,7 @@ data:
         pluginConfig:
           - name: HIROScore
             args:
-              placementServerURL: {{ required "scheduler.plugin.placementServer.url must be set when scheduler.mode=plugin (see values.yaml comment for how to look it up)" .Values.scheduler.plugin.placementServer.url | quote }}
+              placementServerURL: {{ include "hiro-adaptive-platform.placementServerURL" . | quote }}
               placementServerPath: {{ .Values.scheduler.plugin.placementServer.path | quote }}
               filterPath: {{ .Values.scheduler.plugin.placementServer.filterPath | quote }}
               timeoutSeconds: {{ .Values.scheduler.plugin.placementServer.timeoutSeconds }}

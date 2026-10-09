@@ -12,15 +12,12 @@ below.
 
 ## Requirements
 
-- Helm >= 3.14 (Helm v4 works, but see [Post-renderer plugin
-  (Helm v4)](#post-renderer-plugin-helm-v4) below — it changes how
-  `--post-renderer` is invoked).
+- Helm >= 3.14 (Helm v4 works).
 - `kubectl` and a reachable cluster for anything beyond `helm
   lint`/`helm template`.
-- `kustomize` — either on `PATH`, or vendored at `bin/kustomize` (what `make
-  kustomize` produces elsewhere in this repo). Only needed when
-  `webhook.enable=true` or `scheduler.mode=plugin` (see
-  [Post-renderer plugin](#post-renderer-plugin-helm-v4)).
+
+No post-renderer, plugin or second install pass is needed: one `helm upgrade
+--install` brings up everything that is enabled (see [One install](#one-install)).
 
 ## Quick start
 
@@ -43,15 +40,36 @@ make helm-platform-uninstall
 Override any value with `HELM_EXTRA_ARGS`, e.g.:
 
 ```sh
-HELM_EXTRA_ARGS="--set scheduler.mode=plugin --set scheduler.plugin.image.tag=v0.1.0 --set scheduler.plugin.placementServer.url=http://<svc>.<ns>.svc.cluster.local:8090" \
+HELM_EXTRA_ARGS="--set scheduler.mode=plugin --set scheduler.plugin.image.tag=v0.1.0 --set webhook.enable=true" \
   make helm-platform-deploy
 ```
 
 Or use `helm` directly against `charts/hiro-adaptive-platform` with a
 `-f custom-values.yaml` — everything below is a plain Helm chart, the
-Makefile targets are just convenience wrappers (see
-[Post-renderer plugin](#post-renderer-plugin-helm-v4) for the one thing they
-do that a bare `helm install` doesn't).
+Makefile targets are just convenience wrappers.
+
+## One install
+
+Everything the stack needs from itself is computed at render time, so
+operator, scheduler, webhook, mock agent and samples go up together:
+
+- The scheduler plugin's PlacementServer URL defaults to the operator's own
+  Service, whose name the chart derives from the release name
+  (`_helpers.tpl`). Set `scheduler.plugin.placementServer.url` only to point
+  elsewhere.
+- The webhook's TLS certificate is generated in-chart (`webhook.tls.mode:
+  helm`), so no cert-manager has to exist first.
+- `ENABLE_WEBHOOKS` and `HIRO_SCHEDULER_NAME` are rendered from
+  `webhook.enable` and `scheduler.plugin.schedulerName`.
+
+Typical demo install, one command:
+
+```sh
+helm upgrade --install hiro charts/hiro-adaptive-platform -n hiro-system --create-namespace --wait \
+  --set mockAgent.enable=true --set samples.enabled=true \
+  --set scheduler.mode=plugin --set scheduler.plugin.image.tag=<tag> \
+  --set webhook.enable=true
+```
 
 ## What gets deployed
 
@@ -59,12 +77,12 @@ do that a bare `helm install` doesn't).
 |---|---|---|
 | Operator (CRD, RBAC, manager Deployment) | `hiro-operator.enabled` (default `true`) | Local `file://../../dist/chart` dependency, aliased `hiro-operator`. Never hand-edited — it's kubebuilder-generated and gets wiped on every `kubebuilder edit --plugins=helm/v2-alpha` regen. |
 | Pod-mutating webhook | `webhook.enable` | Requires `scheduler.mode: plugin` — enforced by a `fail()` check at render time (see [Webhook requires the scheduler plugin](#webhook-requires-the-scheduler-plugin)). |
-| Self-signed Issuer + Certificate for the webhook | `webhook.certManager.enable` | Needs a cert-manager already running somewhere in the cluster (yours, or `prerequisites.certManager.enable`). |
+| Webhook serving certificate | `webhook.tls.mode` (`helm` default, `certManager`, `existingSecret`) | `helm` generates a self-signed CA + cert in-chart and keeps it across upgrades. `certManager` needs cert-manager installed beforehand. See [Webhook TLS](#webhook-tls). |
 | Scheduler plugin (standalone scheduler Deployment) | `scheduler.mode: plugin` | Pods opt in via `spec.schedulerName` — the webhook sets this automatically, or you can set it by hand without the webhook. |
 | Scheduler extender (patches the cluster's kube-scheduler) | `scheduler.mode: extender` | Affects every pod via the default scheduler. Privileged hook Jobs — see [Scheduler extender privileges](#scheduler-extender-privileges). |
 | Mock decision agent | `mockAgent.enable` | Demo/eval only. Real deployments point `DECISION_AGENT_URL` at their own agent instead. |
 | Sample `OrchestrationProfile` CRs + nginx Deployments | `samples.enabled` | Demo/eval only. |
-| Bundled cert-manager / metrics-server / kube-prometheus-stack | `prerequisites.{certManager,metricsServer,prometheus}.enable` | Off by default — see [Bundled prerequisites](#bundled-prerequisites). |
+| Bundled cert-manager / metrics-server / kube-prometheus-stack | `prerequisites.{certManager,metricsServer,prometheus}.enable` | Off by default — see [Bundled prerequisites](#bundled-prerequisites). cert-manager is only useful with `webhook.tls.mode=certManager`, and then must be installed first. |
 
 ## Values reference
 
@@ -76,21 +94,41 @@ same way.
 ```yaml
 hiro-operator:
   enabled: true
+  config:                       # one key per environment variable main.go reads
+    DECISION_AGENT_URL: http://mock-decision-agent:8080
+    REBALANCE_MIN_CPU: 50m
+    # ...
   manager:
-    env: [ ... ]   # complete list — see note below
+    env: []                     # must stay empty — see below
 ```
 
-`manager.env` is a plain list, and Helm replaces lists wholesale rather than
-merging them by key — there's no way to override one entry from the
-umbrella chart's values without restating the whole list. So `values.yaml`
-carries the operator's **complete** env list already; to change one entry,
-edit it directly there rather than trying to `--set` a single item.
+`config` is a map, so Helm merges it key by key. Change one setting and every
+other key keeps its default:
 
-Two entries in that list — `ENABLE_WEBHOOKS` and `HIRO_SCHEDULER_NAME` — are
-inert defaults you never need to touch by hand: the Helm post-renderer
-overrides both automatically whenever `webhook.enable=true` /
-`scheduler.mode=plugin` respectively (see
-[Post-renderer plugin](#post-renderer-plugin-helm-v4)).
+```sh
+--set hiro-operator.config.REBALANCE_MIN_CPU=100m
+```
+
+The map is rendered into the `hiro-operator-config` ConfigMap
+(`templates/operator/configmap.yaml`) and loaded into the operator pod with
+`envFrom`, so `cmd/main.go` still just reads environment variables. A hash of
+the map is passed as the ignored `--config-checksum` flag, so editing a key
+rolls the pod. Notes:
+
+- Use `--set-string` for values that look like numbers or booleans
+  (`--set-string hiro-operator.config.REBALANCE_MAX_REPLICAS=10`), and
+  escape commas in `--set` values.
+- Do not put entries in `hiro-operator.manager.env` (or `envOverrides`): an
+  inline entry would silently beat the ConfigMap, so the chart fails the
+  render if either is non-empty.
+- `ENABLE_WEBHOOKS` and `HIRO_SCHEDULER_NAME` are derived from `webhook.enable`
+  and `scheduler.plugin.schedulerName`; setting them in `config` has no
+  effect. Changing either on an existing release does not alter the pod spec,
+  so run `kubectl rollout restart` on the operator Deployment afterwards.
+- `PLACEMENT_SERVER_PORT` must stay `:8090`: the placement Service comes from
+  the generated subchart with that port fixed.
+- Removing a key (`--set hiro-operator.config.KEY=null`) falls back to the
+  operator's built-in default. `DECISION_AGENT_URL` has none and is required.
 
 ### `mockAgent`
 
@@ -106,10 +144,9 @@ mockAgent:
 `serviceName` and `port` are both safely renameable — everything (Service,
 container port, the mock server's own listener) is templated from them.
 **Except**: if you rename `serviceName`/`port`, update
-`hiro-operator.manager.env`'s `DECISION_AGENT_URL` entry to match — that URL
-is a plain string in the env list above, not derived from these values
-(Helm's `values.yaml` can't template itself, so there's no way to compute it
-automatically).
+`hiro-operator.config.DECISION_AGENT_URL` to match — that URL is a plain
+string in the values, not derived from these (Helm's `values.yaml` can't
+template itself, so there's no way to compute it automatically).
 
 ### `webhook`
 
@@ -117,14 +154,16 @@ automatically).
 webhook:
   enable: false
   excludeNamespaces: [kube-system, kube-public, kube-node-lease]
-  certManager:
-    enable: false
+  tls:
+    mode: helm        # helm | certManager | existingSecret
+    validityDays: 3650
+    caBundle: ""      # only for existingSecret
 ```
 
 Requires `scheduler.mode: plugin` (see
-[Webhook requires the scheduler plugin](#webhook-requires-the-scheduler-plugin)).
-`certManager.enable` needs a cert-manager already reachable in the cluster
-— your own, or `prerequisites.certManager.enable: true`.
+[Webhook requires the scheduler plugin](#webhook-requires-the-scheduler-plugin));
+both can be set in the same install. See [Webhook TLS](#webhook-tls) for the
+three `tls.mode` values.
 
 ### `prerequisites` / bundled dependency passthrough
 
@@ -159,20 +198,17 @@ scheduler:
     placementServer: { port: 8090, filterVerb: ..., prioritizeVerb: ..., weight: 5, ... }
 ```
 
-`scheduler.plugin.image.tag` and `scheduler.plugin.placementServer.url` have
-no default and are `required` — they can't be safely guessed (no published
-release cadence for the scheduler image; the operator's placement Service
-name depends on Helm's own name-truncation logic). Setting either wrong
-fails the render loudly instead of deploying something broken silently.
-Look the Service name up after the operator is deployed:
+`scheduler.plugin.image.tag` has no default and is `required` — there is no
+published release cadence for the scheduler image to guess from. Leaving it
+unset fails the render loudly instead of deploying something broken.
 
-```sh
-kubectl get svc -n <namespace> -l app.kubernetes.io/component=placement-server
-```
+`placementServer.url` is optional: empty means the operator's own placement
+Service, named from the release by `_helpers.tpl`. Set it only for an
+external PlacementServer.
 
-`scheduler.extender` needs no `placementServer.url` — its hook Jobs resolve
-the Service by label selector at install/upgrade time, when they have real
-cluster access (see [Scheduler extender](#scheduler-extender-privileges)).
+`scheduler.extender` needs no URL — its hook Jobs resolve the Service by
+label selector at install/upgrade time, when they have real cluster access
+(see [Scheduler extender](#scheduler-extender-privileges)).
 
 ### `samples`
 
@@ -188,7 +224,7 @@ samples:
 
 Demo/eval only, off by default. `rebalancing.enabled`/`dryRun` here are
 per-`OrchestrationProfile` CR spec fields — unrelated to
-`hiro-operator.manager.env`'s rebalance tuning despite the similar name.
+`hiro-operator.config`'s rebalance tuning despite the similar name.
 Each `profileN.targetDeploymentName` is a plain string reference kept in
 sync by hand with the matching `nginxAppN.deploymentName` — there's no
 cross-reference Helm can enforce between two independent template files.
@@ -207,10 +243,7 @@ make helm-platform-deploy
 HELM_EXTRA_ARGS="\
   --set scheduler.mode=plugin \
   --set scheduler.plugin.image.tag=v0.1.0 \
-  --set scheduler.plugin.placementServer.url=http://<svc>.<ns>.svc.cluster.local:8090 \
-  --set webhook.enable=true \
-  --set webhook.certManager.enable=true \
-  --set prerequisites.certManager.enable=true" \
+  --set webhook.enable=true" \
   make helm-platform-deploy
 ```
 
@@ -231,6 +264,23 @@ HELM_EXTRA_ARGS="\
   make helm-platform-deploy
 ```
 
+## Migrating from the two-pass chart
+
+Earlier versions listed the operator's settings as `hiro-operator.manager.env`
+(a list) and needed a Helm post-renderer plus a second `helm upgrade` for the
+scheduler and webhook. To move an existing release:
+
+1. Drop `--post-renderer ...` and `--reuse-values` from your command; uninstall
+   the plugin with `helm plugin uninstall hiro-adaptive-platform-postrenderer`.
+2. Move every `hiro-operator.manager.env` / `envOverrides` entry you customised
+   to `hiro-operator.config.<NAME>` (a map). The chart refuses to render while
+   the old keys are non-empty.
+3. Replace `webhook.certManager.enable=true` with `webhook.tls.mode=certManager`,
+   or drop it to get the in-chart certificate. The webhook Secret
+   `webhook-server-cert` keeps its name; if cert-manager owned it, delete it
+   before the first upgrade in `helm` mode so the chart can create its own.
+4. `scheduler.plugin.placementServer.url` can be removed.
+
 ## Webhook requires the scheduler plugin
 
 `webhook.enable=true` fails the render if `scheduler.mode` isn't `plugin`.
@@ -243,52 +293,30 @@ away from it instead. `hack/deploy_full_stack.sh` has the same coupling —
 its webhook phase has no independent toggle at all, it's driven 1:1 by
 whether the scheduler plugin is being deployed.
 
-## Post-renderer plugin (Helm v4)
+## Webhook TLS
 
-Three things can't be expressed as plain Helm values, because the operator's
-`manager.env` is a flat list Helm can't merge into by key, and its
-Deployment (from the `dist/chart` subchart) can't be hand-edited:
+`webhook.tls.mode` picks where the serving certificate comes from:
 
-1. `webhook.enable=true` needs the cert volume/mount/port/arg added to the
-   operator container, and `ENABLE_WEBHOOKS` forced to `"true"`.
-2. `scheduler.mode=plugin` needs `HIRO_SCHEDULER_NAME` forced to match
-   `scheduler.plugin.schedulerName`.
-3. A `PLACEMENT_SERVER_PORT` other than `8090` needs the placement Service's
-   `port`/`targetPort` and the manager's `containerPort` rewritten to match.
-   Only the env var is a chart value; the other two are literals the
-   kubebuilder helm plugin emits from the kustomize output, so all three
-   would otherwise disagree and placement traffic would be routed to a port
-   nothing listens on.
+- **`helm`** (default) — the chart generates a self-signed CA and certificate
+  (`genCA`/`genSignedCert`), stores them in the `webhook-server-cert` Secret
+  and injects the CA as the webhook's `caBundle`. On `helm upgrade` the
+  existing Secret is read back with `lookup` and reused, so the CA stays
+  stable. Nothing else has to be installed, which is what makes a single
+  install possible. There is no automatic rotation: it is valid for
+  `validityDays` (default 10 years); delete the Secret and `helm upgrade` to
+  reissue. `helm template` has no cluster to look up, so it prints a fresh
+  certificate each time.
+- **`certManager`** — a cert-manager `Issuer` + `Certificate`, rotated
+  automatically. cert-manager must already be running: its CRDs cannot be
+  created in the same install as the `Issuer`/`Certificate` that use them, so
+  combining this with `prerequisites.certManager.enable=true` fails the render.
+- **`existingSecret`** — you supply a `webhook-server-cert` Secret (`tls.crt`,
+  `tls.key`) and the base64 CA in `webhook.tls.caBundle`.
 
-`postrender/render.sh` handles all three: it self-detects which feature(s) are
-active by scanning Helm's own rendered output (no separate values needed),
-and patches Helm's already-rendered output via `kustomize`. The env-var
-patches (1 and 2) are strategic merges, which override `manager.env`'s
-static defaults by matching on each entry's `name` in place — not a plain
-JSON6902 append, which would produce two entries with the same `name` and
-make `helm upgrade`'s patch computation fail outright. The port patches (3)
-are JSON6902 instead, because both port lists key on the port number itself,
-so a merge would add a second entry rather than change the existing one;
-they carry `test` ops so an upstream reordering fails loudly rather than
-rewriting the wrong port. When no feature is active it passes the input
-straight through.
-
-**Helm v4 changed what `--post-renderer` accepts**: it now takes the name
-of an installed plugin (type `postrenderer/v1`), not a raw script path like
-Helm v3 did ([helm/helm#31340](https://github.com/helm/helm/issues/31340)).
-`make helm-platform-template`/`helm-platform-deploy`/`helm-platform-template-check`
-all install this automatically via the `helm-platform-postrenderer-install`
-target. If you run `helm` directly instead:
-
-```sh
-helm plugin install charts/hiro-adaptive-platform/postrender
-helm template hiro-adaptive-platform charts/hiro-adaptive-platform \
-  --post-renderer hiro-adaptive-platform-postrenderer ...
-```
-
-Skipping this step doesn't error — it just silently renders webhook/plugin
-mode *without* the patches above, leaving a broken deployment (webhook
-enabled but the operator never actually starts its webhook server, etc.).
+The operator pod always mounts `webhook-server-cert` as an optional volume
+and passes `--webhook-cert-path`; both are inert until `ENABLE_WEBHOOKS=true`
+registers the webhook, because controller-runtime only starts its webhook
+server then. That is why no post-render patching is needed.
 
 ## Scheduler extender privileges
 
@@ -360,9 +388,8 @@ template`:
 
 - **`hack/deploy_full_stack_with_helm.sh`** — local, against a Kind cluster.
   Regenerates `dist/chart` from source, builds the operator + scheduler
-  images, loads them into Kind (no registry needed), deploys in two phases
-  (operator first, then scheduler plugin + webhook once the operator's
-  Service exists), and health-checks the result. Writes a standalone
+  images, loads them into Kind (no registry needed), deploys everything
+  with one `helm upgrade --install`, and health-checks the result. Writes a standalone
   kubeconfig to `.kind-kubeconfig-<cluster-name>.yaml` and prints it.
   No `GITHUB_PAT_TOKEN`/registry needed — images build and load locally.
   Options: `KIND_CLUSTER_NAME`, `SCHED_K8S_VERSION`, `HELM_NAMESPACE`,
@@ -375,7 +402,7 @@ template`:
   every push/PR, against a throwaway Kind cluster created inside the job.
   Runs a manifests-drift check first (fails if `dist/chart`/`config`/`api`
   are out of date with the source), then `helm lint`/`helm
-  template-check`/the same two-phase deploy.
+  template-check`/the same single-install deploy.
 - **`.github/workflows/platform-deploy-chart.yml`** — deploys to a real
   target cluster. Runs on push to `main`, or manually via "Run workflow".
   Builds and pushes images to GHCR, then deploys using a kubeconfig from the
