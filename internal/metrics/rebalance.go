@@ -33,6 +33,34 @@ const (
 	GuardrailBounds    = "bounds"
 )
 
+// Result label values for RebalanceAIRequestsTotal.
+const (
+	AIResultSuccess      = "success"
+	AIResultContextError = "context_error"
+	AIResultAIError      = "ai_error"
+)
+
+// Result label values for RebalancePressureQueriesTotal.
+const (
+	PressureResultSuccess     = "success"
+	PressureResultUnavailable = "unavailable"
+)
+
+// Stage label values for RebalanceEnactmentFailuresTotal — which step of
+// carrying out an accepted decision failed.
+const (
+	EnactStageEvict           = "evict"
+	EnactStagePatch           = "patch"
+	EnactStageWaitReplacement = "wait_replacement"
+)
+
+// Result label values for RebalanceResizeOutcomesTotal.
+const (
+	ResizeResultAll     = "all_resized"
+	ResizeResultPartial = "partial"
+	ResizeResultNone    = "none"
+)
+
 // RebalanceTransitionsTotal is deliberately NOT labeled by the transition's
 // free-text reason: reason is a full sentence (e.g. a specific node's
 // wattage), so as a label it would be unbounded cardinality. Action/outcome
@@ -72,6 +100,69 @@ var RebalanceImprovementScore = prometheus.NewHistogramVec(prometheus.HistogramO
 	Buckets: prometheus.LinearBuckets(0, 10, 11), // 0,10,...,100
 }, []string{"action"})
 
+// RebalanceAIRequestsTotal separates the two ways consulting the AI can fail
+// — assembling the request (context_error) vs the round trip itself (ai_error)
+// — which RebalanceTransitionsTotal collapses into a single outcome=Failed
+// alongside the AI simply declining to act.
+var RebalanceAIRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "hiro_rebalance_ai_requests_total",
+	Help: "Total rebalance AI consultations, by result (success, context_error, ai_error).",
+}, []string{"result"})
+
+// RebalanceAIDuration mirrors hiro_placement_score_duration_seconds so the
+// two AI call paths are directly comparable.
+var RebalanceAIDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+	Name:    "hiro_rebalance_ai_duration_seconds",
+	Help:    "Duration of rebalance AI consultations, including context assembly.",
+	Buckets: prometheus.DefBuckets,
+})
+
+// Covers detection, which RebalanceTransitionsTotal only sees once something fired.
+var RebalanceTriggerEvaluationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "hiro_rebalance_trigger_evaluations_total",
+	Help: "Total trigger condition evaluations, by condition and whether it fired.",
+}, []string{"condition", "fired"})
+
+// Those paths soft-fail to "did not fire", so a condition that can never match
+// otherwise looks like one that simply didn't.
+var RebalanceTriggerErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "hiro_rebalance_trigger_errors_total",
+	Help: "Total trigger evaluations skipped because a data source was unavailable, by condition.",
+}, []string{"condition"})
+
+// A missing metrics-server degrades CPU/Memory triggers silently otherwise.
+var RebalancePressureQueriesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "hiro_rebalance_pressure_queries_total",
+	Help: "Total node pressure queries against metrics-server, by result.",
+}, []string{"result"})
+
+// Buckets run to 300s: enactment waits on a replacement pod becoming ready.
+var RebalanceEnactmentDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "hiro_rebalance_enactment_duration_seconds",
+	Help:    "Duration of enacting an accepted rebalance decision, by action.",
+	Buckets: []float64{1, 5, 10, 30, 60, 120, 300},
+}, []string{"action"})
+
+// RebalanceTransitionsTotal only records that a cycle ended Failed, not where.
+var RebalanceEnactmentFailuresTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "hiro_rebalance_enactment_failures_total",
+	Help: "Total enactment failures, by action and which step failed.",
+}, []string{"action", "stage"})
+
+// A shortfall is reported as Enacted (the patch lands on next rollout), so
+// without this a resize that reached no running pods looks fully applied.
+var RebalanceResizeOutcomesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "hiro_rebalance_resize_outcomes_total",
+	Help: "Total AdjustResources enactments, by how much of the in-place resize took effect.",
+}, []string{"result"})
+
+// Otherwise indistinguishable from a normal transition back to Watching, so
+// "cycles are getting stuck" cannot be alerted on.
+var RebalanceWatchdogRecoveriesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "hiro_rebalance_watchdog_recoveries_total",
+	Help: "Total rebalance cycles force-recovered by the watchdog after going stale.",
+})
+
 func init() {
 	metrics.Registry.MustRegister(
 		RebalanceTransitionsTotal,
@@ -79,6 +170,15 @@ func init() {
 		RebalanceRateLimitExhaustedTotal,
 		RebalanceCooldownSkipsTotal,
 		RebalanceImprovementScore,
+		RebalanceAIRequestsTotal,
+		RebalanceAIDuration,
+		RebalanceTriggerEvaluationsTotal,
+		RebalanceTriggerErrorsTotal,
+		RebalancePressureQueriesTotal,
+		RebalanceEnactmentDuration,
+		RebalanceEnactmentFailuresTotal,
+		RebalanceResizeOutcomesTotal,
+		RebalanceWatchdogRecoveriesTotal,
 	)
 }
 

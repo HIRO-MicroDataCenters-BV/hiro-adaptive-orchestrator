@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	corev1 "k8s.io/api/core/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -138,9 +139,12 @@ func (s *PlacementServer) Start(ctx context.Context) error {
 	mux.HandleFunc(s.extenderFilterPath, s.handleExtenderFilter)
 	mux.HandleFunc(s.extenderPrioritizePath, s.handleExtenderPrioritize)
 
+	// otelhttp extracts the caller's traceparent, so a scheduler-initiated
+	// trace continues here instead of starting a new one. No-op when no
+	// TracerProvider is configured.
 	s.server = &http.Server{
 		Addr:    s.Addr,
-		Handler: mux,
+		Handler: otelhttp.NewHandler(mux, "placement-server"),
 	}
 
 	logger.Info("placement: server starting",

@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 )
 
 // Never Ever delete this comments as they are used by kubebuilder to generate RBAC permissions for the controller.
@@ -174,10 +175,21 @@ func scaleEnactor(
 	targetReplicas int32,
 	reason string,
 	timeout time.Duration,
-) (scaleResult, error) {
+) (res scaleResult, err error) {
 	if timeout <= 0 {
 		timeout = DefaultScaleActionTimeout
 	}
+
+	// Every error return below is a fetch/patch failure; the await path
+	// reports through res.outcome instead, so it isn't double-counted here.
+	action := string(orchestrationv1alpha1.RebalanceActionAdjustReplicas)
+	start := time.Now()
+	defer func() {
+		metrics.RebalanceEnactmentDuration.WithLabelValues(action).Observe(time.Since(start).Seconds())
+		if err != nil {
+			metrics.RebalanceEnactmentFailuresTotal.WithLabelValues(action, metrics.EnactStagePatch).Inc()
+		}
+	}()
 
 	ref := profile.Spec.ApplicationRef
 	key := types.NamespacedName{Name: ref.Name, Namespace: ref.Namespace}
@@ -209,8 +221,12 @@ func scaleEnactor(
 		return scaleResult{}, fmt.Errorf("AdjustReplicas does not support workload kind %q", ref.Kind)
 	}
 
-	if err := awaitReadyReplicas(ctx, c, string(ref.Kind), key, targetReplicas, timeout); err != nil {
-		outcome, reason := classifyScheduleTimeout(ctx, c, eaoGVK, profile, err.Error())
+	if waitErr := awaitReadyReplicas(ctx, c, string(ref.Kind), key, targetReplicas, timeout); waitErr != nil {
+		outcome, reason := classifyScheduleTimeout(ctx, c, eaoGVK, profile, waitErr.Error())
+		if outcome == OutcomeFailed {
+			metrics.RebalanceEnactmentFailuresTotal.
+				WithLabelValues(action, metrics.EnactStageWaitReplacement).Inc()
+		}
 		return scaleResult{outcome: outcome, reason: reason}, nil
 	}
 	return scaleResult{

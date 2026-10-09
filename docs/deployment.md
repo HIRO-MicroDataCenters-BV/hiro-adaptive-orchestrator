@@ -25,10 +25,20 @@ All deploy scripts and charts share the same parameter model: every variable has
 ## Full-Stack via Helm — umbrella chart (recommended)
 
 ```bash
-hack/deploy_full_stack_with_helm.sh [deploy|clean]
+hack/deploy_full_stack_with_helm.sh [deploy|clean|destroy]
 ```
 
-Deploys everything — operator, webhook, scheduler (plugin or extender), mock agent, samples, optional bundled prerequisites — as one Helm release via the umbrella chart at `charts/hiro-adaptive-platform`, against a local Kind cluster. Creates (or reuses) the Kind cluster, builds the operator + scheduler-plugin images, loads them straight into the cluster (no registry needed), deploys in two phases (operator first, then scheduler + webhook once the operator's Service is live), and health-checks the result.
+| Action | Effect |
+|--------|--------|
+| `deploy` (default) | Build images, load into Kind, deploy in one Helm run, health-check |
+| `clean` | Uninstall the Helm release, keep the Kind cluster |
+| `destroy` | Delete the Kind cluster |
+
+Prefer `clean` over `destroy` in extender mode: the chart's kube-scheduler restore Job is a
+`pre-delete` hook, so only a Helm uninstall reverts the patch. The `OrchestrationProfile` CRD is
+annotated `helm.sh/resource-policy: keep`, so it and any profiles you created survive a `clean`.
+
+Deploys everything — operator, webhook, scheduler (plugin or extender), mock agent, samples, optional bundled prerequisites — as one Helm release via the umbrella chart at `charts/hiro-adaptive-platform`, against a local Kind cluster. Creates (or reuses) the Kind cluster, builds the operator + scheduler-plugin images, loads them straight into the cluster (no registry needed), deploys everything with one `helm upgrade --install`, and health-checks the result.
 
 **No `GITHUB_PAT_TOKEN` or registry needed** — images build locally and load directly into Kind. This is the one deploy path in this document that doesn't require a GHCR token.
 
@@ -40,9 +50,29 @@ Deploys everything — operator, webhook, scheduler (plugin or extender), mock a
 | `HELM_PLATFORM_RELEASE` | `hiro-adaptive-platform` | Helm release name |
 | `SCHED_NAME` | `hiro-scheduler` | `schedulerName` the webhook injects |
 
+Each of these drives both the Helm values and the script's end-of-run summary, so what it prints
+always matches what was deployed:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCHEDULER_MODE` | `plugin` | `plugin` (scheduler Deployment + webhook), `extender` (patches the cluster's own kube-scheduler), or `none` (operator only) |
+| `USE_MOCK_AGENT` | `true` | Deploy the bundled mock decision agent |
+| `DEPLOY_SAMPLES` | `true` | Deploy the nginx + `OrchestrationProfile` samples |
+| `DEPLOY_PROMETHEUS` | `false` | Bundle kube-prometheus-stack and turn on both ServiceMonitors, so the `hiro_*` metrics are scraped rather than just exposed |
+| `OTLP_ENDPOINT` | *(empty)* | OTLP gRPC collector for traces, e.g. `alloy.observability.svc:4317`. Empty disables tracing entirely |
+
 ```bash
 KIND_CLUSTER_NAME=hiro-platform-verify hack/deploy_full_stack_with_helm.sh deploy
-hack/deploy_full_stack_with_helm.sh clean   # tear down the Kind cluster it created
+
+# scrape the metrics with the bundled Prometheus, and export traces
+DEPLOY_PROMETHEUS=true OTLP_ENDPOINT=alloy.observability.svc:4317 \
+  hack/deploy_full_stack_with_helm.sh deploy
+
+# extender instead of the scheduler plugin — no scheduler pod, no webhook
+SCHEDULER_MODE=extender hack/deploy_full_stack_with_helm.sh deploy
+
+hack/deploy_full_stack_with_helm.sh clean     # release only, cluster stays
+hack/deploy_full_stack_with_helm.sh destroy   # delete the Kind cluster
 ```
 
 For a real cluster (not Kind), deploy the same chart directly — no Kind-specific env vars apply here; instead, configuration is the Helm chart's own `values.yaml` (scheduler mode, webhook, mock agent, bundled prerequisites, etc.):
@@ -50,6 +80,12 @@ For a real cluster (not Kind), deploy the same chart directly — no Kind-specif
 ```bash
 make helm-platform-deploy
 HELM_EXTRA_ARGS="--set scheduler.mode=plugin --set webhook.enable=true" make helm-platform-deploy
+```
+
+One run deploys everything that is enabled — the chart computes the PlacementServer URL and generates the webhook certificate itself. Operator settings are a map, so a single key can be changed on its own:
+
+```bash
+HELM_EXTRA_ARGS="--set hiro-operator.config.REBALANCE_MIN_CPU=100m" make helm-platform-deploy
 ```
 
 See [charts/hiro-adaptive-platform/README.md](../charts/hiro-adaptive-platform/README.md#values-reference) for the full values reference and worked examples, and its [Verification and CI](../charts/hiro-adaptive-platform/README.md#verification-and-ci) section for how CI exercises this same path (`.github/workflows/platform-verify-chart.yml` runs on every push/PR).
@@ -228,7 +264,8 @@ Every parameter can be set as an environment variable before calling any deploy 
 |----------|---------|-------------|
 | `PLACEMENT_SERVICE_NAME` | `<NAME_PREFIX>controller-manager-placement-service` | k8s Service name for the PlacementServer |
 | `PLACEMENT_SERVER_PORT` | `:8090` | Port the PlacementServer listens on |
-| `PLACEMENT_SERVER_PATH` | `/api/v1/placement/decision` | HTTP path for placement decisions |
+| `PLACEMENT_SCORE_PATH` | `/api/v1/placement/score` | HTTP path for AI node scoring |
+| `PLACEMENT_FILTER_PATH` | `/api/v1/placement/filter` | HTTP path for the energy-gate filter check |
 | `PLACEMENT_SERVER_HEALTH_PATH` | `/healthz` | HTTP path for health probes |
 | `PLACEMENT_TIMEOUT_SECS` | `8` | Scheduler plugin → PlacementServer request timeout (seconds) |
 
@@ -346,7 +383,8 @@ The operator pod reads configuration exclusively from environment variables — 
 | `DECISION_AGENT_URL` | `http://mock-decision-agent:8080` | `decision.NewDecisionClient` |
 | `DECISION_AGENT_PATH` | `/api/v1/agent/placement/decision` | `decision.NewDecisionClient` |
 | `PLACEMENT_SERVER_PORT` | `:8090` | `decision.NewPlacementServer` |
-| `PLACEMENT_SERVER_PATH` | `/api/v1/placement/decision` | `decision.NewPlacementServer` |
+| `PLACEMENT_SCORE_PATH` | `/api/v1/placement/score` | `decision.NewPlacementServer` |
+| `PLACEMENT_FILTER_PATH` | `/api/v1/placement/filter` | `decision.NewPlacementServer` |
 | `PLACEMENT_SERVER_HEALTH_PATH` | `/healthz` | `decision.NewPlacementServer` |
 | `EXTENDER_FILTER_PATH` | `/extender/filter` | `decision.NewPlacementServer` |
 | `EXTENDER_PRIORITIZE_PATH` | `/extender/prioritize` | `decision.NewPlacementServer` |
@@ -420,7 +458,8 @@ pluginConfig:
   - name: HIROScore
     args:
       placementServerURL:  "http://<PLACEMENT_SERVICE_NAME>.<NAMESPACE>.svc.cluster.local<PLACEMENT_SERVER_PORT>"
-      placementServerPath: "/api/v1/placement/decision"   # PLACEMENT_SERVER_PATH
+      placementServerPath: "/api/v1/placement/score"      # PLACEMENT_SCORE_PATH
+      filterPath:          "/api/v1/placement/filter"     # PLACEMENT_FILTER_PATH
       timeoutSeconds:      8                              # PLACEMENT_TIMEOUT_SECS
 ```
 
@@ -595,8 +634,8 @@ sequenceDiagram
 For local and CI testing a mock agent is included at `hack/mock_decision_agent.yaml`. It handles two kinds of requests on the same path, distinguished by whether the body carries a `rebalanceContext` (see [internal/rebalance/README.md](../internal/rebalance/README.md#dispatch--acting-on-the-ais-decision)): initial placement gets every candidate node scored randomly in `[0, 100]`; a rebalance evaluation gets a randomly chosen `Move` or `NoOp` recommendation.
 
 ```
-POST /api/v1/placement/decision  (no rebalanceContext) →  nodeScores: [{nodeName, score}, ...]
-POST /api/v1/placement/decision  (rebalanceContext set) →  action: Move | NoOp
+POST /api/v1/agent/placement/decision  (no rebalanceContext) →  nodeScores: [{nodeName, score}, ...]
+POST /api/v1/agent/placement/decision  (rebalanceContext set) →  action: Move | NoOp
 GET  /healthz                                           →  200 ok
 ```
 

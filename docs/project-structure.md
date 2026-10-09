@@ -24,7 +24,8 @@ internal/
     op_constants.go                    # Status enum + event reason constants
   decision/
     server.go                          # PlacementServer HTTP service (:8090)
-                                       #   POST /api/v1/placement/decision  (plugin path)
+                                       #   POST /api/v1/placement/filter    (plugin energy gate)
+                                       #   POST /api/v1/placement/score     (plugin AI scoring)
                                        #   POST /extender/filter            (extender filter)
                                        #   POST /extender/prioritize        (extender scoring)
     builder.go                         # Assembles DecisionRequest + CheckEnergyGate (incl. EAO profile fetch)

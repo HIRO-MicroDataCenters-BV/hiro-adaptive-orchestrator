@@ -22,7 +22,7 @@ flowchart LR
 | Workflow | Trigger | Does |
 |---|---|---|
 | `release.yml` | Push to `main`, or a `vX.Y.Z` tag pushed by hand | Resolves the version, builds both images (multi-arch), packages + pushes the Helm chart, publishes the GitHub Release |
-| `deploy.yml` | A GitHub Release is published, or manual `workflow_dispatch` | Deploys that exact version to the target cluster via `helm upgrade --reuse-values` |
+| `deploy.yml` | A GitHub Release is published, or manual `workflow_dispatch` | Deploys that exact version to the target cluster via a single `helm upgrade --install` |
 | `platform-verify-chart.yml` | Every push/PR | Unchanged — builds and deploys to a throwaway Kind cluster in CI, no registry involved |
 
 <a id="versioning"></a>
@@ -57,7 +57,7 @@ This runs the exact same `release.yml` pipeline as an automatic release — only
 
 `deploy.yml` needs the `TARGET_KUBECONFIG` repo secret (base64-encoded kubeconfig). See the header comment in [.github/workflows/deploy.yml](../.github/workflows/deploy.yml) for the full list of secrets/variables it reads (namespace, release name, scheduler mode, webhook/cert-manager toggles, etc.).
 
-Before deploying, it checks the target cluster against the `prerequisites.*` toggles: it fails outright if the webhook needs cert-manager but neither the bundled prerequisite nor an existing cert-manager is present (that combination can break admission cluster-wide), and warns (without blocking) if metrics-server or Prometheus are missing, since those only degrade rebalance pressure triggers or metrics scraping respectively.
+Before deploying, it checks the target cluster against the `prerequisites.*` toggles: it fails outright if `WEBHOOK_TLS_MODE=certManager` but cert-manager isn't installed on the cluster (the default, `helm`, generates the webhook certificate in-chart and needs nothing installed), and warns (without blocking) if metrics-server or Prometheus are missing, since those only degrade rebalance pressure triggers or metrics scraping respectively.
 
 To redeploy a past version without rebuilding anything: **Actions → Deploy to Target Cluster → Run workflow**, supplying the version tag.
 

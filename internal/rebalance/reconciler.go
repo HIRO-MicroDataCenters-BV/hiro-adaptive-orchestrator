@@ -38,6 +38,7 @@ import (
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/tracing"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
 )
 
@@ -469,6 +470,8 @@ func (r *Reconciler) recoverStuckCycle(
 	reason := fmt.Sprintf("watchdog: recovered after being stuck in %s for %s, likely an operator restart mid-cycle",
 		rs.State, stuckFor.Round(time.Second))
 
+	metrics.RebalanceWatchdogRecoveriesTotal.Inc()
+
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
 		TransitionOptions{Outcome: OutcomeFailed, Cooldown: cooldown}); err != nil {
 		logger.Error(err, "rebalance: watchdog recovery transition to Watching failed", "profile", profile.Name)
@@ -509,25 +512,35 @@ func (r *Reconciler) evaluateWithAI(
 	aiCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Covers context assembly too — from the engine's point of view that's
+	// part of the cost of asking the AI.
+	start := time.Now()
+	defer func() { metrics.RebalanceAIDuration.Observe(time.Since(start).Seconds()) }()
+
 	req, err := r.ContextBuilder.BuildRebalanceContext(aiCtx, profile, rs.DecisionID, reason, rs.RecentDecisions)
 	if err != nil {
+		metrics.RebalanceAIRequestsTotal.WithLabelValues(metrics.AIResultContextError).Inc()
 		r.failEvaluation(ctx, key, profile, fmt.Sprintf("building AI decision context: %v", err))
 		return
 	}
 
 	resp, err := r.DecisionClient.RequestRebalanceDecision(aiCtx, req)
 	if err != nil {
+		metrics.RebalanceAIRequestsTotal.WithLabelValues(metrics.AIResultAIError).Inc()
 		r.failEvaluation(ctx, key, profile, fmt.Sprintf("AI unavailable: %v", err))
 		return
 	}
+	metrics.RebalanceAIRequestsTotal.WithLabelValues(metrics.AIResultSuccess).Inc()
 
 	logger.Info("rebalance: AI rebalance decision received",
-		"profile", profile.Name,
-		"action", resp.Action,
-		"podName", resp.PodName,
-		"targetNode", resp.TargetNode,
-		"improvement", resp.Improvement,
-		"reason", resp.Reason,
+		append([]any{
+			"profile", profile.Name,
+			"action", resp.Action,
+			"podName", resp.PodName,
+			"targetNode", resp.TargetNode,
+			"improvement", resp.Improvement,
+			"reason", resp.Reason,
+		}, tracing.LogValues(aiCtx)...)...,
 	)
 
 	r.dispatchDecision(ctx, key, profile, resp)

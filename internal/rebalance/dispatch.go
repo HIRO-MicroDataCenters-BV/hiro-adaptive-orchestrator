@@ -287,6 +287,10 @@ func dispatchMoveDryRun(
 ) {
 	logger := logf.FromContext(ctx)
 
+	// Dry-run observes the score too, so running in dry-run still produces
+	// improvement data to judge the AI by.
+	metrics.RebalanceImprovementScore.WithLabelValues(string(resp.Action)).Observe(resp.Improvement)
+
 	if _, err := r.Writer.Transition(ctx, key, StateEnacting,
 		fmt.Sprintf("dry-run: would enact move of %s to %s", resp.PodName, resp.TargetNode),
 		TransitionOptions{Action: resp.Action}); err != nil {
@@ -414,6 +418,8 @@ func dispatchScaleDryRun(
 	cooldown time.Duration,
 ) {
 	logger := logf.FromContext(ctx)
+
+	metrics.RebalanceImprovementScore.WithLabelValues(string(resp.Action)).Observe(resp.Improvement)
 
 	if _, err := r.Writer.Transition(ctx, key, StateEnacting,
 		fmt.Sprintf("dry-run: would enact scale to %d replicas", resp.TargetReplicas),

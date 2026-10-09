@@ -19,8 +19,7 @@ name: Deploy to Target Cluster
 #   SCHED_K8S_VERSION            Scheduler image's target K8s minor version (default: v1.35.0)
 #   SCHEDULER_MODE                none | plugin | extender        (default: none)
 #   WEBHOOK_ENABLE                true | false                    (default: false)
-#   WEBHOOK_CERT_MANAGER_ENABLE   true | false                    (default: false)
-#   PREREQ_CERT_MANAGER_ENABLE    true | false                    (default: false)
+#   WEBHOOK_TLS_MODE              helm | certManager | existingSecret (default: helm)
 #   PREREQ_METRICS_SERVER_ENABLE  true | false                    (default: false)
 #   PREREQ_PROMETHEUS_ENABLE      true | false                    (default: false)
 #   MOCK_AGENT_ENABLE             true | false                    (default: false)
@@ -45,7 +44,6 @@ permissions:
 env:
   SCHED_K8S_VERSION: ${{ vars.SCHED_K8S_VERSION || 'v1.35.0' }}
   CHART_NAME: hiro-adaptive-platform
-  POSTRENDERER_NAME: hiro-adaptive-platform-postrenderer
 
 jobs:
   verify-secrets:
@@ -89,28 +87,24 @@ jobs:
           CHART_REF="oci://ghcr.io/$GHCR_REPO_LC/charts/$CHART_NAME"
           helm pull "$CHART_REF" --version "${VERSION#v}" --untar --destination release-chart
 
-      - name: Install post-renderer plugin
-        run: |
-          helm plugin uninstall "$POSTRENDERER_NAME" >/dev/null 2>&1 || true
-          helm plugin install "release-chart/$CHART_NAME/postrender"
-
       - name: Check prerequisites against target cluster
         env:
           WEBHOOK_ENABLE: ${{ vars.WEBHOOK_ENABLE || 'false' }}
-          WEBHOOK_CERT_MANAGER_ENABLE: ${{ vars.WEBHOOK_CERT_MANAGER_ENABLE || 'false' }}
-          PREREQ_CERT_MANAGER_ENABLE: ${{ vars.PREREQ_CERT_MANAGER_ENABLE || 'false' }}
+          WEBHOOK_TLS_MODE: ${{ vars.WEBHOOK_TLS_MODE || 'helm' }}
           PREREQ_METRICS_SERVER_ENABLE: ${{ vars.PREREQ_METRICS_SERVER_ENABLE || 'false' }}
           PREREQ_PROMETHEUS_ENABLE: ${{ vars.PREREQ_PROMETHEUS_ENABLE || 'false' }}
         run: |
           export KUBECONFIG="$HOME/.kube/config"
 
-          # certManager: hard failure. The webhook's TLS cert is issued by
-          # cert-manager's Issuer/Certificate CRs (see templates/certmanager/);
-          # with no cert-manager anywhere, those never get reconciled, the
-          # webhook never gets a valid cert, and admission can break cluster-wide.
-          if [ "$WEBHOOK_ENABLE" = "true" ] && [ "$WEBHOOK_CERT_MANAGER_ENABLE" = "true" ] && [ "$PREREQ_CERT_MANAGER_ENABLE" != "true" ]; then
+          # webhook.tls.mode=certManager: hard failure. The webhook's TLS cert
+          # is issued by cert-manager's Issuer/Certificate CRs (see
+          # templates/certmanager/); with no cert-manager in the cluster those
+          # never get reconciled, the webhook never gets a valid cert, and
+          # admission can break cluster-wide. The default, mode=helm, needs
+          # nothing installed.
+          if [ "$WEBHOOK_ENABLE" = "true" ] && [ "$WEBHOOK_TLS_MODE" = "certManager" ]; then
             if ! kubectl get crd certificates.cert-manager.io >/dev/null 2>&1; then
-              echo "::error::webhook.certManager.enable is on, but prerequisites.certManager.enable=false and no cert-manager was found on the target cluster (missing CRD certificates.cert-manager.io). The webhook's TLS certificate will never be issued, which can block admission cluster-wide. Fix: set PREREQ_CERT_MANAGER_ENABLE=true to bundle cert-manager with this release, or install cert-manager on the target cluster first."
+              echo "::error::webhook.tls.mode=certManager, but no cert-manager was found on the target cluster (missing CRD certificates.cert-manager.io). Install cert-manager first, or use WEBHOOK_TLS_MODE=helm."
               exit 1
             fi
           fi
@@ -132,58 +126,31 @@ jobs:
             fi
           fi
 
-      - name: Deploy charts/hiro-adaptive-platform (phase 1)
+      - name: Deploy charts/hiro-adaptive-platform
         run: |
           export KUBECONFIG="$HOME/.kube/config"
           ORCHESTRATOR_IMAGE_REPO="ghcr.io/$GHCR_REPO_LC/hiro-adaptive-orchestrator-controller:${VERSION}"
           SCHED_IMAGE_REPO="ghcr.io/$GHCR_REPO_LC/hiro-scheduler:${VERSION}-k8s${SCHED_K8S_VERSION}"
           SCHED_MODE="${{ vars.SCHEDULER_MODE || 'none' }}"
-          EXTRA_ARGS="\
-            --reuse-values \
+          WEBHOOK_ENABLE="${{ vars.WEBHOOK_ENABLE || 'false' }}"
+          # The webhook only exists in plugin mode.
+          if [ "$SCHED_MODE" != "plugin" ]; then WEBHOOK_ENABLE=false; fi
+          helm upgrade --install "$HELM_PLATFORM_RELEASE" "release-chart/$CHART_NAME" \
+            --namespace "$HELM_NAMESPACE" \
+            --create-namespace \
+            --wait \
+            --timeout 10m \
             --set hiro-operator.manager.image.repository=${ORCHESTRATOR_IMAGE_REPO%%:*} \
             --set hiro-operator.manager.image.tag=${ORCHESTRATOR_IMAGE_REPO##*:} \
             --set scheduler.plugin.image.repository=${SCHED_IMAGE_REPO%%:*} \
             --set scheduler.plugin.image.tag=${SCHED_IMAGE_REPO##*:} \
-            --set prerequisites.certManager.enable=${{ vars.PREREQ_CERT_MANAGER_ENABLE || 'false' }} \
+            --set scheduler.mode=$SCHED_MODE \
+            --set webhook.enable=$WEBHOOK_ENABLE \
+            --set webhook.tls.mode=${{ vars.WEBHOOK_TLS_MODE || 'helm' }} \
             --set prerequisites.metricsServer.enable=${{ vars.PREREQ_METRICS_SERVER_ENABLE || 'false' }} \
             --set prerequisites.prometheus.enable=${{ vars.PREREQ_PROMETHEUS_ENABLE || 'false' }} \
             --set mockAgent.enable=${{ vars.MOCK_AGENT_ENABLE || 'false' }} \
-            ${{ vars.HELM_EXTRA_VALUES }}"
-          if [ "$SCHED_MODE" != "plugin" ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --set scheduler.mode=$SCHED_MODE --set webhook.enable=false"
-          fi
-          helm upgrade --install "$HELM_PLATFORM_RELEASE" "release-chart/$CHART_NAME" \
-            --namespace "$HELM_NAMESPACE" \
-            --create-namespace \
-            --post-renderer "$POSTRENDERER_NAME" \
-            --wait \
-            --timeout 10m \
-            $EXTRA_ARGS
-
-      - name: Resolve PlacementServer Service
-        if: vars.SCHEDULER_MODE == 'plugin'
-        run: |
-          export KUBECONFIG="$HOME/.kube/config"
-          SVC=$(kubectl -n $HELM_NAMESPACE get svc \
-            -l app.kubernetes.io/component=placement-server \
-            -o jsonpath='{.items[0].metadata.name}')
-          echo "PLACEMENT_SERVER_URL=http://${SVC}.${HELM_NAMESPACE}.svc.cluster.local:8090" >> "$GITHUB_ENV"
-
-      - name: Deploy charts/hiro-adaptive-platform (phase 2 — scheduler + webhook)
-        if: vars.SCHEDULER_MODE == 'plugin'
-        run: |
-          export KUBECONFIG="$HOME/.kube/config"
-          helm upgrade --install "$HELM_PLATFORM_RELEASE" "release-chart/$CHART_NAME" \
-            --namespace "$HELM_NAMESPACE" \
-            --create-namespace \
-            --post-renderer "$POSTRENDERER_NAME" \
-            --wait \
-            --timeout 10m \
-            --reuse-values \
-            --set scheduler.mode=plugin \
-            --set scheduler.plugin.placementServer.url=$PLACEMENT_SERVER_URL \
-            --set webhook.enable=${{ vars.WEBHOOK_ENABLE || 'false' }} \
-            --set webhook.certManager.enable=${{ vars.WEBHOOK_CERT_MANAGER_ENABLE || 'false' }}
+            ${{ vars.HELM_EXTRA_VALUES }}
 
       - name: Show release status
         if: always()

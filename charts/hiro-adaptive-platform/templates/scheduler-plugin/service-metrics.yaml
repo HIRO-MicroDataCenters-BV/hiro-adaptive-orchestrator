@@ -1,0 +1,24 @@
+{{- if eq .Values.scheduler.mode "plugin" }}
+# Exists only so Prometheus has something to scrape — the scheduler serves no
+# traffic of its own. kube-scheduler exposes /metrics on its secure port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-hiro-scheduler-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: hiro-scheduler
+    app.kubernetes.io/name: hiro-scheduler
+    app.kubernetes.io/component: scheduler-metrics
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  type: ClusterIP
+  selector:
+    app: hiro-scheduler
+  ports:
+    - name: https
+      port: {{ .Values.scheduler.plugin.metrics.port }}
+      targetPort: {{ .Values.scheduler.plugin.metrics.port }}
+      protocol: TCP
+{{- end }}

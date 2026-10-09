@@ -31,9 +31,12 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"os"
+	"time"
 
 	"k8s.io/component-base/cli"
+	"k8s.io/klog/v2"
 	app "k8s.io/kubernetes/cmd/kube-scheduler/app"
 
 	schedulerplugin "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/scheduler-plugin"
@@ -45,9 +48,24 @@ import (
 var k8sVersion = "unknown"
 
 func main() {
+	// kube-scheduler has no tracing config of its own, so the plugin owns the
+	// TracerProvider lifecycle. No-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
+	shutdownTracing, err := schedulerplugin.InitTracing(context.Background(), k8sVersion)
+	if err != nil {
+		klog.ErrorS(err, "initializing tracing; continuing without it")
+	}
+
 	command := app.NewSchedulerCommand(
 		app.WithPlugin(schedulerplugin.PluginName, schedulerplugin.New),
 	)
-	_ = k8sVersion
-	os.Exit(cli.Run(command))
+	code := cli.Run(command)
+
+	if shutdownTracing != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(ctx); err != nil {
+			klog.ErrorS(err, "flushing traces on shutdown")
+		}
+	}
+	os.Exit(code)
 }

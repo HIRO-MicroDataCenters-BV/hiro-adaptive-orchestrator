@@ -37,6 +37,27 @@ const (
 	ScoreResultAIError   = "ai_error"
 )
 
+// Result label values for PlacementContextBuildTotal.
+const (
+	BuildResultSuccess         = "success"
+	BuildResultProfileNotFound = "profile_not_found"
+	BuildResultProfileError    = "profile_error"
+)
+
+// Caller label values for PlacementEAOFetchTotal — which path needed the EAO.
+const (
+	EAOCallerScore     = "score"
+	EAOCallerFilter    = "filter"
+	EAOCallerRebalance = "rebalance"
+)
+
+// Result label values for PlacementEAOFetchTotal.
+const (
+	EAOResultFound    = "found"
+	EAOResultNotFound = "not_found"
+	EAOResultError    = "error"
+)
+
 // PlacementScoreRequestsTotal covers both PlacementServer entry points that
 // score nodes for a pod — the scheduler-plugin path (POST
 // /api/v1/placement/score) and the extender path (POST
@@ -87,6 +108,19 @@ var PlacementDecisionStoreMissesTotal = prometheus.NewCounter(prometheus.Counter
 	Help: "Total DecisionStore lookups that found no entry, or an expired one.",
 })
 
+// The caller sees one error for both "pod isn't governed" and "the lookup broke".
+var PlacementContextBuildTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "hiro_placement_context_build_total",
+	Help: "Total scoring-context builds, by result.",
+}, []string{"result"})
+
+// Every caller soft-fails a missing EAO, so energy awareness otherwise degrades
+// silently — the filter path even counts it as a genuine allow.
+var PlacementEAOFetchTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "hiro_placement_eao_fetch_total",
+	Help: "Total EnergyAwareOrchestration lookups, by calling path and result.",
+}, []string{"caller", "result"})
+
 func init() {
 	metrics.Registry.MustRegister(
 		PlacementScoreRequestsTotal,
@@ -95,5 +129,7 @@ func init() {
 		PlacementFilterErrorsTotal,
 		PlacementDecisionStoreHitsTotal,
 		PlacementDecisionStoreMissesTotal,
+		PlacementContextBuildTotal,
+		PlacementEAOFetchTotal,
 	)
 }

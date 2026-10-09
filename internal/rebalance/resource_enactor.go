@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 )
 
 // Never Ever delete this comments as they are used by kubebuilder to generate RBAC permissions for the controller.
@@ -244,10 +245,21 @@ func resourceEnactor(
 	targetCPU, targetMemory resource.Quantity,
 	reason string,
 	timeout time.Duration,
-) (scaleResult, error) {
+) (res scaleResult, err error) {
 	if timeout <= 0 {
 		timeout = DefaultResourceActionTimeout
 	}
+
+	// Every error return below is a fetch/patch failure; resize shortfalls
+	// are reported as Enacted and counted by RebalanceResizeOutcomesTotal.
+	action := string(orchestrationv1alpha1.RebalanceActionAdjustResources)
+	start := time.Now()
+	defer func() {
+		metrics.RebalanceEnactmentDuration.WithLabelValues(action).Observe(time.Since(start).Seconds())
+		if err != nil {
+			metrics.RebalanceEnactmentFailuresTotal.WithLabelValues(action, metrics.EnactStagePatch).Inc()
+		}
+	}()
 
 	ref := profile.Spec.ApplicationRef
 	key := types.NamespacedName{Name: ref.Name, Namespace: ref.Namespace}
@@ -289,18 +301,21 @@ func resourceEnactor(
 		return scaleResult{}, fmt.Errorf("AdjustResources does not support workload kind %q", ref.Kind)
 	}
 
-	resized, attempted, err := resizeRunningPods(ctx, c, ref.Namespace, selector, containerName, targetCPU, targetMemory, timeout)
-	if err != nil || attempted == 0 {
+	resized, attempted, resizeErr := resizeRunningPods(ctx, c, ref.Namespace, selector, containerName, targetCPU, targetMemory, timeout)
+	if resizeErr != nil || attempted == 0 {
 		// No running pods matched, or listing them failed — the template
 		// patch still applies on the next rollout, so this is not a failure.
+		metrics.RebalanceResizeOutcomesTotal.WithLabelValues(metrics.ResizeResultNone).Inc()
 		reason := fmt.Sprintf("template patched: %s (no running pods resized in place)", reason)
 		return scaleResult{outcome: OutcomeEnacted, reason: reason}, nil
 	}
 	if resized < attempted {
+		metrics.RebalanceResizeOutcomesTotal.WithLabelValues(metrics.ResizeResultPartial).Inc()
 		reason := fmt.Sprintf("template patched: %s (in-place resize unavailable on %d/%d running pods; effective on next rollout)",
 			reason, attempted-resized, attempted)
 		return scaleResult{outcome: OutcomeEnacted, reason: reason}, nil
 	}
+	metrics.RebalanceResizeOutcomesTotal.WithLabelValues(metrics.ResizeResultAll).Inc()
 	return scaleResult{
 		outcome: OutcomeEnacted,
 		reason:  fmt.Sprintf("resized %d running pod(s) in place: %s", resized, reason),

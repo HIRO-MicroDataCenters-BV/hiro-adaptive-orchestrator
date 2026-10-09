@@ -26,15 +26,16 @@ function-level call traces of both scheduling paths.
 │  Rebalance Engine                       │   │  [B] default kube-scheduler │
 │    Watching → Triggered → Evaluating    │   │      extender, cluster-wide │
 │    → Decided → Enacting                 │   │                             │
-│    (Move / RetryPendingSchedule)        │◄──┤  [A] → /placement/decision │
-│    │ writes on Move                     │   │  [B] → /extender/filter     │
-│    ▼                                    │   │       /extender/prioritize  │
-│  DecisionStore (shared, TTL-bounded)    │   │                             │
+│    (Move / RetryPendingSchedule)        │◄──┤  [A] → /placement/filter    │
+│    │ writes on Move                     │   │       /placement/score      │
+│    ▼                                    │   │  [B] → /extender/filter     │
+│  DecisionStore (shared, TTL-bounded)    │   │       /extender/prioritize  │
 │    │ read before AI call                │   │                             │
 │    ▼                                    │   │                             │
 │  PlacementServer (:8090)                │   │                             │
 │  ──────────────────────────────────    │   │                             │
-│  /api/v1/placement/decision             │   │                             │
+│  /api/v1/placement/score                │   │                             │
+│  /api/v1/placement/filter               │   │                             │
 │  /extender/filter                       │   │                             │
 │  /extender/prioritize                   │   │                             │
 │  /healthz                               │   │                             │
@@ -56,7 +57,7 @@ flowchart TB
         Reconciler["Reconciler<br/>(placement status)"]
         RE["Rebalance Engine<br/>Watching → Triggered → Evaluating<br/>→ Decided → Enacting<br/>(Move / RetryPendingSchedule)"]
         Store[("DecisionStore<br/>shared, TTL-bounded")]
-        PS["PlacementServer (:8090)<br/>─────────────────────<br/>/api/v1/placement/decision<br/>/extender/filter<br/>/extender/prioritize<br/>/healthz"]
+        PS["PlacementServer (:8090)<br/>─────────────────────<br/>/api/v1/placement/score<br/>/api/v1/placement/filter<br/>/extender/filter<br/>/extender/prioritize<br/>/healthz"]
 
         RE -->|"writes on Move"| Store
         Store -->|"read before AI call"| PS
@@ -73,7 +74,7 @@ flowchart TB
     API -->|"watch OrchestrationProfile / EAO<br/>watch Deployments/StatefulSets/Jobs"| Reconciler
     API -->|"watch Pod/Node events<br/>+ periodic tick"| RE
     API -->|"schedule pods"| SchedChoice
-    A -->|"[A] → /placement/decision"| PS
+    A -->|"[A] → /placement/filter<br/>/placement/score"| PS
     B -->|"[B] → /extender/filter<br/>/extender/prioritize"| PS
     PS -->|"POST DecisionRequest"| Agent
     RE -->|"POST RebalanceContext"| Agent
@@ -148,7 +149,8 @@ flowchart LR
 
     subgraph PS["PlacementServer :8090 — HIRO Operator Pod"]
         direction TB
-        R1["POST /api/v1/placement/decision<br/>1. look up OrchestrationProfile (O(1) field index)<br/>2. build DecisionRequest (AOProfile + EAOProfile + nodes)<br/>3. call External AI Agent → return NodeScores to plugin"]
+        R0["POST /api/v1/placement/filter<br/>1. look up OrchestrationProfile for pod (O(1) field index)<br/>2. CheckEnergyGate via EAO CRD<br/>&nbsp;&nbsp;allowed → Allowed: true<br/>&nbsp;&nbsp;blocked → Allowed: false (plugin marks pod Unschedulable)"]
+        R1["POST /api/v1/placement/score<br/>1. look up OrchestrationProfile (O(1) field index)<br/>2. build DecisionRequest (AOProfile + EAOProfile + nodes)<br/>3. call External AI Agent → return NodeScores to plugin"]
         R2["POST /extender/filter<br/>1. look up OrchestrationProfile for pod<br/>2. CheckEnergyGate via EAO CRD<br/>&nbsp;&nbsp;allowed → pass all nodes through unchanged<br/>&nbsp;&nbsp;blocked → FailedNodes: all (scheduler defers the pod)"]
         R3["POST /extender/prioritize<br/>1. build DecisionRequest (same pipeline as plugin path)<br/>2. call External AI Agent → map scores [0-100] → [0-10]<br/>3. missing nodes → score 5 (neutral fallback)"]
         R4["GET /healthz → 200 ok"]
@@ -156,6 +158,7 @@ flowchart LR
 
     Agent["Decision<br/>Agent :8080"]
 
+    Plugin --> R0
     Plugin --> R1
     Extender --> R2
     Extender --> R3
@@ -164,12 +167,12 @@ flowchart LR
     R3 -->|"POST DecisionRequest"| Agent
 ```
 
-> `/extender/filter` + `/extender/prioritize` share the same `DecisionContextBuilder.Build()` + `DecisionClient.RequestDecision()` pipeline as the plugin path. The filter step runs `CheckEnergyGate` first; the prioritize step calls the AI agent and normalises scores.
+> The plugin's `/placement/filter` + `/placement/score` and the extender's `/extender/filter` + `/extender/prioritize` all share the same underlying `s.filter()` / `s.score()` core (`builder.CheckEnergyGate()` / `DecisionContextBuilder.Build()` + `DecisionClient.RequestDecision()`) — see [docs/scheduling-flows.md](scheduling-flows.md#shared-vs-protocol-specific). Each path's filter step runs `CheckEnergyGate` first; each path's score/prioritize step calls the AI agent, differing only in response shape (plugin: raw 0–100 `NodeScores`; extender: normalised 0–10 `HostPriorityList`).
 
 <a id="plugin-path-hiro-scheduler--placementserver"></a>
 ## Plugin Path: hiro-scheduler + PlacementServer
 
-End-to-end flow for pods with `spec.schedulerName: hiro-scheduler`. The `HIROScore` plugin runs inside the `hiro-scheduler` pod; the `PlacementServer` runs inside the operator pod. They communicate via HTTP on `/api/v1/placement/decision`.
+End-to-end flow for pods with `spec.schedulerName: hiro-scheduler`. The `HIROScore` plugin runs inside the `hiro-scheduler` pod; the `PlacementServer` runs inside the operator pod. They communicate via HTTP on two routes — `/api/v1/placement/filter` (energy gate) and `/api/v1/placement/score` (AI scoring).
 
 
 ```mermaid
@@ -179,8 +182,14 @@ sequenceDiagram
     participant Agent as External Decision<br/>Agent (:8080)
 
     Note over Sched: Pod created with<br/>spec.schedulerName: hiro-scheduler
-    Sched->>Sched: Filter phase — HIROScore.Filter<br/>(soft-fail open, never blocks scheduling)
-    Sched->>PS: PreScore — POST /api/v1/placement/decision<br/>Body: PlacementContext{pod, candidateNodes}
+    Sched->>PS: PreFilter — POST /api/v1/placement/filter<br/>Body: EnergyGateRequest{pod}
+    activate PS
+    PS->>PS: builder.CheckEnergyGate() — findProfileForPod()<br/>+ fetchEAOProfile() (if awareness.Energy=true)
+    PS-->>Sched: {allowed, reason}
+    deactivate PS
+    Sched->>Sched: PreFilter stashes energy gate result in CycleState<br/>(soft-fail open on error — Allowed: true)
+    Sched->>Sched: Filter phase — HIROScore.Filter reads<br/>CycleState → Unschedulable if blocked, else passes
+    Sched->>PS: PreScore — POST /api/v1/placement/score<br/>Body: PlacementContext{pod, candidateNodes}
     activate PS
     PS->>PS: Decode PlacementContext
     PS->>PS: builder.Build() — assemble DecisionRequest<br/>findProfileForPod() (O(1) field index)<br/>buildAOProfileContext() (strategy + awareness + placement)<br/>fetchEAOProfile() (if awareness.Energy=true)

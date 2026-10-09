@@ -59,7 +59,7 @@
 #                                  Helm release (see hack/install_prometheus_operator.sh)
 #                                  and enables config/prometheus (the ServiceMonitor
 #                                  scaffold) in the kustomize overlay. See
-#                                  internal/metrics/README.md for what gets exposed.
+#                                  docs/instrumentation.md for what gets exposed.
 #                                  Set false only if you already run your own
 #                                  Prometheus Operator (or don't want monitoring at
 #                                  all) — config/prometheus is then left disabled and
@@ -1046,7 +1046,7 @@ print_access_urls() {
 #
 # We didn't install or bind anything in this mode, but the metrics endpoint
 # and its RBAC (metrics-reader ClusterRole) are still there either way — see
-# internal/metrics/README.md. This just prints exactly what an existing,
+# docs/instrumentation.md. This just prints exactly what an existing,
 # unrelated Prometheus needs in order to reach it. Nothing here touches that
 # other Prometheus's install; it's all commands/values for the user to run or
 # adapt on their own.

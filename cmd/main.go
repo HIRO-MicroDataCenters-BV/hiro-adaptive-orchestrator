@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -48,6 +49,7 @@ import (
 	hirometrics "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/rebalance"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/tracing"
 	webhookv1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/webhook/v1"
 	// +kubebuilder:scaffold:imports
 )
@@ -56,6 +58,10 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
+
+// version is injected at build time via -ldflags="-X main.version=vX.Y.Z" and
+// reported as service.version on traces.
+var version = "unknown"
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -151,6 +157,9 @@ func main() {
 		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
+	// Never read: the Helm chart sets it to a hash of the operator config so a
+	// config change alters the pod spec and rolls the Deployment.
+	flag.String("config-checksum", "", "Ignored; changes when the Helm-rendered operator config changes.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	opts := zap.Options{
@@ -614,6 +623,22 @@ func main() {
 	// Start PlacementServer alongside the manager.
 	// Shuts down gracefully when the manager context is cancelled.
 	ctx := ctrl.SetupSignalHandler()
+
+	// No-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
+	shutdownTracing, err := tracing.Init(ctx, version)
+	if err != nil {
+		setupLog.Error(err, "Failed to initialize tracing; continuing without it")
+	}
+	if shutdownTracing != nil {
+		defer func() {
+			flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdownTracing(flushCtx); err != nil {
+				setupLog.Error(err, "Failed to flush traces on shutdown")
+			}
+		}()
+	}
+
 	go func() {
 		setupLog.Info("starting placement decision server", "addr", placementServer.Addr)
 		if err := placementServer.Start(ctx); err != nil {

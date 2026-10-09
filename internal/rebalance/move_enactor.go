@@ -28,9 +28,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/tracing"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
 )
 
@@ -93,6 +96,14 @@ func moveEnactor(
 		replacementTimeout = DefaultMoveActionTimeout
 	}
 
+	logger := logf.FromContext(ctx)
+	start := time.Now()
+	defer func() {
+		metrics.RebalanceEnactmentDuration.
+			WithLabelValues(string(orchestrationv1alpha1.RebalanceActionMove)).
+			Observe(time.Since(start).Seconds())
+	}()
+
 	before, err := utils.FindPodsForApplication(ctx, c, profile.Spec.ApplicationRef)
 	if err != nil {
 		return moveResult{}, fmt.Errorf("listing pods before eviction: %w", err)
@@ -115,14 +126,22 @@ func moveEnactor(
 	eviction := &policyv1.Eviction{
 		ObjectMeta: metav1.ObjectMeta{Name: pod.Name, Namespace: pod.Namespace},
 	}
+	logger.Info("rebalance: evicting pod to move it",
+		append([]any{"pod", pod.Name, "namespace", pod.Namespace,
+			"fromNode", pod.Spec.NodeName, "targetNode", targetNode,
+			"decisionId", decisionID}, tracing.LogValues(ctx)...)...)
+
 	if err := c.SubResource("eviction").Create(ctx, pod, eviction); err != nil {
 		store.Delete(key)
+		// A PDB refusal is a defined Deferred outcome, not a failure.
 		if apierrors.IsTooManyRequests(err) {
 			return moveResult{
 				outcome: OutcomeDeferred,
 				reason:  fmt.Sprintf("eviction blocked by PodDisruptionBudget: %v", err),
 			}, nil
 		}
+		metrics.RebalanceEnactmentFailuresTotal.WithLabelValues(
+			string(orchestrationv1alpha1.RebalanceActionMove), metrics.EnactStageEvict).Inc()
 		return moveResult{}, fmt.Errorf("evicting pod %s: %w", pod.Name, err)
 	}
 
@@ -130,6 +149,14 @@ func moveEnactor(
 	if err != nil {
 		store.Delete(key)
 		outcome, reason := classifyScheduleTimeout(ctx, c, eaoGVK, profile, err.Error())
+		if outcome == OutcomeFailed {
+			metrics.RebalanceEnactmentFailuresTotal.WithLabelValues(
+				string(orchestrationv1alpha1.RebalanceActionMove),
+				metrics.EnactStageWaitReplacement).Inc()
+		}
+		logger.Info("rebalance: replacement pod did not schedule",
+			append([]any{"pod", podName, "outcome", outcome, "reason", reason},
+				tracing.LogValues(ctx)...)...)
 		return moveResult{outcome: outcome, reason: reason}, nil
 	}
 

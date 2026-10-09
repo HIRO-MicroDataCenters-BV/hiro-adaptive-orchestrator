@@ -247,3 +247,55 @@ func TestBuildRebalanceContext_EnergyAwareAttachesEAOData(t *testing.T) {
 		t.Errorf("RecentDecisions = %+v, want empty for nil input", req.RebalanceContext.RecentDecisions)
 	}
 }
+
+// testDeploymentPod is owned via ReplicaSet by testAppDeployment, the path
+// ResolveAppFromPod takes for a real Deployment-managed pod.
+func testDeploymentPod() (*corev1.Pod, *appsv1.ReplicaSet) {
+	rs := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "app-a-rs", Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{Kind: "Deployment", Name: "app-a"}},
+		},
+	}
+	pod := testAppPod("pod-x", "", corev1.PodPending)
+	pod.OwnerReferences = []metav1.OwnerReference{{Kind: "ReplicaSet", Name: rs.Name}}
+	return pod, rs
+}
+
+// Build used to dereference the EAO context and its Decision in its own log
+// line, so a pod panicked unless its profile had energy on, an EAO existed,
+// and that EAO's status was already populated.
+func TestBuild_EAOContextStates(t *testing.T) {
+	cases := []struct {
+		name    string
+		energy  bool
+		eao     *unstructured.Unstructured
+		wantEAO bool
+	}{
+		{name: "energy off", energy: false},
+		{name: "energy on, no EAO object", energy: true},
+		{name: "energy on, EAO status not yet populated", energy: true,
+			eao: testRebalanceEAO("Preferred", 250, "", "", true), wantEAO: true},
+		{name: "energy on, EAO with decision", energy: true,
+			eao: testRebalanceEAO("Critical", 500, "DeployImmediately", "window open", true), wantEAO: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pod, rs := testDeploymentPod()
+			objs := []client.Object{testRebalanceProfile(tc.energy), testAppDeployment(), rs, pod}
+			if tc.eao != nil {
+				objs = append(objs, tc.eao)
+			}
+			b := newTestBuilder(t, objs...)
+
+			req, err := b.Build(context.Background(),
+				PlacementContext{Pod: pod, CandidateNodes: []*corev1.Node{testNode("node-a", true)}}, "req-1")
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+			if got := req.EAOProfile != nil; got != tc.wantEAO {
+				t.Errorf("EAO context attached = %v, want %v", got, tc.wantEAO)
+			}
+		})
+	}
+}

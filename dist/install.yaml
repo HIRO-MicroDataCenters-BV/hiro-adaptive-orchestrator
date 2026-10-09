@@ -818,6 +818,10 @@ spec:
           value: "false"
         - name: HIRO_SCHEDULER_NAME
           value: hiro-scheduler
+        envFrom:
+        - configMapRef:
+            name: hiro-operator-config
+            optional: true
         image: ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/hiro-adaptive-orchestrator-controller:latest
         livenessProbe:
           httpGet:
