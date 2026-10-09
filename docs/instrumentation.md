@@ -299,7 +299,7 @@ OTLP_ENDPOINT=alloy.observability.svc:4317 hack/deploy_full_stack_with_helm.sh d
 | `OTEL_RESOURCE_ATTRIBUTES` | *(empty)* | Extra attributes, comma-separated `k=v` |
 
 Set it on **both** processes to get one connected trace. In the chart that means
-`hiro-operator.manager.env`'s `OTEL_*` entries and `scheduler.plugin.tracing.*`; the deploy
+`hiro-operator.config`'s `OTEL_*` keys and `scheduler.plugin.tracing.*`; the deploy
 script sets both from one `OTLP_ENDPOINT`.
 
 What a connected trace spans:
@@ -381,7 +381,5 @@ and is documented as deliberately not a metric, so the counter could only ever r
   `internal/rebalance/energy_gate.go` only classifies schedule timeouts despite its name. A
   rebalance-side gate metric was deliberately *not* added, because adding one would have implied
   a check that doesn't happen there. Revisit when the ordering is fixed.
-- **Some chart features need the Helm post-renderer** to take effect — the webhook's cert
-  wiring, `HIRO_SCHEDULER_NAME`, and propagating a non-default `PLACEMENT_SERVER_PORT`. Metrics
-  and tracing do not. See
-  [charts/hiro-adaptive-platform/README.md](../charts/hiro-adaptive-platform/README.md#post-renderer-plugin-helm-v4).
+- **`PLACEMENT_SERVER_PORT` is fixed at `:8090` in the chart.** The placement Service comes from the
+  generated subchart with that port, so the umbrella rejects any other value.

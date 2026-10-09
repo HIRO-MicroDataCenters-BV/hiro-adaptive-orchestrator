@@ -136,44 +136,29 @@ jobs:
           kind load docker-image hiro-operator:ci
           kind load docker-image hiro-scheduler:ci-k8s$SCHED_K8S_VERSION
 
-      # Phase 1: operator only. scheduler.plugin.placementServer.url has no
-      # default (the operator's Service name can't be known before the
-      # operator exists) and webhook.enable requires scheduler.mode=plugin —
-      # both get turned on in phase 2, once that Service is actually live.
-      - name: Deploy charts/hiro-adaptive-platform (phase 1 — operator)
+      # One install brings up the operator, mock agent, scheduler plugin and
+      # webhook together: the chart computes the PlacementServer URL and
+      # generates the webhook certificate itself.
+      - name: Deploy charts/hiro-adaptive-platform
         run: |
           make helm-platform-deploy HELM_NAMESPACE=$HELM_NAMESPACE HELM_EXTRA_ARGS="\
             --set hiro-operator.manager.image.repository=hiro-operator \
             --set hiro-operator.manager.image.tag=ci \
             --set hiro-operator.manager.image.pullPolicy=IfNotPresent \
-            --set prerequisites.certManager.enable=true \
             --set mockAgent.enable=true \
-            --set samples.enabled=true"
+            --set samples.enabled=true \
+            --set scheduler.mode=plugin \
+            --set scheduler.plugin.image.repository=hiro-scheduler \
+            --set scheduler.plugin.image.tag=ci-k8s$SCHED_K8S_VERSION \
+            --set scheduler.plugin.image.pullPolicy=IfNotPresent \
+            --set webhook.enable=true"
 
-      # Same lookup charts/hiro-adaptive-platform/README.md documents doing
-      # by hand: find the PlacementServer Service by label now that it exists.
       - name: Resolve PlacementServer Service
         run: |
           SVC=$(kubectl -n $HELM_NAMESPACE get svc \
             -l app.kubernetes.io/component=placement-server \
             -o jsonpath='{.items[0].metadata.name}')
           echo "PLACEMENT_SERVER_URL=http://${SVC}.${HELM_NAMESPACE}.svc.cluster.local:8090" >> "$GITHUB_ENV"
-
-      # Phase 2: --reuse-values keeps phase 1's settings (operator image,
-      # mockAgent, cert-manager, samples) — without it this `helm upgrade`
-      # would reset everything not repeated below back to values.yaml's
-      # defaults.
-      - name: Deploy charts/hiro-adaptive-platform (phase 2 — scheduler + webhook)
-        run: |
-          make helm-platform-deploy HELM_NAMESPACE=$HELM_NAMESPACE HELM_EXTRA_ARGS="\
-            --reuse-values \
-            --set scheduler.mode=plugin \
-            --set scheduler.plugin.image.repository=hiro-scheduler \
-            --set scheduler.plugin.image.tag=ci-k8s$SCHED_K8S_VERSION \
-            --set scheduler.plugin.image.pullPolicy=IfNotPresent \
-            --set scheduler.plugin.placementServer.url=$PLACEMENT_SERVER_URL \
-            --set webhook.enable=true \
-            --set webhook.certManager.enable=true"
 
       - name: Check PlacementServer health
         run: |
