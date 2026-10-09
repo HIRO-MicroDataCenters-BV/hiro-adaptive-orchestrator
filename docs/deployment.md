@@ -82,6 +82,12 @@ make helm-platform-deploy
 HELM_EXTRA_ARGS="--set scheduler.mode=plugin --set webhook.enable=true" make helm-platform-deploy
 ```
 
+One run deploys everything that is enabled — the chart computes the PlacementServer URL and generates the webhook certificate itself. Operator settings are a map, so a single key can be changed on its own:
+
+```bash
+HELM_EXTRA_ARGS="--set hiro-operator.config.REBALANCE_MIN_CPU=100m" make helm-platform-deploy
+```
+
 See [charts/hiro-adaptive-platform/README.md](../charts/hiro-adaptive-platform/README.md#values-reference) for the full values reference and worked examples, and its [Verification and CI](../charts/hiro-adaptive-platform/README.md#verification-and-ci) section for how CI exercises this same path (`.github/workflows/platform-verify-chart.yml` runs on every push/PR).
 
 ## Full-Stack via Scripts (operator + mock agent + scheduler)
