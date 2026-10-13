@@ -1,6 +1,6 @@
 dependencies:
 - name: hiro-adaptive-orchestrator
-  repository: file://../../dist/chart
+  repository: file://../../../dist/chart
   version: 0.1.0
 - name: cert-manager
   repository: https://charts.jetstack.io

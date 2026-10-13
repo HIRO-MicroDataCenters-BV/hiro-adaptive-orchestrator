@@ -1,7 +1,7 @@
 ---
 # Mock Decision Agent — for local / CI testing only.
 #
-# NOTE: charts/hiro-adaptive-platform/files/mock_decision_agent_server.py is
+# NOTE: deploy/helm/hiro-adaptive-platform/files/mock_decision_agent_server.py is
 # a manual COPY of this ConfigMap's server.py (the Helm chart's mockAgent
 # template) — if you change the server logic here, update that copy too.
 #
@@ -30,8 +30,8 @@
 #                                   returns RebalanceDecisionResponse
 #   GET  /healthz                    → 200 ok
 #
-# Deploy:  kubectl apply -f hack/mock_decision_agent.yaml
-# Remove:  kubectl delete -f hack/mock_decision_agent.yaml
+# Deploy:  kubectl apply -f deploy/manifests/mock_decision_agent.yaml
+# Remove:  kubectl delete -f deploy/manifests/mock_decision_agent.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:

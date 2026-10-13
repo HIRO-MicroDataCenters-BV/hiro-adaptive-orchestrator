@@ -1,8 +1,8 @@
 #!/bin/bash
-# hack/deploy_operator.sh
+# deploy/scripts/deploy_operator.sh
 #
 # Builds, pushes, and deploys the HIRO Adaptive Orchestrator (operator only).
-# For a full-stack deploy (operator + scheduler) use hack/deploy_full_stack.sh.
+# For a full-stack deploy (operator + scheduler) use deploy/scripts/deploy_full_stack.sh.
 #
 # ─── What one operator Deployment bundles ────────────────────────────────────
 #   This script deploys a SINGLE binary/Deployment/pod. There is nothing to
@@ -68,12 +68,12 @@
 #
 # Usage (standalone):
 #   export GITHUB_PAT_TOKEN=<token>
-#   hack/deploy_operator.sh [kubeconfig-path]
+#   deploy/scripts/deploy_operator.sh [kubeconfig-path]
 #   # If USE_MOCK_AGENT=true, also run after:
-#   #   kubectl apply -f hack/mock_decision_agent.yaml
+#   #   kubectl apply -f deploy/manifests/mock_decision_agent.yaml
 #
-# Usage (via hack/deploy_full_stack.sh — all params inherited from parent):
-#   hack/deploy_full_stack.sh [kubeconfig-path]
+# Usage (via deploy/scripts/deploy_full_stack.sh — all params inherited from parent):
+#   deploy/scripts/deploy_full_stack.sh [kubeconfig-path]
 #   # deploy_full_stack.sh handles mock agent deployment automatically.
 
 set -euo pipefail
@@ -83,7 +83,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 KUSTOMIZE="$REPO_ROOT/bin/kustomize"
 
 # ---------------------------------------------------------------------------
@@ -97,6 +97,8 @@ DOCKER_REGISTRY=ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator
 OPERATOR_IMAGE=hiro-adaptive-orchestrator-controller:latest
 
 export KUBECONFIG=${1:-~/.kube/config}
+# Absolute before main() changes cwd to the repo root.
+[[ -f "$KUBECONFIG" ]] && KUBECONFIG="$(cd "$(dirname "$KUBECONFIG")" && pwd)/$(basename "$KUBECONFIG")"
 export IMG="${DOCKER_REGISTRY}/${OPERATOR_IMAGE}"
 export CR_PAT="$GITHUB_PAT_TOKEN"
 
@@ -323,6 +325,8 @@ apply_sample_resources() {
 # ---------------------------------------------------------------------------
 
 main() {
+  # make targets and config/samples are repo-root relative; pin cwd so the script runs from anywhere.
+  cd "$REPO_ROOT"
   print_config
 
   generate_code_and_manifests
@@ -338,7 +342,7 @@ main() {
   echo ""
   echo -e "\033[32m========================================================\033[0m"
   echo -e "\033[32m  Operator deployed successfully.\033[0m"
-  echo -e "\033[32m  Run hack/deploy_full_stack.sh to also deploy the HIRO scheduler.\033[0m"
+  echo -e "\033[32m  Run deploy/scripts/deploy_full_stack.sh to also deploy the HIRO scheduler.\033[0m"
   echo -e "\033[32m========================================================\033[0m"
 }
 

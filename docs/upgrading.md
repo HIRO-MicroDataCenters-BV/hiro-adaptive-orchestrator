@@ -50,7 +50,7 @@ cd scheduler-plugin && go mod tidy
 make docker-build-scheduler SCHED_K8S_VERSION=v1.36.0
 
 # Redeploy scheduler with the new version
-SCHED_K8S_VERSION=v1.36.0 hack/deploy_scheduler.sh
+SCHED_K8S_VERSION=v1.36.0 deploy/scripts/deploy_scheduler.sh
 ```
 
 The `pin_k8s_version.sh` script uses `go mod edit` to surgically update only the `k8s.io/kubernetes` require entry and the staging module replace directives — no full file rewrite.

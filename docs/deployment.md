@@ -7,7 +7,7 @@ Referenced from the main [README's Quick Start](../README.md#quick-start), which
 ```mermaid
 flowchart LR
     D(["How do you want<br/>to deploy?"]) --> F["Helm (full stack)<br/>make helm-platform-deploy"]
-    D --> A["Scripted<br/>hack/deploy_*.sh"]
+    D --> A["Scripted<br/>deploy/scripts/deploy_*.sh"]
     D --> B["Manual Kustomize<br/>make deploy"]
     D --> C["Helm (operator only)<br/>make helm-deploy"]
     D --> E["YAML bundle<br/>dist/install.yaml"]
@@ -25,7 +25,7 @@ All deploy scripts and charts share the same parameter model: every variable has
 ## Full-Stack via Helm — umbrella chart (recommended)
 
 ```bash
-hack/deploy_full_stack_with_helm.sh [deploy|clean|destroy]
+deploy/scripts/deploy_full_stack_with_helm.sh [deploy|clean|destroy]
 ```
 
 | Action | Effect |
@@ -38,7 +38,7 @@ Prefer `clean` over `destroy` in extender mode: the chart's kube-scheduler resto
 `pre-delete` hook, so only a Helm uninstall reverts the patch. The `OrchestrationProfile` CRD is
 annotated `helm.sh/resource-policy: keep`, so it and any profiles you created survive a `clean`.
 
-Deploys everything — operator, webhook, scheduler (plugin or extender), mock agent, samples, optional bundled prerequisites — as one Helm release via the umbrella chart at `charts/hiro-adaptive-platform`, against a local Kind cluster. Creates (or reuses) the Kind cluster, builds the operator + scheduler-plugin images, loads them straight into the cluster (no registry needed), deploys everything with one `helm upgrade --install`, and health-checks the result.
+Deploys everything — operator, webhook, scheduler (plugin or extender), mock agent, samples, optional bundled prerequisites — as one Helm release via the umbrella chart at `deploy/helm/hiro-adaptive-platform`, against a local Kind cluster. Creates (or reuses) the Kind cluster, builds the operator + scheduler-plugin images, loads them straight into the cluster (no registry needed), deploys everything with one `helm upgrade --install`, and health-checks the result.
 
 **No `GITHUB_PAT_TOKEN` or registry needed** — images build locally and load directly into Kind. This is the one deploy path in this document that doesn't require a GHCR token.
 
@@ -62,17 +62,17 @@ always matches what was deployed:
 | `OTLP_ENDPOINT` | *(empty)* | OTLP gRPC collector for traces, e.g. `alloy.observability.svc:4317`. Empty disables tracing entirely |
 
 ```bash
-KIND_CLUSTER_NAME=hiro-platform-verify hack/deploy_full_stack_with_helm.sh deploy
+KIND_CLUSTER_NAME=hiro-platform-verify deploy/scripts/deploy_full_stack_with_helm.sh deploy
 
 # scrape the metrics with the bundled Prometheus, and export traces
 DEPLOY_PROMETHEUS=true OTLP_ENDPOINT=alloy.observability.svc:4317 \
-  hack/deploy_full_stack_with_helm.sh deploy
+  deploy/scripts/deploy_full_stack_with_helm.sh deploy
 
 # extender instead of the scheduler plugin — no scheduler pod, no webhook
-SCHEDULER_MODE=extender hack/deploy_full_stack_with_helm.sh deploy
+SCHEDULER_MODE=extender deploy/scripts/deploy_full_stack_with_helm.sh deploy
 
-hack/deploy_full_stack_with_helm.sh clean     # release only, cluster stays
-hack/deploy_full_stack_with_helm.sh destroy   # delete the Kind cluster
+deploy/scripts/deploy_full_stack_with_helm.sh clean     # release only, cluster stays
+deploy/scripts/deploy_full_stack_with_helm.sh destroy   # delete the Kind cluster
 ```
 
 For a real cluster (not Kind), deploy the same chart directly — no Kind-specific env vars apply here; instead, configuration is the Helm chart's own `values.yaml` (scheduler mode, webhook, mock agent, bundled prerequisites, etc.):
@@ -88,42 +88,42 @@ One run deploys everything that is enabled — the chart computes the PlacementS
 HELM_EXTRA_ARGS="--set hiro-operator.config.REBALANCE_MIN_CPU=100m" make helm-platform-deploy
 ```
 
-See [charts/hiro-adaptive-platform/README.md](../charts/hiro-adaptive-platform/README.md#values-reference) for the full values reference and worked examples, and its [Verification and CI](../charts/hiro-adaptive-platform/README.md#verification-and-ci) section for how CI exercises this same path (`.github/workflows/platform-verify-chart.yml` runs on every push/PR).
+See [deploy/helm/hiro-adaptive-platform/README.md](../deploy/helm/hiro-adaptive-platform/README.md#values-reference) for the full values reference and worked examples, and its [Verification and CI](../deploy/helm/hiro-adaptive-platform/README.md#verification-and-ci) section for how CI exercises this same path (`.github/workflows/platform-verify-chart.yml` runs on every push/PR).
 
 ## Full-Stack via Scripts (operator + mock agent + scheduler)
 
 ```mermaid
 flowchart TD
     Start(["I want to..."]) --> Q1{"try it locally,<br/>no scheduler changes?"}
-    Q1 -- yes --> C1["hack/deploy_full_stack.sh"]
+    Q1 -- yes --> C1["deploy/scripts/deploy_full_stack.sh"]
     Q1 -- no --> Q2{"patch the default<br/>kube-scheduler?"}
-    Q2 -- yes --> C2["DEPLOY_EXTENDER=true<br/>hack/deploy_full_stack.sh"]
+    Q2 -- yes --> C2["DEPLOY_EXTENDER=true<br/>deploy/scripts/deploy_full_stack.sh"]
     Q2 -- no --> Q3{"run a dedicated<br/>scheduler + webhook?"}
-    Q3 -- yes --> C3["DEPLOY_SCHEDULER_PLUGIN=true<br/>hack/deploy_full_stack.sh"]
+    Q3 -- yes --> C3["DEPLOY_SCHEDULER_PLUGIN=true<br/>deploy/scripts/deploy_full_stack.sh"]
     Q3 -- no --> Q4{"use a real AI agent,<br/>not the mock?"}
-    Q4 -- yes --> C4["USE_MOCK_AGENT=false ...<br/>hack/deploy_full_stack.sh"]
+    Q4 -- yes --> C4["USE_MOCK_AGENT=false ...<br/>deploy/scripts/deploy_full_stack.sh"]
 ```
 
 ```bash
 export GITHUB_PAT_TOKEN=<your-ghcr-token>
 
 # Operator + mock agent (default — no scheduler integration)
-hack/deploy_full_stack.sh
+deploy/scripts/deploy_full_stack.sh
 
 # Operator + mock agent + extender (patches default kube-scheduler)
-DEPLOY_EXTENDER=true hack/deploy_full_stack.sh
+DEPLOY_EXTENDER=true deploy/scripts/deploy_full_stack.sh
 
 # Operator + mock agent + custom scheduler plugin + mutating webhook
 # Installs cert-manager, deploys webhook overlay, and auto-enables TLS.
 # Pods governed by an OrchestrationProfile automatically get schedulerName: hiro-scheduler.
-DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_full_stack.sh
+DEPLOY_SCHEDULER_PLUGIN=true deploy/scripts/deploy_full_stack.sh
 
 # Real AI agent, custom namespace
 USE_MOCK_AGENT=false DECISION_AGENT_URL=http://ai.example.com:8080 \
-  NAMESPACE=my-ns hack/deploy_full_stack.sh
+  NAMESPACE=my-ns deploy/scripts/deploy_full_stack.sh
 
 # Custom namespace + name prefix + extender
-NAMESPACE=my-ns NAME_PREFIX=my-org- DEPLOY_EXTENDER=true hack/deploy_full_stack.sh
+NAMESPACE=my-ns NAME_PREFIX=my-org- DEPLOY_EXTENDER=true deploy/scripts/deploy_full_stack.sh
 ```
 
 Runs these phases in order:
@@ -134,7 +134,7 @@ Runs these phases in order:
 | 2 | `install_prerequisites` — install cert-manager and wait for it to be ready | `DEPLOY_SCHEDULER_PLUGIN=true` |
 | 3 | `cleanup_conflicting_integration` — auto-remove the opposing scheduler integration if one is running (plugin ↔ extender) | Always |
 | 4 | `deploy_operator.sh` — build, push, and deploy the operator (base or webhook overlay) | Always |
-| 5 | `deploy_mock_agent` — deploy `hack/mock_decision_agent.yaml` into the operator namespace | `USE_MOCK_AGENT=true` (default) |
+| 5 | `deploy_mock_agent` — deploy `deploy/manifests/mock_decision_agent.yaml` into the operator namespace | `USE_MOCK_AGENT=true` (default) |
 | 6 | `wait_for_placement_server` — wait for operator deployment rollout to complete | Always |
 | 7 | `deploy_scheduler.sh` — build, push, and deploy the HIRO scheduler pod | `DEPLOY_SCHEDULER_PLUGIN=true` |
 | 8 | `deploy_scheduler_webhook` — wait for cert-manager to issue the TLS cert, then set `ENABLE_WEBHOOKS=true` and restart the operator | `DEPLOY_SCHEDULER_PLUGIN=true` |
@@ -185,7 +185,7 @@ deploy_full_stack.sh  (master parameter sheet — all vars defined here)
         │           PlacementServer / DecisionClient constructed with those values
         │
         ├──► Phase 5: deploy_mock_agent  (when USE_MOCK_AGENT=true)
-        │         kubectl apply -f hack/mock_decision_agent.yaml
+        │         kubectl apply -f deploy/manifests/mock_decision_agent.yaml
         │         sed substitutes namespace before apply
         │         mock-decision-agent Service → http://mock-decision-agent:8080
         │
@@ -340,7 +340,7 @@ of these actually controls and why.
 
 ```bash
 export GITHUB_PAT_TOKEN=<token>
-hack/deploy_operator.sh [kubeconfig-path]
+deploy/scripts/deploy_operator.sh [kubeconfig-path]
 ```
 
 ```mermaid
@@ -370,7 +370,7 @@ Steps performed:
 
 > **Mock agent:** when running `deploy_operator.sh` standalone with `USE_MOCK_AGENT=true`, deploy the mock agent separately:
 > ```bash
-> kubectl apply -f hack/mock_decision_agent.yaml
+> kubectl apply -f deploy/manifests/mock_decision_agent.yaml
 > ```
 > When using `deploy_full_stack.sh`, the mock agent is deployed automatically in Phase 5.
 
@@ -427,7 +427,7 @@ The operator must already be running before deploying the scheduler.
 
 ```bash
 export GITHUB_PAT_TOKEN=<token>
-hack/deploy_scheduler.sh [kubeconfig-path]
+deploy/scripts/deploy_scheduler.sh [kubeconfig-path]
 ```
 
 ```mermaid
@@ -479,10 +479,10 @@ Deploys `hiro-scheduler` as a standalone scheduler pod. Pods opt in by setting `
 
 ```bash
 # Full deploy — installs cert-manager, deploys webhook overlay, enables webhook after TLS cert is ready
-DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_full_stack.sh
+DEPLOY_SCHEDULER_PLUGIN=true deploy/scripts/deploy_full_stack.sh
 
 # Standalone scheduler deploy (operator must already be running)
-hack/deploy_scheduler.sh
+deploy/scripts/deploy_scheduler.sh
 
 # Verify
 kubectl get pods -n hiro-adaptive-orchestrator-system -l app=hiro-scheduler
@@ -524,16 +524,16 @@ For managed Kubernetes clusters (GKE Autopilot, EKS Fargate, etc.) where a custo
 
 ```bash
 # Operator must already be running
-hack/deploy_extender.sh [kubeconfig-path]
+deploy/scripts/deploy_extender.sh [kubeconfig-path]
 
 # Custom namespace / service name
-NAMESPACE=my-ns PLACEMENT_SERVICE_NAME=my-svc hack/deploy_extender.sh
+NAMESPACE=my-ns PLACEMENT_SERVICE_NAME=my-svc deploy/scripts/deploy_extender.sh
 
 # Air-gapped clusters (supply a local image with python3 + pyyaml)
-PATCHER_IMAGE=my-registry/python3-pyyaml:latest hack/deploy_extender.sh
+PATCHER_IMAGE=my-registry/python3-pyyaml:latest deploy/scripts/deploy_extender.sh
 
 # Roll back — restores original manifest from backup, removes ConfigMaps
-hack/undeploy_extender.sh
+deploy/scripts/undeploy_extender.sh
 ```
 
 See [Extender Approach](#extender-approach) for the full step-by-step breakdown.
@@ -570,17 +570,17 @@ Score mapping: AI agent returns scores in `[0, 100]`. The extender normalises to
 
 #### Deploy
 
-`hack/deploy_extender.sh` is a fully automated end-to-end deploy:
+`deploy/scripts/deploy_extender.sh` is a fully automated end-to-end deploy:
 
 ```bash
 # As part of full-stack
-DEPLOY_EXTENDER=true hack/deploy_full_stack.sh
+DEPLOY_EXTENDER=true deploy/scripts/deploy_full_stack.sh
 
 # Standalone (operator must be running)
-hack/deploy_extender.sh [kubeconfig-path]
+deploy/scripts/deploy_extender.sh [kubeconfig-path]
 
 # Roll back
-hack/undeploy_extender.sh
+deploy/scripts/undeploy_extender.sh
 ```
 
 Steps performed automatically:
@@ -589,7 +589,7 @@ Steps performed automatically:
 |------|-------------|
 | 1 | `resolve_placement_url()` — resolves placement service ClusterIP; falls back to DNS with a warning if unavailable |
 | 2 | Renders `hiro-scheduler-config` ConfigMap (`urlPrefix: http://<ClusterIP>:8090`) and applies to `kube-system` |
-| 3 | Creates `hiro-patch-script` ConfigMap from `hack/patch_scheduler_static_pod.py` |
+| 3 | Creates `hiro-patch-script` ConfigMap from `deploy/scripts/patch_scheduler_static_pod.py` |
 | 4 | Runs privileged Job on the control-plane node: copies config to `/etc/kubernetes/hiro-scheduler-config.yaml`; runs patch script |
 | 5 | Patch script adds `--config` flag, `hostPath` volume, and `volumeMount` to the scheduler manifest (idempotent); **always** updates `hiro.io/last-updated` annotation |
 | 6 | Kubelet detects the annotation change via inotify and restarts kube-scheduler with the new config |
@@ -628,10 +628,10 @@ sequenceDiagram
     Sched->>Mock: POST decision path (no rebalanceContext)
     Mock-->>Sched: nodeScores — each candidate random in [0, 100]
     Sched->>Mock: POST same path (rebalanceContext set)
-    Mock-->>Sched: action Move (~10%) or NoOp, per hack/mock_decision_agent.yaml
+    Mock-->>Sched: action Move (~10%) or NoOp, per deploy/manifests/mock_decision_agent.yaml
 ```
 
-For local and CI testing a mock agent is included at `hack/mock_decision_agent.yaml`. It handles two kinds of requests on the same path, distinguished by whether the body carries a `rebalanceContext` (see [internal/rebalance/README.md](../internal/rebalance/README.md#dispatch--acting-on-the-ais-decision)): initial placement gets every candidate node scored randomly in `[0, 100]`; a rebalance evaluation gets a randomly chosen `Move` or `NoOp` recommendation.
+For local and CI testing a mock agent is included at `deploy/manifests/mock_decision_agent.yaml`. It handles two kinds of requests on the same path, distinguished by whether the body carries a `rebalanceContext` (see [internal/rebalance/README.md](../internal/rebalance/README.md#dispatch--acting-on-the-ais-decision)): initial placement gets every candidate node scored randomly in `[0, 100]`; a rebalance evaluation gets a randomly chosen `Move` or `NoOp` recommendation.
 
 ```
 POST /api/v1/agent/placement/decision  (no rebalanceContext) →  nodeScores: [{nodeName, score}, ...]
@@ -643,17 +643,17 @@ The mock agent runs as a Python 3 `http.server` in a `python:3.11-slim` containe
 
 ```bash
 # Deployed automatically in Phase 5 when USE_MOCK_AGENT=true (the default)
-DEPLOY_EXTENDER=true hack/deploy_full_stack.sh
+DEPLOY_EXTENDER=true deploy/scripts/deploy_full_stack.sh
 
 # Deploy manually
-kubectl apply -f hack/mock_decision_agent.yaml
+kubectl apply -f deploy/manifests/mock_decision_agent.yaml
 
 # Verify
 kubectl get pods -n hiro-adaptive-orchestrator-system -l app=mock-decision-agent
 kubectl logs -n hiro-adaptive-orchestrator-system -l app=mock-decision-agent
 
 # Remove
-kubectl delete -f hack/mock_decision_agent.yaml
+kubectl delete -f deploy/manifests/mock_decision_agent.yaml
 ```
 
 The mock agent listens at `http://mock-decision-agent:8080` inside the operator namespace, matching the default `DECISION_AGENT_URL`.
@@ -661,7 +661,7 @@ The mock agent listens at `http://mock-decision-agent:8080` inside the operator 
 To switch to a real AI agent:
 
 ```bash
-USE_MOCK_AGENT=false DECISION_AGENT_URL=http://ai.example.com:8080 hack/deploy_full_stack.sh
+USE_MOCK_AGENT=false DECISION_AGENT_URL=http://ai.example.com:8080 deploy/scripts/deploy_full_stack.sh
 ```
 
 ## Manual Kustomize

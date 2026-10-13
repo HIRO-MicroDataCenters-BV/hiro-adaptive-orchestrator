@@ -126,7 +126,7 @@ jobs:
             fi
           fi
 
-      - name: Deploy charts/hiro-adaptive-platform
+      - name: Deploy deploy/helm/hiro-adaptive-platform
         run: |
           export KUBECONFIG="$HOME/.kube/config"
           ORCHESTRATOR_IMAGE_REPO="ghcr.io/$GHCR_REPO_LC/hiro-adaptive-orchestrator-controller:${VERSION}"

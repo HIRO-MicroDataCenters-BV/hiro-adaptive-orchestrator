@@ -18,7 +18,7 @@ dependencies:
   - name: hiro-adaptive-orchestrator
     alias: hiro-operator
     version: "*"
-    repository: "file://../../dist/chart"
+    repository: "file://../../../dist/chart"
     condition: hiro-operator.enabled
 
   # Optional, off by default — bundle a cluster-wide prerequisite as part of

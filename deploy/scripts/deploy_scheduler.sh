@@ -1,9 +1,9 @@
 #!/bin/bash
-# hack/deploy_scheduler.sh
+# deploy/scripts/deploy_scheduler.sh
 #
 # Builds, pushes, and deploys the HIRO scheduler plugin.
 # Expects the operator to already be running (PlacementServer must be reachable).
-# For a full-stack deploy (operator + scheduler) use hack/deploy_full_stack.sh.
+# For a full-stack deploy (operator + scheduler) use deploy/scripts/deploy_full_stack.sh.
 #
 # ─── Required ────────────────────────────────────────────────────────────────
 #   GITHUB_PAT_TOKEN          GitHub PAT with write:packages scope
@@ -29,10 +29,10 @@
 #
 # Usage (standalone):
 #   export GITHUB_PAT_TOKEN=<token>
-#   hack/deploy_scheduler.sh [kubeconfig-path]
+#   deploy/scripts/deploy_scheduler.sh [kubeconfig-path]
 #
-# Usage (via hack/deploy_full_stack.sh — all params inherited from parent):
-#   hack/deploy_full_stack.sh [kubeconfig-path]
+# Usage (via deploy/scripts/deploy_full_stack.sh — all params inherited from parent):
+#   deploy/scripts/deploy_full_stack.sh [kubeconfig-path]
 
 set -euo pipefail
 
@@ -41,7 +41,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 KUSTOMIZE="$REPO_ROOT/bin/kustomize"
 
 GITHUB_USERNAME=${GITHUB_USERNAME:-sskrishnav}

@@ -1,5 +1,5 @@
 #!/bin/bash
-# hack/undeploy_extender.sh
+# deploy/scripts/undeploy_extender.sh
 #
 # Restores the kube-scheduler static pod manifest from the backup written by
 # deploy_extender.sh, then removes the HIRO extender ConfigMaps.
@@ -12,7 +12,7 @@
 #   4. Waits for kube-scheduler to be Ready without the extender.
 #
 # Usage:
-#   hack/undeploy_extender.sh [kubeconfig-path]
+#   deploy/scripts/undeploy_extender.sh [kubeconfig-path]
 
 set -euo pipefail
 

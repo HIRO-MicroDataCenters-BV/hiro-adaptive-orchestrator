@@ -1,11 +1,11 @@
 #!/bin/bash
-# hack/deploy_full_stack_with_helm.sh
+# deploy/scripts/deploy_full_stack_with_helm.sh
 #
-# Local verification for charts/hiro-adaptive-platform: regenerates
-# manifests/code (same as hack/deploy_operator.sh), creates (or reuses) a
+# Local verification for deploy/helm/hiro-adaptive-platform: regenerates
+# manifests/code (same as deploy/scripts/deploy_operator.sh), creates (or reuses) a
 # Kind cluster, builds the operator + scheduler-plugin images, loads them
 # straight into the cluster (no registry needed — fine for local testing,
-# see charts/hiro-adaptive-platform/README.md), deploys the full stack, and
+# see deploy/helm/hiro-adaptive-platform/README.md), deploys the full stack, and
 # checks it came up healthy.
 #
 # Local counterpart to .github/workflows/platform-verify-chart.yml, which runs
@@ -45,10 +45,10 @@
 #                         to empty, since Prometheus grants itself already.
 #
 # No GITHUB_PAT_TOKEN/registry needed — images are built locally and loaded
-# directly into Kind, unlike hack/deploy_full_stack.sh which pushes to GHCR.
+# directly into Kind, unlike deploy/scripts/deploy_full_stack.sh which pushes to GHCR.
 #
 # ─── Usage ───────────────────────────────────────────────────────────────────
-#   hack/deploy_full_stack_with_helm.sh [deploy|clean|destroy]
+#   deploy/scripts/deploy_full_stack_with_helm.sh [deploy|clean|destroy]
 #
 #   deploy (default)   Build images, load into Kind, deploy, health-check.
 #   clean              Uninstall the Helm release, keep the Kind cluster. In
@@ -64,7 +64,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Pin to go.mod's own version rather than whatever's linked as the system
 # `go` — golangci-lint's vendored export-data reader lags behind very recent
@@ -117,7 +117,7 @@ GRANT_OPERATOR_SA=false
 step() { printf '\n==> %s\n' "$*"; }
 
 # print_banner <text> <ansi-color-code> — boxed heading, same style as
-# hack/deploy_full_stack.sh uses for its own summary/access-URL sections.
+# deploy/scripts/deploy_full_stack.sh uses for its own summary/access-URL sections.
 print_banner() {
   local text="$1" color="$2" width=58
   local border pad left right
@@ -178,7 +178,7 @@ check_prerequisites() {
   done
 }
 
-# Same as hack/deploy_operator.sh's generate_code_and_manifests(), minus
+# Same as deploy/scripts/deploy_operator.sh's generate_code_and_manifests(), minus
 # `make install`/`make build` (CRDs are installed via the Helm chart itself;
 # the operator is built as a Docker image, not a local binary here). IMG is
 # read from config/manager/kustomization.yaml's own committed default rather
@@ -274,7 +274,7 @@ load_images_into_kind() {
 # certificate generated in-chart, ENABLE_WEBHOOKS / HIRO_SCHEDULER_NAME derived
 # from the same flags — so this is just values.
 deploy_stack() {
-  step "Deploying charts/hiro-adaptive-platform (single helm run)"
+  step "Deploying deploy/helm/hiro-adaptive-platform (single helm run)"
 
   local operator_args scheduler_args="" tracing_args="" reader_args=""
   operator_args="\
@@ -519,7 +519,7 @@ print_access_urls() {
     echo "      Prometheus scrapes both already. To curl them by hand, grant"
     echo "      yourself a reader first:"
     echo ""
-    echo "        helm upgrade $HELM_PLATFORM_RELEASE charts/hiro-adaptive-platform \\"
+    echo "        helm upgrade $HELM_PLATFORM_RELEASE deploy/helm/hiro-adaptive-platform \\"
     echo "          -n $HELM_NAMESPACE --reuse-values \\"
     echo "          --set observability.metricsReaders={${HELM_NAMESPACE}:${sa}}"
     echo ""
@@ -552,10 +552,10 @@ print_access_urls() {
 print_teardown_hint() {
   print_subhead "Teardown"
   echo "      Release only, keeps the cluster:"
-  echo "        hack/deploy_full_stack_with_helm.sh clean"
+  echo "        deploy/scripts/deploy_full_stack_with_helm.sh clean"
   echo ""
   echo "      Delete the Kind cluster:"
-  echo "        KIND_CLUSTER_NAME=$KIND_CLUSTER_NAME hack/deploy_full_stack_with_helm.sh destroy"
+  echo "        KIND_CLUSTER_NAME=$KIND_CLUSTER_NAME deploy/scripts/deploy_full_stack_with_helm.sh destroy"
   echo ""
 }
 
@@ -571,18 +571,18 @@ print_scrape_and_tracing_guide() {
   if [ "$DEPLOY_PROMETHEUS" != "true" ]; then
     print_subhead "Scraping — metrics are exposed but nothing collects them"
     echo "      Bundled kube-prometheus-stack:"
-    echo "        DEPLOY_PROMETHEUS=true hack/deploy_full_stack_with_helm.sh deploy"
+    echo "        DEPLOY_PROMETHEUS=true deploy/scripts/deploy_full_stack_with_helm.sh deploy"
     echo ""
     echo "      Or your own Prometheus:"
     echo "        METRICS_READER_SA=<ns>:<prometheus-sa> \\"
-    echo "          hack/deploy_full_stack_with_helm.sh deploy"
+    echo "          deploy/scripts/deploy_full_stack_with_helm.sh deploy"
     echo ""
     echo "        then point its serviceMonitorNamespaceSelector at '$HELM_NAMESPACE'."
     if [ "$SCHEDULER_MODE" = "plugin" ]; then
       echo ""
       echo "      The operator's ServiceMonitor selects control-plane=controller-manager,"
       echo "      which misses the scheduler pod — turn its own one on too:"
-      echo "        helm upgrade $HELM_PLATFORM_RELEASE charts/hiro-adaptive-platform \\"
+      echo "        helm upgrade $HELM_PLATFORM_RELEASE deploy/helm/hiro-adaptive-platform \\"
       echo "          -n $HELM_NAMESPACE --reuse-values \\"
       echo "          --set scheduler.plugin.metrics.serviceMonitor.enabled=true"
     fi
@@ -593,7 +593,7 @@ print_scrape_and_tracing_guide() {
     print_subhead "Tracing — no spans are exported"
     echo "      Point at an OTLP gRPC collector (Alloy or Tempo):"
     echo "        OTLP_ENDPOINT=alloy.observability.svc:4317 \\"
-    echo "          hack/deploy_full_stack_with_helm.sh deploy"
+    echo "          deploy/scripts/deploy_full_stack_with_helm.sh deploy"
     echo ""
     if [ "$SCHEDULER_MODE" = "plugin" ]; then
       echo "      Sets it on both the operator and the scheduler, so one trace"
@@ -645,8 +645,8 @@ run_clean() {
 
   echo ""
   echo "  Kind cluster '$KIND_CLUSTER_NAME' is still running — redeploy with:"
-  echo "       KIND_CLUSTER_NAME=$KIND_CLUSTER_NAME hack/deploy_full_stack_with_helm.sh deploy"
-  echo "  To delete the cluster too: hack/deploy_full_stack_with_helm.sh destroy"
+  echo "       KIND_CLUSTER_NAME=$KIND_CLUSTER_NAME deploy/scripts/deploy_full_stack_with_helm.sh deploy"
+  echo "  To delete the cluster too: deploy/scripts/deploy_full_stack_with_helm.sh destroy"
   echo ""
 }
 

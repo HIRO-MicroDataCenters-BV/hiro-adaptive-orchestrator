@@ -404,7 +404,7 @@ func main() {
 	// Sets spec.schedulerName automatically on pods governed by an OrchestrationProfile,
 	// removing the need for users to set it manually in their pod specs.
 	// Controlled by ENABLE_WEBHOOKS (default "false" in manager.yaml;
-	// set to "true" by hack/deploy_webhook.sh when deploying with the scheduler plugin).
+	// set to "true" by deploy/scripts/deploy_full_stack.sh or the Helm chart in plugin mode).
 	if enableWebhooks {
 		if err := webhookv1.SetupPodWebhookWithManager(mgr, contextBuilder, hiroSchedulerName); err != nil {
 			setupLog.Error(err, "Failed to create webhook", "webhook", "Pod")

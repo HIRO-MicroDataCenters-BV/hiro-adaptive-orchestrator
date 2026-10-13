@@ -1,5 +1,5 @@
 #!/bin/bash
-# hack/install_metrics_server.sh
+# deploy/scripts/install_metrics_server.sh
 #
 # Installs metrics-server (metrics.k8s.io) if it isn't already present in
 # the cluster. Idempotent — safe to call on every deploy; does nothing if
@@ -21,10 +21,10 @@
 #                                 real clusters with valid kubelet certs.
 #
 # Usage (standalone):
-#   hack/install_metrics_server.sh [kubeconfig-path]
+#   deploy/scripts/install_metrics_server.sh [kubeconfig-path]
 #
-# Usage (via hack/deploy_full_stack.sh):
-#   INSTALL_METRICS_SERVER=false hack/deploy_full_stack.sh   # to skip it
+# Usage (via deploy/scripts/deploy_full_stack.sh):
+#   INSTALL_METRICS_SERVER=false deploy/scripts/deploy_full_stack.sh   # to skip it
 
 set -euo pipefail
 

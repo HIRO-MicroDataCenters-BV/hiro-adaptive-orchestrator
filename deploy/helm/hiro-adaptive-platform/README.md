@@ -6,7 +6,7 @@ webhook, a custom scheduler (plugin or extender — pick one), an opt-in mock
 decision agent for demos, and optional bundled cluster prerequisites
 (cert-manager, metrics-server, kube-prometheus-stack).
 
-It is an additive, parallel path to `hack/deploy_full_stack.sh` — see
+It is an additive, parallel path to `deploy/scripts/deploy_full_stack.sh` — see
 [When to use this vs. the shell script](#when-to-use-this-vs-deploy_full_stacksh)
 below.
 
@@ -44,7 +44,7 @@ HELM_EXTRA_ARGS="--set scheduler.mode=plugin --set scheduler.plugin.image.tag=v0
   make helm-platform-deploy
 ```
 
-Or use `helm` directly against `charts/hiro-adaptive-platform` with a
+Or use `helm` directly against `deploy/helm/hiro-adaptive-platform` with a
 `-f custom-values.yaml` — everything below is a plain Helm chart, the
 Makefile targets are just convenience wrappers.
 
@@ -65,7 +65,7 @@ operator, scheduler, webhook, mock agent and samples go up together:
 Typical demo install, one command:
 
 ```sh
-helm upgrade --install hiro charts/hiro-adaptive-platform -n hiro-system --create-namespace --wait \
+helm upgrade --install hiro deploy/helm/hiro-adaptive-platform -n hiro-system --create-namespace --wait \
   --set mockAgent.enable=true --set samples.enabled=true \
   --set scheduler.mode=plugin --set scheduler.plugin.image.tag=<tag> \
   --set webhook.enable=true
@@ -75,7 +75,7 @@ helm upgrade --install hiro charts/hiro-adaptive-platform -n hiro-system --creat
 
 | Component | Value that enables it | Notes |
 |---|---|---|
-| Operator (CRD, RBAC, manager Deployment) | `hiro-operator.enabled` (default `true`) | Local `file://../../dist/chart` dependency, aliased `hiro-operator`. Never hand-edited — it's kubebuilder-generated and gets wiped on every `kubebuilder edit --plugins=helm/v2-alpha` regen. |
+| Operator (CRD, RBAC, manager Deployment) | `hiro-operator.enabled` (default `true`) | Local `file://../../../dist/chart` dependency, aliased `hiro-operator`. Never hand-edited — it's kubebuilder-generated and gets wiped on every `kubebuilder edit --plugins=helm/v2-alpha` regen. |
 | Pod-mutating webhook | `webhook.enable` | Requires `scheduler.mode: plugin` — enforced by a `fail()` check at render time (see [Webhook requires the scheduler plugin](#webhook-requires-the-scheduler-plugin)). |
 | Webhook serving certificate | `webhook.tls.mode` (`helm` default, `certManager`, `existingSecret`) | `helm` generates a self-signed CA + cert in-chart and keeps it across upgrades. `certManager` needs cert-manager installed beforehand. See [Webhook TLS](#webhook-tls). |
 | Scheduler plugin (standalone scheduler Deployment) | `scheduler.mode: plugin` | Pods opt in via `spec.schedulerName` — the webhook sets this automatically, or you can set it by hand without the webhook. |
@@ -289,7 +289,7 @@ This isn't an arbitrary restriction: the webhook's only job is setting
 claims that name and mutated pods stick `Pending` forever. With
 `scheduler.mode: extender`, the *default* scheduler already handles every
 pod via the extender patch, so setting `schedulerName` would misroute them
-away from it instead. `hack/deploy_full_stack.sh` has the same coupling —
+away from it instead. `deploy/scripts/deploy_full_stack.sh` has the same coupling —
 its webhook phase has no independent toggle at all, it's driven 1:1 by
 whether the scheduler plugin is being deployed.
 
@@ -359,7 +359,7 @@ key living alongside its real config breaks validation. The other two
 dependencies don't currently enforce this, but the same split is applied to
 all three for consistency.
 
-Two behaviors from `hack/deploy_full_stack.sh` aren't replicated here:
+Two behaviors from `deploy/scripts/deploy_full_stack.sh` aren't replicated here:
 
 - The script auto-detects and skips installing a component if something
   similar already exists cluster-wide. Helm has no equivalent — enabling
@@ -386,7 +386,7 @@ kubectl delete crd orchestrationprofiles.orchestration.hiro.io
 Three ways to exercise this chart end-to-end, beyond `helm lint`/`helm
 template`:
 
-- **`hack/deploy_full_stack_with_helm.sh`** — local, against a Kind cluster.
+- **`deploy/scripts/deploy_full_stack_with_helm.sh`** — local, against a Kind cluster.
   Regenerates `dist/chart` from source, builds the operator + scheduler
   images, loads them into Kind (no registry needed), deploys everything
   with one `helm upgrade --install`, and health-checks the result. Writes a standalone
@@ -396,7 +396,7 @@ template`:
   `HELM_PLATFORM_RELEASE`, `SCHED_NAME`, `SCHEDULER_MODE`,
   `USE_MOCK_AGENT`, `DEPLOY_SAMPLES`, `DEPLOY_PROMETHEUS` and
   `OTLP_ENDPOINT` to pick which components get deployed. Usage:
-  `hack/deploy_full_stack_with_helm.sh [deploy|clean|destroy]` — `clean`
+  `deploy/scripts/deploy_full_stack_with_helm.sh [deploy|clean|destroy]` — `clean`
   uninstalls the release and keeps the cluster, `destroy` deletes it.
 - **`.github/workflows/platform-verify-chart.yml`** — same idea in CI, on
   every push/PR, against a throwaway Kind cluster created inside the job.
@@ -411,7 +411,7 @@ template`:
 
 ## When to use this vs. `deploy_full_stack.sh`
 
-`hack/deploy_full_stack.sh` is the faster path to a working demo cluster:
+`deploy/scripts/deploy_full_stack.sh` is the faster path to a working demo cluster:
 every knob is scriptable in one imperative run, it auto-skips installing a
 component that already exists, and it self-heals a previously failed
 install. This chart trades those conveniences for repeatable, upgradeable

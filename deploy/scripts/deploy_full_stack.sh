@@ -1,5 +1,5 @@
 #!/bin/bash
-# hack/deploy_full_stack.sh
+# deploy/scripts/deploy_full_stack.sh
 #
 # Full-stack deploy: HIRO Adaptive Orchestrator (operator) + optional
 # scheduler integration (plugin or extender).
@@ -9,9 +9,9 @@
 # but when called from here the exports below take precedence.
 #
 # To deploy components individually:
-#   Operator only  : hack/deploy_operator.sh
-#   Scheduler only : hack/deploy_scheduler.sh
-#   Extender only  : hack/deploy_extender.sh
+#   Operator only  : deploy/scripts/deploy_operator.sh
+#   Scheduler only : deploy/scripts/deploy_scheduler.sh
+#   Extender only  : deploy/scripts/deploy_extender.sh
 #
 # ─── Required ────────────────────────────────────────────────────────────────
 #   GITHUB_PAT_TOKEN          GitHub PAT with write:packages scope
@@ -30,7 +30,7 @@
 #
 # ─── Operator — Decision Agent ───────────────────────────────────────────────
 #   USE_MOCK_AGENT            true|false                  (default: true)
-#                             When true, deploys hack/mock_decision_agent.yaml
+#                             When true, deploys deploy/manifests/mock_decision_agent.yaml
 #                             and sets DECISION_AGENT_URL automatically.
 #   DECISION_AGENT_URL        required when USE_MOCK_AGENT=false
 #   DECISION_AGENT_PATH       agent API path              (default: /api/v1/agent/placement/decision)
@@ -47,7 +47,7 @@
 # ─── metrics-server (rebalance engine CPU/Memory triggers) ───────────────────
 #   INSTALL_METRICS_SERVER     true|false                  (default: true)
 #                              Idempotent — skips if already installed.
-#                              See hack/install_metrics_server.sh.
+#                              See deploy/scripts/install_metrics_server.sh.
 #   METRICS_SERVER_VERSION     release tag to install       (default: latest)
 #   METRICS_SERVER_INSECURE_TLS true|false                  (default: true)
 #                              Needed on kind/minikube/k3d; set false on
@@ -56,7 +56,7 @@
 # ─── Prometheus Operator (scrape this repo's own Prometheus metrics) ─────────
 #   DEPLOY_PROMETHEUS_OPERATOR     true|false                  (default: true)
 #                                  Installs kube-prometheus-stack as its own
-#                                  Helm release (see hack/install_prometheus_operator.sh)
+#                                  Helm release (see deploy/scripts/install_prometheus_operator.sh)
 #                                  and enables config/prometheus (the ServiceMonitor
 #                                  scaffold) in the kustomize overlay. See
 #                                  docs/instrumentation.md for what gets exposed.
@@ -131,18 +131,18 @@
 #   export GITHUB_PAT_TOKEN=<token>
 #
 #   # Operator + mock agent (default)
-#   hack/deploy_full_stack.sh [kubeconfig-path]
+#   deploy/scripts/deploy_full_stack.sh [kubeconfig-path]
 #
 #   # Operator + custom scheduler plugin
-#   DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_full_stack.sh [kubeconfig-path]
+#   DEPLOY_SCHEDULER_PLUGIN=true deploy/scripts/deploy_full_stack.sh [kubeconfig-path]
 #
 #   # Operator + extender (patches default kube-scheduler)
-#   DEPLOY_EXTENDER=true hack/deploy_full_stack.sh [kubeconfig-path]
+#   DEPLOY_EXTENDER=true deploy/scripts/deploy_full_stack.sh [kubeconfig-path]
 #
 #   # Real AI agent, custom namespace, scheduler plugin
 #   USE_MOCK_AGENT=false DECISION_AGENT_URL=http://ai.example.com:8080 \
 #     NAMESPACE=my-ns DEPLOY_SCHEDULER_PLUGIN=true \
-#     hack/deploy_full_stack.sh [kubeconfig-path]
+#     deploy/scripts/deploy_full_stack.sh [kubeconfig-path]
 
 set -euo pipefail
 
@@ -151,7 +151,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 KUBECONFIG_PATH=${1:-~/.kube/config}
 
 # ---------------------------------------------------------------------------
@@ -218,7 +218,7 @@ WEBHOOK_EXCLUDE_NAMESPACES=${WEBHOOK_EXCLUDE_NAMESPACES:-kube-system,kube-public
 
 # ---------------------------------------------------------------------------
 # metrics-server — powers the rebalance engine's CPU/Memory triggers.
-# See hack/install_metrics_server.sh.
+# See deploy/scripts/install_metrics_server.sh.
 # ---------------------------------------------------------------------------
 
 export INSTALL_METRICS_SERVER=${INSTALL_METRICS_SERVER:-true}
@@ -227,7 +227,7 @@ export METRICS_SERVER_INSECURE_TLS=${METRICS_SERVER_INSECURE_TLS:-true}
 
 # ---------------------------------------------------------------------------
 # Prometheus Operator — lets Prometheus scrape this repo's own metrics
-# (internal/metrics). See hack/install_prometheus_operator.sh.
+# (internal/metrics). See deploy/scripts/install_prometheus_operator.sh.
 # ---------------------------------------------------------------------------
 
 export DEPLOY_PROMETHEUS_OPERATOR=${DEPLOY_PROMETHEUS_OPERATOR:-true}
@@ -350,7 +350,7 @@ print_config() {
   echo ""
   echo "  ── Decision Agent ────────────────────────────────────────"
   if [ "$USE_MOCK_AGENT" = "true" ]; then
-  echo "    Mode                   : MOCK  (hack/mock_decision_agent.yaml)"
+  echo "    Mode                   : MOCK  (deploy/manifests/mock_decision_agent.yaml)"
   else
   echo "    Mode                   : REAL"
   echo "    URL                    : $DECISION_AGENT_URL"
@@ -564,7 +564,7 @@ check_prerequisites() {
 #                   CPUThreshold/MemoryThreshold trigger conditions
 #                   (internal/rebalance/pressure.go). Everything else works
 #                   fine without it; those two conditions just never fire.
-#                   See hack/install_metrics_server.sh.
+#                   See deploy/scripts/install_metrics_server.sh.
 #   prometheus-operator (default off) — required for monitoring the cluster
 #                   components. Installs Prometheus, Alertmanager, and Grafana.
 #
@@ -604,7 +604,7 @@ install_prerequisites() {
 
   # ── metrics-server ──────────────────────────────────────────────────────
   # Powers the rebalance engine's CPUThreshold/MemoryThreshold triggers.
-  # Idempotent — hack/install_metrics_server.sh skips if already installed.
+  # Idempotent — deploy/scripts/install_metrics_server.sh skips if already installed.
   if [ "$INSTALL_METRICS_SERVER" = "true" ]; then
     echo "  [metrics-server] INSTALL_METRICS_SERVER=true — checking/installing..."
     bash "$SCRIPT_DIR/install_metrics_server.sh" "$KUBECONFIG_PATH"
@@ -615,7 +615,7 @@ install_prerequisites() {
 
   # ── Prometheus Operator ─────────────────────────────────────────────────
   # Lets a Prometheus instance actually pick up config/prometheus's
-  # ServiceMonitor. Idempotent — hack/install_prometheus_operator.sh skips
+  # ServiceMonitor. Idempotent — deploy/scripts/install_prometheus_operator.sh skips
   # if the release already exists.
   if [ "$DEPLOY_PROMETHEUS_OPERATOR" = "true" ]; then
     echo "  [prometheus-operator] DEPLOY_PROMETHEUS_OPERATOR=true — checking/installing..."
@@ -716,7 +716,7 @@ bind_prometheus_metrics_rbac() {
 deploy_prometheus_monitoring() {
   if [ "$DEPLOY_PROMETHEUS_OPERATOR" != "true" ]; then
     step "Phase 5 — Skipping Prometheus monitoring   (DEPLOY_PROMETHEUS_OPERATOR=false)."
-    echo "  To deploy: DEPLOY_PROMETHEUS_OPERATOR=true hack/deploy_full_stack.sh"
+    echo "  To deploy: DEPLOY_PROMETHEUS_OPERATOR=true deploy/scripts/deploy_full_stack.sh"
     return
   fi
 
@@ -735,7 +735,7 @@ deploy_prometheus_monitoring() {
 #
 # The mock agent is a lightweight Python HTTP server that scores candidate
 # nodes randomly for initial placement, and recommends Move/NoOp randomly for
-# rebalance evaluations (see hack/mock_decision_agent.yaml for exact
+# rebalance evaluations (see deploy/manifests/mock_decision_agent.yaml for exact
 # behaviour). It is deployed in the same namespace as the operator so the
 # short DNS name "mock-decision-agent" resolves from the operator pod.
 #
@@ -752,7 +752,7 @@ deploy_mock_agent() {
     # content instead of an already-running process keeping the old one.
     sed -e "s/namespace: hiro-adaptive-orchestrator-system/namespace: $NAMESPACE/g" \
         -e "s/REPLACE_DEPLOY_TIMESTAMP/$(date -u +%Y-%m-%dT%H:%M:%SZ)/g" \
-      "$SCRIPT_DIR/mock_decision_agent.yaml" | kubectl apply -f -
+      "$SCRIPT_DIR/../manifests/mock_decision_agent.yaml" | kubectl apply -f -
 
     echo "  Waiting for mock decision agent rollout to complete..."
     kubectl rollout status deployment/mock-decision-agent -n "$NAMESPACE" --timeout=120s
@@ -790,8 +790,8 @@ deploy_scheduler_plugin() {
     bash "$SCRIPT_DIR/deploy_scheduler.sh" "$KUBECONFIG_PATH"
   else
     step "Phase 8 — Skipping scheduler plugin        (DEPLOY_SCHEDULER_PLUGIN=false)."
-    echo "  To deploy: DEPLOY_SCHEDULER_PLUGIN=true hack/deploy_full_stack.sh"
-    echo "  Standalone: hack/deploy_scheduler.sh"
+    echo "  To deploy: DEPLOY_SCHEDULER_PLUGIN=true deploy/scripts/deploy_full_stack.sh"
+    echo "  Standalone: deploy/scripts/deploy_scheduler.sh"
   fi
 }
 
@@ -890,8 +890,8 @@ deploy_extender() {
     bash "$SCRIPT_DIR/deploy_extender.sh" "$KUBECONFIG_PATH"
   else
     step "Phase 10 — Skipping extender                (DEPLOY_EXTENDER=false)."
-    echo "  To deploy: DEPLOY_EXTENDER=true hack/deploy_full_stack.sh"
-    echo "  Standalone: hack/deploy_extender.sh"
+    echo "  To deploy: DEPLOY_EXTENDER=true deploy/scripts/deploy_full_stack.sh"
+    echo "  Standalone: deploy/scripts/deploy_extender.sh"
   fi
 }
 

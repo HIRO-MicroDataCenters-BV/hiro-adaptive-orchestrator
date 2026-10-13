@@ -1,8 +1,8 @@
 name: Platform Verify Chart
 #
-# CI-only verification of charts/hiro-adaptive-platform against a throwaway
+# CI-only verification of deploy/helm/hiro-adaptive-platform against a throwaway
 # Kind cluster created inside this workflow's own runner — mirrors
-# hack/deploy_full_stack_with_helm.sh. No registry involved: images are
+# deploy/scripts/deploy_full_stack_with_helm.sh. No registry involved: images are
 # built and `kind load`ed directly, since the Kind cluster and the built
 # images only ever need to exist on the same runner for this one job.
 #
@@ -139,7 +139,7 @@ jobs:
       # One install brings up the operator, mock agent, scheduler plugin and
       # webhook together: the chart computes the PlacementServer URL and
       # generates the webhook certificate itself.
-      - name: Deploy charts/hiro-adaptive-platform
+      - name: Deploy deploy/helm/hiro-adaptive-platform
         run: |
           make helm-platform-deploy HELM_NAMESPACE=$HELM_NAMESPACE HELM_EXTRA_ARGS="\
             --set hiro-operator.manager.image.repository=hiro-operator \

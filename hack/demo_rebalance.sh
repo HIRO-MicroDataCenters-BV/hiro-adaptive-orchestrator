@@ -9,7 +9,7 @@
 # in a .sh comment, so it lives there, not here).
 #
 # Drives six beats against a live cluster (the full-stack deploy must
-# already be running — see hack/deploy_full_stack.sh), all against the
+# already be running — see deploy/scripts/deploy_full_stack.sh), all against the
 # existing orchestrationprofile-2 / nginx-deployment-2 / eaoprofile-optional:
 #   1. NoOp       — a normal cycle that decides nothing needs to change.
 #   2. Retry      — a pod stuck Pending behind the energy gate gets retried
@@ -109,7 +109,7 @@ set -euo pipefail
 NAMESPACE=${NAMESPACE:-hiro-adaptive-orchestrator-system}
 APP_NAMESPACE=${APP_NAMESPACE:-default}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MOCK_AGENT_YAML="$SCRIPT_DIR/mock_decision_agent.yaml"
+MOCK_AGENT_YAML="$SCRIPT_DIR/../deploy/manifests/mock_decision_agent.yaml"
 
 PROFILE=orchestrationprofile-2
 APP=nginx-deployment-2
