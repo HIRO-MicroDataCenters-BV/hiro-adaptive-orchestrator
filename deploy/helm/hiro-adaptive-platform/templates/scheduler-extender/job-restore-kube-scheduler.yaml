@@ -3,7 +3,7 @@ Unlike the other scheduler-extender templates, this one renders regardless
 of scheduler.mode — it needs to run at two different points depending on
 current mode:
   - mode == "extender": as a pre-delete hook, so `helm uninstall` restores
-    the original kube-scheduler manifest (mirrors hack/undeploy_extender.sh).
+    the original kube-scheduler manifest (mirrors deploy/scripts/undeploy_extender.sh).
   - mode != "extender": as a pre-upgrade hook, so switching AWAY from
     extender mode on `helm upgrade` also restores it — otherwise nothing
     else in this chart would ever undo the patch job-patch-kube-scheduler.yaml
@@ -87,7 +87,7 @@ hiro-scheduler-config (unlike hiro-patch-script) is created imperatively by
 job-prepare-scheduler-config.yaml's own `kubectl apply`, not as a normal
 Helm-templated resource — so it's outside Helm's release manifest and
 `helm uninstall` won't remove it on its own. Delete it explicitly here,
-matching hack/undeploy_extender.sh's own cleanup_configmaps().
+matching deploy/scripts/undeploy_extender.sh's own cleanup_configmaps().
 */}}
 apiVersion: batch/v1
 kind: Job

@@ -6,7 +6,7 @@ kind: Kustomization
 #   make deploy-scheduler IMG=<image>
 #
 # PREREQUISITE: cert-manager must be installed before applying this.
-# hack/deploy_full_stack.sh installs it in Phase 0 when DEPLOY_SCHEDULER_PLUGIN=true.
+# deploy/scripts/deploy_full_stack.sh installs it in Phase 0 when DEPLOY_SCHEDULER_PLUGIN=true.
 #
 # Differences from config/default:
 #   + config/webhook     — webhook Service + MutatingWebhookConfiguration

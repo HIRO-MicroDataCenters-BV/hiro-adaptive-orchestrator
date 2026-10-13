@@ -117,7 +117,7 @@
 #             fi
 #           fi
 # 
-#       - name: Deploy charts/hiro-adaptive-platform (phase 1)
+#       - name: Deploy deploy/helm/hiro-adaptive-platform (phase 1)
 #         run: |
 #           export KUBECONFIG="$HOME/.kube/config"
 #           IMAGE_REPO="ghcr.io/${{ github.repository }}/hiro-adaptive-orchestrator-controller:${VERSION}"
@@ -151,7 +151,7 @@
 #             -o jsonpath='{.items[0].metadata.name}')
 #           echo "PLACEMENT_SERVER_URL=http://${SVC}.${HELM_NAMESPACE}.svc.cluster.local:8090" >> "$GITHUB_ENV"
 # 
-#       - name: Deploy charts/hiro-adaptive-platform (phase 2 — scheduler + webhook)
+#       - name: Deploy deploy/helm/hiro-adaptive-platform (phase 2 — scheduler + webhook)
 #         if: vars.SCHEDULER_MODE == 'plugin'
 #         run: |
 #           export KUBECONFIG="$HOME/.kube/config"

@@ -1,6 +1,6 @@
 {{- if and .Values.samples.enabled (.Capabilities.APIVersions.Has "orchestration.hiro.io/v1alpha1/OrchestrationProfile") }}
 # Sample OrchestrationProfile CRs (cluster-scoped), for demos/eval — matches
-# config/samples/, applied unconditionally by hack/deploy_operator.sh today;
+# config/samples/, applied unconditionally by deploy/scripts/deploy_operator.sh today;
 # this chart makes it opt-in instead (off by default) since a production
 # install shouldn't get demo workloads by default.
 #

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# charts/hiro-adaptive-platform/files/mock_decision_agent_server.py
+# deploy/helm/hiro-adaptive-platform/files/mock_decision_agent_server.py
 #
-# COPY of the server.py embedded in hack/mock_decision_agent.yaml's
+# COPY of the server.py embedded in deploy/manifests/mock_decision_agent.yaml's
 # ConfigMap (extracted here because it's YAML-embedded there, not a
 # standalone file — .Files.Get needs one). Keep in sync by hand if that one
 # changes — except the listen port below, which intentionally diverges:
 # REPLACE_LISTEN_PORT is substituted with mockAgent.port by
-# templates/mock-agent/configmap.yaml at render time (the hack/ original
+# templates/mock-agent/configmap.yaml at render time (the deploy/manifests/ original
 # has no such templating and keeps its port hardcoded to 8080).
 import json
 import random

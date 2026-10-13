@@ -1,5 +1,5 @@
 #!/bin/bash
-# hack/install_prometheus_operator.sh
+# deploy/scripts/install_prometheus_operator.sh
 #
 # Installs the Prometheus Operator (via the kube-prometheus-stack Helm chart)
 # as its own Helm release. Idempotent — does nothing if the release already
@@ -21,7 +21,7 @@
 #   PROMETHEUS_OPERATOR_CHART_VERSION  kube-prometheus-stack chart version (default: latest)
 #
 # Usage (standalone):
-#   hack/install_prometheus_operator.sh [kubeconfig-path]
+#   deploy/scripts/install_prometheus_operator.sh [kubeconfig-path]
 
 set -euo pipefail
 

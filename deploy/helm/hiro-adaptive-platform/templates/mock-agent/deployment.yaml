@@ -1,6 +1,6 @@
 {{- if .Values.mockAgent.enable }}
 # Default name/port (mock-decision-agent:8080, no release prefix) match
-# hack/mock_decision_agent.yaml exactly, and let values.yaml's
+# deploy/manifests/mock_decision_agent.yaml exactly, and let values.yaml's
 # hiro-operator.manager.env DECISION_AGENT_URL default statically to
 # http://mock-decision-agent:8080 without needing any templating (Helm
 # values.yaml can't template itself — see that comment for the fuller

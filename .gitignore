@@ -54,9 +54,9 @@ Thumbs.db
 .env.local
 
 # Helm — vendored local dependency archives, regenerated with
-# `helm dependency update charts/hiro-full-stack` (Chart.lock IS committed).
-charts/*/charts/
+# `helm dependency update deploy/helm/hiro-adaptive-platform` (Chart.lock IS committed).
+deploy/helm/*/charts/
 
-# Standalone kubeconfig written by hack/deploy_full_stack_with_helm.sh for
+# Standalone kubeconfig written by deploy/scripts/deploy_full_stack_with_helm.sh for
 # its own Kind cluster.
 .kind-kubeconfig-*.yaml

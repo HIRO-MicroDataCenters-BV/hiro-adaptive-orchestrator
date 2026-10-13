@@ -2,7 +2,7 @@
 # Step 2 of 3. Privileged and runs on the control-plane node — mounts
 # /etc/kubernetes/manifests read/write to patch the kube-scheduler static
 # pod manifest directly (see files/patch_scheduler_static_pod.py, a copy of
-# hack/patch_scheduler_static_pod.py). Makes no Kubernetes API calls.
+# deploy/scripts/patch_scheduler_static_pod.py). Makes no Kubernetes API calls.
 #
 # SCHEDULER_CONFIG_PATH (the path the config is written to on the node, and
 # where the static pod mounts it from) is intentionally fixed, not a value

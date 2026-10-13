@@ -44,7 +44,7 @@ spec:
               # kube-scheduler's static pod runs with hostNetwork: true, so it uses
               # the node's /etc/resolv.conf rather than CoreDNS and cannot resolve
               # svc.cluster.local — embed the ClusterIP directly instead (same
-              # reason hack/deploy_extender.sh does this).
+              # reason deploy/scripts/deploy_extender.sh does this).
               URL_PREFIX="http://${CLUSTER_IP}:{{ .Values.scheduler.extender.placementServer.port }}"
 
               cat <<EOF > /tmp/scheduler-config.yaml

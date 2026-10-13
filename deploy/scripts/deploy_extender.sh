@@ -1,5 +1,5 @@
 #!/bin/bash
-# hack/deploy_extender.sh
+# deploy/scripts/deploy_extender.sh
 #
 # Full extender deploy: applies the HIRO KubeSchedulerConfiguration ConfigMap
 # to kube-system AND patches the kube-scheduler static pod manifest so the
@@ -14,7 +14,7 @@
 # ─── What this script does ────────────────────────────────────────────────────
 #   1. Renders hiro-scheduler-config ConfigMap (substitutes PLACEMENT_SERVICE_NAME
 #      and NAMESPACE into the urlPrefix) and applies it to kube-system.
-#   2. Creates a hiro-patch-script ConfigMap from hack/patch_scheduler_static_pod.py.
+#   2. Creates a hiro-patch-script ConfigMap from deploy/scripts/patch_scheduler_static_pod.py.
 #   3. Runs a privileged Kubernetes Job on the control-plane node that:
 #        - mounts /etc/kubernetes/manifests from the node (hostPath, read/write)
 #        - runs the Python patch script to add --config and the ConfigMap volume
@@ -42,16 +42,16 @@
 # ─── Usage ────────────────────────────────────────────────────────────────────
 #   # Standalone
 #   export GITHUB_PAT_TOKEN=<token>   # only needed if operator not yet deployed
-#   hack/deploy_extender.sh [kubeconfig-path]
+#   deploy/scripts/deploy_extender.sh [kubeconfig-path]
 #
 #   # Via deploy_full_stack.sh
-#   APPLY_EXTENDER_CONFIG=true hack/deploy_full_stack.sh [kubeconfig-path]
+#   APPLY_EXTENDER_CONFIG=true deploy/scripts/deploy_full_stack.sh [kubeconfig-path]
 #
 #   # Custom namespace / service name
-#   NAMESPACE=my-ns PLACEMENT_SERVICE_NAME=my-svc hack/deploy_extender.sh
+#   NAMESPACE=my-ns PLACEMENT_SERVICE_NAME=my-svc deploy/scripts/deploy_extender.sh
 #
 #   # Air-gapped: use a local mirror image that has python3+pyyaml
-#   PATCHER_IMAGE=my-registry/python3-pyyaml:latest hack/deploy_extender.sh
+#   PATCHER_IMAGE=my-registry/python3-pyyaml:latest deploy/scripts/deploy_extender.sh
 
 set -euo pipefail
 
@@ -60,7 +60,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -158,7 +158,7 @@ apply_extender_configmap() {
 # Step 2 — Package the Python patch script as a ConfigMap so the Job can
 # mount and run it without requiring a custom image.
 create_patch_script_configmap() {
-  step "Creating patch-script ConfigMap from hack/patch_scheduler_static_pod.py..."
+  step "Creating patch-script ConfigMap from deploy/scripts/patch_scheduler_static_pod.py..."
 
   kubectl create configmap "$PATCH_SCRIPT_CONFIGMAP" \
     --from-file=patch.py="$SCRIPT_DIR/patch_scheduler_static_pod.py" \
@@ -408,7 +408,7 @@ main() {
   echo "    kubectl logs -l component=kube-scheduler -n kube-system | grep -i extender"
   echo ""
   echo "  To undo (restore original manifest):"
-  echo "    hack/undeploy_extender.sh"
+  echo "    deploy/scripts/undeploy_extender.sh"
 }
 
 main "$@"

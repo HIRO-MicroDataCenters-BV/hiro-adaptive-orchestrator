@@ -68,7 +68,7 @@ against a local Kind cluster — no registry or GHCR token needed, since images 
 load straight into Kind:
 
 ```bash
-hack/deploy_full_stack_with_helm.sh deploy
+deploy/scripts/deploy_full_stack_with_helm.sh deploy
 ```
 
 **2. Verify.** The deploy health-checks the PlacementServer and prints the pods, then ends with
@@ -105,24 +105,24 @@ scheduled, the plugin never reached the PlacementServer and fell back to neutral
 redeploy skips cluster creation. `destroy` deletes the cluster outright:
 
 ```bash
-hack/deploy_full_stack_with_helm.sh clean     # release only
-hack/deploy_full_stack_with_helm.sh destroy   # the whole Kind cluster
+deploy/scripts/deploy_full_stack_with_helm.sh clean     # release only
+deploy/scripts/deploy_full_stack_with_helm.sh destroy   # the whole Kind cluster
 ```
 
 ### Beyond the defaults
 
-For a real cluster (not Kind), deploy the same umbrella chart at `charts/hiro-adaptive-platform`
+For a real cluster (not Kind), deploy the same umbrella chart at `deploy/helm/hiro-adaptive-platform`
 with `make helm-platform-deploy` instead of step 1.
 
 Every parameter has a sane default and can be overridden via environment variables:
 
 ```bash
-KIND_CLUSTER_NAME=my-cluster hack/deploy_full_stack_with_helm.sh deploy
+KIND_CLUSTER_NAME=my-cluster deploy/scripts/deploy_full_stack_with_helm.sh deploy
 
-SCHEDULER_MODE=extender    hack/deploy_full_stack_with_helm.sh deploy   # patch kube-scheduler instead
-DEPLOY_PROMETHEUS=true     hack/deploy_full_stack_with_helm.sh deploy   # bundle Prometheus and scrape hiro_*
-OTLP_ENDPOINT=alloy:4317   hack/deploy_full_stack_with_helm.sh deploy   # export traces
-USE_MOCK_AGENT=false       hack/deploy_full_stack_with_helm.sh deploy   # point at a real AI agent
+SCHEDULER_MODE=extender    deploy/scripts/deploy_full_stack_with_helm.sh deploy   # patch kube-scheduler instead
+DEPLOY_PROMETHEUS=true     deploy/scripts/deploy_full_stack_with_helm.sh deploy   # bundle Prometheus and scrape hiro_*
+OTLP_ENDPOINT=alloy:4317   deploy/scripts/deploy_full_stack_with_helm.sh deploy   # export traces
+USE_MOCK_AGENT=false       deploy/scripts/deploy_full_stack_with_helm.sh deploy   # point at a real AI agent
 ```
 
 Each of these drives both the Helm values and the script's closing summary, so what it prints
@@ -148,7 +148,7 @@ Two binaries get deployed, plus an optional mock AI agent for local testing:
 | ------------------------ | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Operator**             | `cmd/main.go`                  | One pod, one process, three cooperating parts (below)                                                                                                                      |
 | **Scheduler Plugin**     | `scheduler-plugin/cmd/main.go` | A custom `kube-scheduler` build with the `HIROScore` plugin registered. Only needed for the plugin path — the extender path uses the cluster's existing default scheduler. |
-| **Mock Decision Agent**  | `hack/mock_decision_agent.yaml` | Python HTTP server standing in for a real AI agent in local/CI runs: random placement scores, random `Move`/`NoOp` rebalance answers                                       |
+| **Mock Decision Agent**  | `deploy/manifests/mock_decision_agent.yaml` | Python HTTP server standing in for a real AI agent in local/CI runs: random placement scores, random `Move`/`NoOp` rebalance answers                                       |
 
 Inside the operator process:
 
@@ -289,7 +289,9 @@ pkg/placement/     Shared wire types (operator ↔ scheduler plugin)
 internal/          controller/, decision/ (PlacementServer), rebalance/, webhook/v1/, utils/
 scheduler-plugin/  Separate Go module — hiro-scheduler binary (HIROScore plugin)
 config/            Kustomize bases/overlays — CRDs, RBAC, manager, scheduler, extender, webhook, certmanager
-hack/              Deploy scripts (full stack, operator, scheduler, extender) + mock agent
+deploy/            Everything deployment: scripts/ (full stack, operator, scheduler, extender),
+                   manifests/ (mock agent), helm/hiro-adaptive-platform (umbrella chart)
+hack/              Dev tooling: codegen boilerplate, Kind cluster helper, rebalance demo
 dist/              Generated Helm chart + install bundle — DO NOT EDIT
 test/e2e/          End-to-end tests (Kind)
 ```

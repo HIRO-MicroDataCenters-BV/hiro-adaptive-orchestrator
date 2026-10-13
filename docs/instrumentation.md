@@ -217,12 +217,12 @@ the chart ships the reader role unbound so you choose who gets it.
 Grant a reader:
 
 ```bash
-helm upgrade <release> charts/hiro-adaptive-platform -n <namespace> --reuse-values \
+helm upgrade <release> deploy/helm/hiro-adaptive-platform -n <namespace> --reuse-values \
   --set observability.metricsReaders={<namespace>:<serviceaccount>}
 ```
 
 The same single grant covers **both** endpoints — the operator and kube-scheduler check the same
-nonResourceURL. `hack/deploy_full_stack_with_helm.sh` sets this to the operator's own
+nonResourceURL. `deploy/scripts/deploy_full_stack_with_helm.sh` sets this to the operator's own
 ServiceAccount automatically (unless `DEPLOY_PROMETHEUS=true`, where the bundled Prometheus
 already grants itself) and prints ready-to-run commands.
 
@@ -273,7 +273,7 @@ half the `hiro_*` metrics are exposed but never collected, with nothing to indic
 With the bundled stack:
 
 ```bash
-DEPLOY_PROMETHEUS=true hack/deploy_full_stack_with_helm.sh deploy
+DEPLOY_PROMETHEUS=true deploy/scripts/deploy_full_stack_with_helm.sh deploy
 ```
 
 With your own Prometheus: grant its ServiceAccount via `observability.metricsReaders`, point its
@@ -288,7 +288,7 @@ with `OTEL_EXPORTER_OTLP_ENDPOINT` empty, no exporter is constructed and behavio
 byte-for-byte what it was before tracing existed.
 
 ```bash
-OTLP_ENDPOINT=alloy.observability.svc:4317 hack/deploy_full_stack_with_helm.sh deploy
+OTLP_ENDPOINT=alloy.observability.svc:4317 deploy/scripts/deploy_full_stack_with_helm.sh deploy
 ```
 
 | Variable | Default | Meaning |
