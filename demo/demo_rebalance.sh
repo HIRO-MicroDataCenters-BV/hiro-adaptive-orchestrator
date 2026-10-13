@@ -1,5 +1,5 @@
 #!/bin/bash
-# hack/demo_rebalance.sh
+# demo/demo_rebalance.sh
 #
 # Guided, narrated demo of the rebalance engine's decision lifecycle:
 #   Watching -> Triggered -> Evaluating -> Decided -> Enacting -> Watching
@@ -86,14 +86,14 @@
 #     kubectl logs -f deployment/mock-decision-agent -n hiro-adaptive-orchestrator-system
 #
 # Usage:
-#   hack/demo_rebalance.sh              # run all six beats, in order
-#   hack/demo_rebalance.sh noop         # run a single beat
-#   hack/demo_rebalance.sh retry
-#   hack/demo_rebalance.sh move
-#   hack/demo_rebalance.sh scale
-#   hack/demo_rebalance.sh resources
-#   hack/demo_rebalance.sh escalate
-#   hack/demo_rebalance.sh cleanup      # revert the mock agent + restore
+#   demo/demo_rebalance.sh              # run all six beats, in order
+#   demo/demo_rebalance.sh noop         # run a single beat
+#   demo/demo_rebalance.sh retry
+#   demo/demo_rebalance.sh move
+#   demo/demo_rebalance.sh scale
+#   demo/demo_rebalance.sh resources
+#   demo/demo_rebalance.sh escalate
+#   demo/demo_rebalance.sh cleanup      # revert the mock agent + restore
 #                                       # replica count/resources/escalation,
 #                                       # without running anything else
 #

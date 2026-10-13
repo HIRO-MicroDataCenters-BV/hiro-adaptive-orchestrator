@@ -54,7 +54,7 @@ data:
 
     # Rebalance (Move / AdjustReplicas / AdjustResources / Escalate / NoOp)
     # knobs. All *_PROBABILITY knobs default to 0.0 — keep NoOp dominant by
-    # default, bump one of them (see hack/demo_rebalance.sh's
+    # default, bump one of them (see demo/demo_rebalance.sh's
     # bump_mock_agent / _scale / _resources / _escalate) when a test
     # specifically wants to force that action.
     MOVE_PROBABILITY   = 0.0

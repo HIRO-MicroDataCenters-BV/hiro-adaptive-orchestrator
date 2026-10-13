@@ -1,7 +1,7 @@
 {{- if and .Values.samples.enabled (.Capabilities.APIVersions.Has "orchestration.hiro.io/v1alpha1/OrchestrationProfile") }}
 # See orchestrationprofile-sample.yaml for the full comment on this sample
 # set. targetDeploymentName must match nginx-deployment-2.yaml's
-# samples.nginxApp2.deploymentName. This is the one hack/demo_rebalance.sh
+# samples.nginxApp2.deploymentName. This is the one demo/demo_rebalance.sh
 # drives.
 apiVersion: orchestration.hiro.io/v1alpha1
 kind: OrchestrationProfile

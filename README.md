@@ -291,7 +291,8 @@ scheduler-plugin/  Separate Go module — hiro-scheduler binary (HIROScore plugi
 config/            Kustomize bases/overlays — CRDs, RBAC, manager, scheduler, extender, webhook, certmanager
 deploy/            Everything deployment: scripts/ (full stack, operator, scheduler, extender),
                    manifests/ (mock agent), helm/hiro-adaptive-platform (umbrella chart)
-hack/              Dev tooling: codegen boilerplate, Kind cluster helper, rebalance demo
+demo/              Narrated rebalance-engine demo against a running stack
+hack/              Codegen boilerplate (controller-gen license header)
 dist/              Generated Helm chart + install bundle — DO NOT EDIT
 test/e2e/          End-to-end tests (Kind)
 ```

@@ -1182,9 +1182,9 @@ flowchart LR
 <a id="demo-walkthrough"></a>
 ## 🎬 <u>Demo walkthrough</u>
 
-[`hack/demo_rebalance.sh`](../../hack/demo_rebalance.sh) drives all six lifecycle paths
+[`demo/demo_rebalance.sh`](../../demo/demo_rebalance.sh) drives all six lifecycle paths
 above against a live cluster, narrated pane-by-pane (see the script's own header comment for
-pane setup and usage: `hack/demo_rebalance.sh [noop|retry|move|scale|resources|escalate|cleanup]`).
+pane setup and usage: `demo/demo_rebalance.sh [noop|retry|move|scale|resources|escalate|cleanup]`).
 
 ### Feature view — what each beat proves
 
@@ -1276,7 +1276,7 @@ forever or guessing.
 ### Mechanics — what the script actually does
 
 The diagrams above show the capability; these show the state-machine path and the
-`hack/demo_rebalance.sh` mechanics that get there for each beat.
+`demo/demo_rebalance.sh` mechanics that get there for each beat.
 
 **Beat 1 — NoOp**
 

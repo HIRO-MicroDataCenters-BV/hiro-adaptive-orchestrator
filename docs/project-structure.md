@@ -105,10 +105,10 @@ deploy/                                # Everything deployment — see deploy/RE
   helm/
     hiro-adaptive-platform/            # Umbrella chart: operator (dist/chart subchart) + webhook +
                                        # scheduler plugin/extender + mock agent + prerequisites
-hack/                                  # Dev tooling only
-  boilerplate.go.txt                   # License header for controller-gen (make generate)
-  create_kind_cluster.sh               # Throwaway Kind cluster with fixed NodePort mappings
+demo/
   demo_rebalance.sh                    # Drives the six rebalance lifecycle beats against a running stack
+hack/
+  boilerplate.go.txt                   # License header for controller-gen (make generate)
 dist/
   chart/                               # Generated Helm chart — DO NOT EDIT
   install.yaml                         # Generated single-file install bundle

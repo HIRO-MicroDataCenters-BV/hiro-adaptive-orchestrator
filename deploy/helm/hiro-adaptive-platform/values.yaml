@@ -314,7 +314,7 @@ samples:
   nginxApp1:
     deploymentName: nginx-deployment-1
     serviceName: nginx-service-1
-  # Targeted by profile2 (the one hack/demo_rebalance.sh drives).
+  # Targeted by profile2 (the one demo/demo_rebalance.sh drives).
   nginxApp2:
     deploymentName: nginx-deployment-2
     serviceName: nginx-service-2

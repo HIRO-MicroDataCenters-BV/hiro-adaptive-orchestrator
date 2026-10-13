@@ -200,8 +200,8 @@ regenerate_manifests() {
   echo "  Regenerated with IMG=${img_name}:${img_tag}"
 }
 
-# kind_cluster_config prints the Kind Cluster config — same topology/
-# networking as hack/create_kind_cluster.sh.
+# kind_cluster_config prints the Kind Cluster config — 1 control-plane +
+# 2 workers, fixed NodePort host mappings.
 kind_cluster_config() {
   cat <<EOF
 kind: Cluster
