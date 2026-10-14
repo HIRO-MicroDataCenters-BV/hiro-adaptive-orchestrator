@@ -86,7 +86,8 @@
 #     kubectl logs -f deployment/mock-decision-agent -n hiro-adaptive-orchestrator-system
 #
 # Usage:
-#   demo/demo_rebalance.sh              # run all six beats, in order
+#   demo/demo_rebalance.sh              # numbered menu: pick one beat, all, or cleanup
+#   demo/demo_rebalance.sh all          # run all six beats, in order
 #   demo/demo_rebalance.sh noop         # run a single beat
 #   demo/demo_rebalance.sh retry
 #   demo/demo_rebalance.sh move
@@ -891,12 +892,56 @@ instead of Failed."
 # ─── Main ───────────────────────────────────────────────────────────────────
 
 usage() {
-  echo "Usage: $0 [noop|retry|move|scale|resources|escalate|cleanup]"
-  echo "  (no argument) runs noop, retry, move, scale, resources, escalate in order"
+  echo "Usage: $0 [noop|retry|move|scale|resources|escalate|all|cleanup]"
+  echo "  (no argument) shows a numbered menu to pick from"
+}
+
+# Prints the numbered menu to the terminal and echoes the chosen beat name.
+# Re-prompts on invalid input; reads /dev/tty for the same reason pause() does.
+menu() {
+  local choice
+  {
+    echo ""
+    echo "Rebalance demo — pick what to run:"
+    echo "  1) noop       — a normal cycle that decides nothing needs to change"
+    echo "  2) retry      — a Pending pod retried once the energy window opens"
+    echo "  3) move       — accepted Move: evict + steer replacement to a node"
+    echo "  4) scale      — accepted AdjustReplicas: patch replica count"
+    echo "  5) resources  — accepted AdjustResources: resize CPU/Memory"
+    echo "  6) escalate   — AI-directed and auto-escalation after repeated failures"
+    echo "  7) all        — run 1-6 one by one, in order"
+    echo "  8) cleanup    — only revert the mock agent / replicas / resources / escalation"
+    echo "  q) quit"
+  } > /dev/tty
+  while true; do
+    read -rp "Choice [1-8, q]: " choice < /dev/tty || { echo quit; return; }
+    case "$choice" in
+      1) echo noop; return ;;
+      2) echo retry; return ;;
+      3) echo move; return ;;
+      4) echo scale; return ;;
+      5) echo resources; return ;;
+      6) echo escalate; return ;;
+      7) echo all; return ;;
+      8) echo cleanup; return ;;
+      q|Q) echo quit; return ;;
+      *) echo "Invalid choice: '$choice'" > /dev/tty ;;
+    esac
+  done
 }
 
 main() {
-  case "${1:-all}" in
+  local beat=${1:-}
+  if [ -z "$beat" ]; then
+    if [ ! -r /dev/tty ]; then
+      echo "No TTY for the interactive menu; pass a beat name instead." >&2
+      usage >&2; trap - EXIT; exit 1
+    fi
+    beat=$(menu)
+  fi
+
+  case "$beat" in
+    quit) trap - EXIT; exit 0 ;;
     noop) noop ;;
     retry) retry ;;
     move) move ;;

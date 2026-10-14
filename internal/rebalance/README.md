@@ -1184,7 +1184,8 @@ flowchart LR
 
 [`demo/demo_rebalance.sh`](../../demo/demo_rebalance.sh) drives all six lifecycle paths
 above against a live cluster, narrated pane-by-pane (see the script's own header comment for
-pane setup and usage: `demo/demo_rebalance.sh [noop|retry|move|scale|resources|escalate|cleanup]`).
+pane setup and usage: `demo/demo_rebalance.sh [noop|retry|move|scale|resources|escalate|all|cleanup]`;
+with no argument it shows a numbered menu).
 
 ### Feature view — what each beat proves
 
