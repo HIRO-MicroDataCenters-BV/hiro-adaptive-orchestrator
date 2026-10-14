@@ -782,7 +782,7 @@ single response anyway, so there's no real fetch cost to save by combining — o
 to avoid in the trigger dispatch `switch`.
 
 metrics-server is an optional cluster component (see
-[deployment](../../hack/install_metrics_server.sh)). If it's not installed, both methods
+[deployment](../../deploy/scripts/install_metrics_server.sh)). If it's not installed, both methods
 return an error, which `TriggerEvaluator` catches and treats as "not currently evaluable" —
 `CPUThreshold`/`MemoryThreshold` simply never fire until it's present.
 
@@ -1172,19 +1172,20 @@ flowchart LR
     Ready --> RE2["Rebalance Engine<br/>starts automatically"]
 ```
 
-- `hack/install_metrics_server.sh` — idempotent metrics-server installer, wired into
-  `hack/deploy_full_stack.sh` Phase 2 (default on, `INSTALL_METRICS_SERVER=false` to skip).
+- `deploy/scripts/install_metrics_server.sh` — idempotent metrics-server installer, wired into
+  `deploy/scripts/deploy_full_stack.sh` Phase 2 (default on, `INSTALL_METRICS_SERVER=false` to skip).
   Without it, `CPUThreshold`/`MemoryThreshold` simply never fire; nothing else is affected.
-- `hack/deploy_operator.sh` / `hack/deploy_full_stack.sh` print a component breakdown at
+- `deploy/scripts/deploy_operator.sh` / `deploy/scripts/deploy_full_stack.sh` print a component breakdown at
   deploy time so it's clear the rebalance engine isn't a separate opt-in piece — it starts
   the moment the operator pod is `Ready`.
 
 <a id="demo-walkthrough"></a>
 ## 🎬 <u>Demo walkthrough</u>
 
-[`hack/demo_rebalance.sh`](../../hack/demo_rebalance.sh) drives all six lifecycle paths
+[`demo/demo_rebalance.sh`](../../demo/demo_rebalance.sh) drives all six lifecycle paths
 above against a live cluster, narrated pane-by-pane (see the script's own header comment for
-pane setup and usage: `hack/demo_rebalance.sh [noop|retry|move|scale|resources|escalate|cleanup]`).
+pane setup and usage: `demo/demo_rebalance.sh [noop|retry|move|scale|resources|escalate|all|cleanup]`;
+with no argument it shows a numbered menu).
 
 ### Feature view — what each beat proves
 
@@ -1276,7 +1277,7 @@ forever or guessing.
 ### Mechanics — what the script actually does
 
 The diagrams above show the capability; these show the state-machine path and the
-`hack/demo_rebalance.sh` mechanics that get there for each beat.
+`demo/demo_rebalance.sh` mechanics that get there for each beat.
 
 **Beat 1 — NoOp**
 

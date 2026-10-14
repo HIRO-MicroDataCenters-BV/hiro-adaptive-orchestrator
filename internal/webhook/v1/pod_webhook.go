@@ -42,7 +42,7 @@ const DefaultSchedulerName = "hiro-scheduler"
 //
 // Requires ENABLE_WEBHOOKS != "false" (checked in main.go).
 // Requires TLS certs mounted at /tmp/k8s-webhook-server/serving-certs/
-// (provisioned by hack/deploy_webhook.sh).
+// (provisioned by cert-manager via config/default-with-webhook, or the Helm chart).
 func SetupPodWebhookWithManager(
 	mgr ctrl.Manager,
 	builder *placementserver.DecisionContextBuilder,

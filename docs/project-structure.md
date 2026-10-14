@@ -88,15 +88,27 @@ config/
     certificate-metrics.yaml           # cert-manager Certificate for metrics TLS
     issuer.yaml                        # Self-signed Issuer
     kustomizeconfig.yaml               # nameReference: Issuer → Certificate.spec.issuerRef
-hack/
-  deploy_full_stack.sh                 # Full-stack entry point (phases 1–9) — all parameters defined here
-  deploy_operator.sh                   # Operator-only deploy (base or webhook overlay per DEPLOY_SCHEDULER_PLUGIN)
-  deploy_scheduler.sh                  # Scheduler-only deploy (build → push → kustomize → pull secret → rollout)
-  deploy_extender.sh                   # Extender deploy: resolve ClusterIP → ConfigMap → privileged Job → kubelet restart
-  undeploy_extender.sh                 # Roll back: restore original kube-scheduler manifest
-  patch_scheduler_static_pod.py        # Patch Job script: adds --config, hostPath volume, and
+deploy/                                # Everything deployment — see deploy/README.md
+  scripts/
+    deploy_full_stack_with_helm.sh     # Recommended local path: Kind + umbrella chart [deploy|clean|destroy]
+    deploy_full_stack.sh               # Scripted full-stack entry point (phases 1–9) — all parameters defined here
+    deploy_operator.sh                 # Operator-only deploy (base or webhook overlay per DEPLOY_SCHEDULER_PLUGIN)
+    deploy_scheduler.sh                # Scheduler-only deploy (build → push → kustomize → pull secret → rollout)
+    deploy_extender.sh                 # Extender deploy: resolve ClusterIP → ConfigMap → privileged Job → kubelet restart
+    undeploy_extender.sh               # Roll back: restore original kube-scheduler manifest
+    install_metrics_server.sh          # Idempotent metrics-server installer
+    install_prometheus_operator.sh     # Idempotent Prometheus Operator installer
+    patch_scheduler_static_pod.py      # Patch Job script: adds --config, hostPath volume, and
                                        # hiro.io/last-updated annotation (triggers kubelet restart)
-  mock_decision_agent.yaml             # In-cluster mock AI agent (Deployment + Service + ConfigMap)
+  manifests/
+    mock_decision_agent.yaml           # In-cluster mock AI agent (Deployment + Service + ConfigMap)
+  helm/
+    hiro-adaptive-platform/            # Umbrella chart: operator (dist/chart subchart) + webhook +
+                                       # scheduler plugin/extender + mock agent + prerequisites
+demo/
+  demo_rebalance.sh                    # Drives the six rebalance lifecycle beats against a running stack
+hack/
+  boilerplate.go.txt                   # License header for controller-gen (make generate)
 dist/
   chart/                               # Generated Helm chart — DO NOT EDIT
   install.yaml                         # Generated single-file install bundle

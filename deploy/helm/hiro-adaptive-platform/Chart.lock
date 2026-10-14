@@ -1,0 +1,15 @@
+dependencies:
+- name: hiro-adaptive-orchestrator
+  repository: file://../../../dist/chart
+  version: 0.1.0
+- name: cert-manager
+  repository: https://charts.jetstack.io
+  version: v1.21.2
+- name: metrics-server
+  repository: https://kubernetes-sigs.github.io/metrics-server/
+  version: 3.14.0
+- name: kube-prometheus-stack
+  repository: https://prometheus-community.github.io/helm-charts
+  version: 92.4.0
+digest: sha256:55ff43e3fd5ded31f415ef5c2a573f7aeb4723cfa6a2dc7fbe6322527da3971d
+generated: "2026-10-14T10:34:01.456547+02:00"

@@ -311,7 +311,7 @@ helm-rollback: ## Rollback to previous Helm release.
 	$(HELM) rollback $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
 
 ## Path to the full-stack umbrella Helm chart
-HELM_PLATFORM_CHART_DIR ?= charts/hiro-adaptive-platform
+HELM_PLATFORM_CHART_DIR ?= deploy/helm/hiro-adaptive-platform
 ## Name of the full-stack Helm release
 HELM_PLATFORM_RELEASE ?= hiro-adaptive-platform
 
@@ -391,7 +391,7 @@ helm-platform-status: ## Show full-stack Helm release status.
 # The operator's go.mod is never modified.
 #
 # To target a different K8s minor version:
-#   hack/set-k8s-version.sh v1.36.0
+#   scheduler-plugin/pin_k8s_version.sh v1.36.0
 #   cd scheduler-plugin && go mod tidy
 #
 # Supported policy: current K8s minor + 2 previous minors.

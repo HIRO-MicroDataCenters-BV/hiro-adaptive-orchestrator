@@ -217,11 +217,11 @@ jobs:
       - name: Install Helm
         run: make install-helm
       - name: helm dependency update
-        run: helm dependency update "charts/$CHART_NAME"
+        run: helm dependency update "deploy/helm/$CHART_NAME"
       - name: Package chart
         run: |
           CHART_VERSION="${VERSION#v}"
-          helm package "charts/$CHART_NAME" \
+          helm package "deploy/helm/$CHART_NAME" \
             --version "$CHART_VERSION" \
             --app-version "$CHART_VERSION" \
             --destination "$CHART_OUTPUT_DIR"
