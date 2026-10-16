@@ -517,7 +517,8 @@ func (r *Reconciler) evaluateWithAI(
 	start := time.Now()
 	defer func() { metrics.RebalanceAIDuration.Observe(time.Since(start).Seconds()) }()
 
-	req, err := r.ContextBuilder.BuildRebalanceContext(aiCtx, profile, rs.DecisionID, reason, rs.RecentDecisions)
+	req, err := r.ContextBuilder.BuildRebalanceContext(aiCtx, profile, rs.DecisionID, reason, rs.RecentDecisions,
+		r.rebalanceFacts(aiCtx, profile, result))
 	if err != nil {
 		metrics.RebalanceAIRequestsTotal.WithLabelValues(metrics.AIResultContextError).Inc()
 		r.failEvaluation(ctx, key, profile, fmt.Sprintf("building AI decision context: %v", err))
@@ -540,8 +541,15 @@ func (r *Reconciler) evaluateWithAI(
 			"targetNode", resp.TargetNode,
 			"improvement", resp.Improvement,
 			"reason", resp.Reason,
+			"decidedBy", resp.DecidedBy,
+			"confidence", resp.Confidence,
 		}, tracing.LogValues(aiCtx)...)...,
 	)
+
+	// Carried into status/Events/recentDecisions with the outcome reason.
+	if resp.DecidedBy != "" {
+		resp.Reason = fmt.Sprintf("%s (decidedBy=%s)", resp.Reason, resp.DecidedBy)
+	}
 
 	r.dispatchDecision(ctx, key, profile, resp)
 }

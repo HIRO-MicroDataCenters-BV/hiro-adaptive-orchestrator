@@ -277,6 +277,10 @@ func main() {
 		setupLog.Error(err, "unable to register profile indexes")
 		os.Exit(1)
 	}
+	if err := placementserver.RegisterPodIndexes(mgr); err != nil {
+		setupLog.Error(err, "unable to register pod indexes")
+		os.Exit(1)
+	}
 
 	if err := (&controller.OrchestrationProfileReconciler{
 		Client:   mgr.GetClient(),
@@ -394,10 +398,12 @@ func main() {
 		"schedulerName", hiroSchedulerName,
 	)
 
+	// NODE_STATS_ZONE_LABEL / NODE_STATS_GPU_RESOURCE — empty uses the placementserver defaults.
 	contextBuilder := placementserver.NewDecisionContextBuilder(
 		mgr.GetClient(),
 		controller.ProfileByAppRefIndex,
 		eaoGVK,
+		placementserver.WithNodeStatsLabels(os.Getenv("NODE_STATS_ZONE_LABEL"), os.Getenv("NODE_STATS_GPU_RESOURCE")),
 	)
 
 	// Register the pod scheduler MutatingAdmissionWebhook.

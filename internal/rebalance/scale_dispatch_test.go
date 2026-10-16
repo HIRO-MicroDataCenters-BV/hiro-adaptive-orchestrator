@@ -78,20 +78,6 @@ func testHPA(name string, minReplicas, maxReplicas int32) *autoscalingv2.Horizon
 	}
 }
 
-// testKEDAOwnedHPA is testHPA with an ownerReference back to a ScaledObject,
-// the same way KEDA's own generated HPA carries one — see
-// resolveReplicaBounds' doc comment on why that's what dispatchScale checks.
-func testKEDAOwnedHPA(name, scaledObjectName string, minReplicas, maxReplicas int32) *autoscalingv2.HorizontalPodAutoscaler {
-	hpa := testHPA(name, minReplicas, maxReplicas)
-	hpa.OwnerReferences = []metav1.OwnerReference{{
-		APIVersion: "keda.sh/v1alpha1",
-		Kind:       "ScaledObject",
-		Name:       scaledObjectName,
-		UID:        "test-uid",
-	}}
-	return hpa
-}
-
 //go:fix inline
 func ptrInt32(v int32) *int32 { return new(v) }
 
@@ -325,12 +311,10 @@ func TestReconciler_ScaleHonoursHPABounds(t *testing.T) {
 	}
 }
 
-// TestReconciler_ScaleDefersToKEDAManagedWorkload covers KEDA deferral: a
-// workload whose HPA was created by a KEDA ScaledObject (identified by ownerReferences)
-// must never be patched directly — the cycle ends Deferred, and Spec.Replicas
-// is left untouched, regardless of how well the recommendation would
-// otherwise have cleared every other guardrail.
-func TestReconciler_ScaleDefersToKEDAManagedWorkload(t *testing.T) {
+// TestReconciler_ScaleDefersWhenReplicasExternallyManaged: a profile marking
+// replicas externally managed must never be patched — the cycle ends Deferred
+// and Spec.Replicas is untouched, however good the recommendation.
+func TestReconciler_ScaleDefersWhenReplicasExternallyManaged(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(adjustReplicasResponse(3, 50))
@@ -338,9 +322,9 @@ func TestReconciler_ScaleDefersToKEDAManagedWorkload(t *testing.T) {
 	defer server.Close()
 
 	profile := testProfileWithConditions(TriggerScheduled)
+	profile.Spec.Rebalancing.ReplicasExternallyManaged = true
 	deploy := testScalableDeployment(1)
-	hpa := testKEDAOwnedHPA("keda-hpa-my-scaledobject", "my-scaledobject", 1, 10)
-	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, hpa, profile)
+	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile)
 
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -350,8 +334,8 @@ func TestReconciler_ScaleDefersToKEDAManagedWorkload(t *testing.T) {
 	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeDeferred {
 		t.Fatalf("recentDecisions = %+v, want one Deferred-outcome entry", rs.RecentDecisions)
 	}
-	if !strings.Contains(rs.RecentDecisions[0].Reason, "KEDA") || !strings.Contains(rs.RecentDecisions[0].Reason, "my-scaledobject") {
-		t.Errorf("reason = %q, want it to mention KEDA and the ScaledObject name", rs.RecentDecisions[0].Reason)
+	if !strings.Contains(rs.RecentDecisions[0].Reason, "externally managed") {
+		t.Errorf("reason = %q, want it to say replicas are externally managed", rs.RecentDecisions[0].Reason)
 	}
 
 	stillOne := &appsv1.Deployment{}
@@ -359,7 +343,7 @@ func TestReconciler_ScaleDefersToKEDAManagedWorkload(t *testing.T) {
 		t.Fatalf("Get deployment: %v", err)
 	}
 	if stillOne.Spec.Replicas == nil || *stillOne.Spec.Replicas != 1 {
-		t.Errorf("Spec.Replicas = %v, want unchanged at 1 (KEDA-managed workload must never be patched)", stillOne.Spec.Replicas)
+		t.Errorf("Spec.Replicas = %v, want unchanged at 1 (externally managed replicas must never be patched)", stillOne.Spec.Replicas)
 	}
 }
 

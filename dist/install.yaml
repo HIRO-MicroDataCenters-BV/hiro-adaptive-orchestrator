@@ -119,6 +119,14 @@ spec:
                       pauses itself. <= 0 uses DefaultEscalationThreshold.
                     format: int32
                     type: integer
+                  replicasExternallyManaged:
+                    description: replicasExternallyManaged means something outside
+                      this operator owns the replica count; it is never changed.
+                    type: boolean
+                  resourcesExternallyManaged:
+                    description: resourcesExternallyManaged means something outside
+                      this operator owns container CPU/memory; they are never changed.
+                    type: boolean
                   triggerConditions:
                     items:
                       description: TriggerCondition enumerates the supported rebalancing
@@ -542,6 +550,14 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - policy
+  resources:
+  - poddisruptionbudgets
+  verbs:
+  - get
+  - list
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

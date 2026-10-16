@@ -65,6 +65,7 @@ class Handler(BaseHTTPRequestHandler):
             resp = self._rebalance_response(request_id, req)
         else:
             resp = self._placement_response(request_id, req)
+        resp["decidedBy"] = "mock"
 
         body = json.dumps(resp).encode()
         self._reply(200, "application/json", body)

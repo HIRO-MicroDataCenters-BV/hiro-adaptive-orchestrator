@@ -67,48 +67,71 @@ func NewNodePressureEvaluator(c client.Client, metricsClient metricsv.Interface,
 // EvaluateCPUPressure reports whether the node's live CPU usage is at or
 // above the configured threshold of its allocatable CPU capacity.
 func (e *NodePressureEvaluator) EvaluateCPUPressure(ctx context.Context, nodeName string) (bool, string, error) {
-	return e.evaluate(ctx, nodeName, corev1.ResourceCPU)
+	r, err := e.readCPU(ctx, nodeName)
+	return r.exceeded, r.reason, err
 }
 
 // EvaluateMemoryPressure reports whether the node's live Memory usage is at
 // or above the configured threshold of its allocatable Memory capacity.
 func (e *NodePressureEvaluator) EvaluateMemoryPressure(ctx context.Context, nodeName string) (bool, string, error) {
-	return e.evaluate(ctx, nodeName, corev1.ResourceMemory)
+	r, err := e.readMemory(ctx, nodeName)
+	return r.exceeded, r.reason, err
 }
 
-// evaluate fetches the node's allocatable capacity and metrics-server's
+// pressureReading is one node's usage ratio against the threshold; ratio is
+// a fraction of allocatable (0–1+).
+type pressureReading struct {
+	exceeded  bool
+	reason    string
+	ratio     float64
+	threshold float64
+}
+
+func (e *NodePressureEvaluator) readCPU(ctx context.Context, nodeName string) (pressureReading, error) {
+	return e.read(ctx, nodeName, corev1.ResourceCPU)
+}
+
+func (e *NodePressureEvaluator) readMemory(ctx context.Context, nodeName string) (pressureReading, error) {
+	return e.read(ctx, nodeName, corev1.ResourceMemory)
+}
+
+// read fetches the node's allocatable capacity and metrics-server's
 // live usage, then compares the ratio for resourceName (the ResourceList
 // map key — "cpu" or "memory" — identifying which entry of the node's data
 // to check) against the configured threshold.
-func (e *NodePressureEvaluator) evaluate(
+func (e *NodePressureEvaluator) read(
 	ctx context.Context,
 	nodeName string,
 	resourceName corev1.ResourceName,
-) (bool, string, error) {
+) (pressureReading, error) {
 	node := &corev1.Node{}
 	if err := e.client.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
-		return false, "", fmt.Errorf("fetching node %s: %w", nodeName, err)
+		return pressureReading{}, fmt.Errorf("fetching node %s: %w", nodeName, err)
 	}
 
 	allocatable := node.Status.Allocatable[resourceName]
 	if allocatable.IsZero() {
-		return false, "", nil
+		return pressureReading{}, nil
 	}
 
 	nodeMetrics, err := e.metricsClient.MetricsV1beta1().NodeMetricses().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
 		metrics.RebalancePressureQueriesTotal.WithLabelValues(metrics.PressureResultUnavailable).Inc()
-		return false, "", fmt.Errorf("fetching metrics-server usage for node %s: %w", nodeName, err)
+		return pressureReading{}, fmt.Errorf("fetching metrics-server usage for node %s: %w", nodeName, err)
 	}
 	metrics.RebalancePressureQueriesTotal.WithLabelValues(metrics.PressureResultSuccess).Inc()
 
 	usage := nodeMetrics.Usage[resourceName]
-	ratio := float64(usage.MilliValue()) / float64(allocatable.MilliValue())
-	if ratio >= e.threshold {
-		return true, fmt.Sprintf(
-			"node %s: %s usage at %.0f%% of allocatable (%.0f%% threshold)",
-			nodeName, resourceName, ratio*100, e.threshold*100,
-		), nil
+	r := pressureReading{
+		ratio:     float64(usage.MilliValue()) / float64(allocatable.MilliValue()),
+		threshold: e.threshold,
 	}
-	return false, "", nil
+	if r.ratio >= e.threshold {
+		r.exceeded = true
+		r.reason = fmt.Sprintf(
+			"node %s: %s usage at %.0f%% of allocatable (%.0f%% threshold)",
+			nodeName, resourceName, r.ratio*100, e.threshold*100,
+		)
+	}
+	return r, nil
 }

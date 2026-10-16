@@ -648,11 +648,11 @@ will need its own the same way.
 
 ```mermaid
 flowchart LR
-    Resp(["AdjustReplicas response"]) --> Q{"HorizontalPodAutoscaler<br/>targeting this workload?"}
-    Q -- yes --> Owner{"HPA owned by a<br/>KEDA ScaledObject?"}
+    Resp(["AdjustReplicas response"]) --> Ext{"profile sets<br/>replicasExternallyManaged?"}
+    Ext -- yes --> Deferred(["Watching + Deferred<br/>(never patches Spec.Replicas)"])
+    Ext -- no --> Q{"HorizontalPodAutoscaler<br/>targeting this workload?"}
     Q -- no --> Def["[Reconciler.MinReplicas,<br/>Reconciler.MaxReplicas]<br/>(env-configurable, default [1, 10])"]
-    Owner -- yes --> Deferred(["Watching + Deferred<br/>(never patches Spec.Replicas)"])
-    Owner -- no --> HPA["[hpa.Spec.MinReplicas,<br/>hpa.Spec.MaxReplicas]"]
+    Q -- yes --> HPA["[hpa.Spec.MinReplicas,<br/>hpa.Spec.MaxReplicas]"]
     HPA --> Check{"TargetReplicas<br/>in range?"}
     Def --> Check
     Check -- no --> Rej(["Watching + Rejected"])
@@ -670,17 +670,21 @@ No matching HPA falls back to `Reconciler.MinReplicas`/`MaxReplicas` (`REBALANCE
 misbehaving or overly aggressive AI response from scaling to zero or to something absurd, not
 to express real capacity planning for any given workload.
 
-**KEDA-managed workloads are deferred to entirely, not just bounded.** KEDA doesn't scale a
-workload's replicas directly — it creates and drives a real `HorizontalPodAutoscaler` of its
-own, fed by its custom metrics adapter instead of CPU/memory. That generated HPA's
-`ownerReferences` point back to the `ScaledObject` that created it, so a found HPA is checked
-for KEDA ownership (`Kind: ScaledObject, apiVersion: keda.sh/v1alpha1`) — no new RBAC or CRD
-scheme registration needed, since it only inspects an HPA object already fetched for bounds. If
-KEDA-owned, `dispatchScale` never calls `scaleEnactor` at all: the cycle ends `Watching` +
-`Deferred` with a reason naming the owning `ScaledObject`. Patching `Spec.Replicas` on a
-KEDA-managed workload would just compete with KEDA's own reconcile loop — whichever writes most
-recently wins, and they'd flap back and forth — so stepping back entirely, rather than trying to
-coexist, is the only safe option available without a deeper KEDA integration (not built).
+**Externally managed sizing is never touched.** The profile states it as intent:
+
+```yaml
+spec:
+  rebalancing:
+    replicasExternallyManaged: true   # an HPA, KEDA, GitOps, ... owns the replica count
+    resourcesExternallyManaged: true  # a VPA or similar owns container CPU/memory
+```
+
+When `replicasExternallyManaged` is set, `dispatchScale` never calls `scaleEnactor`: the cycle
+ends `Watching` + `Deferred`. `resourcesExternallyManaged` does the same for `dispatchResource`.
+Both flags also travel to the decision agent in `rebalanceContext.workload`, so it can avoid
+proposing those actions at all. The operator doesn't try to detect *which* tool owns sizing — any
+controller (KEDA, a custom autoscaler, Argo CD) can, and patching underneath it would just flap.
+Both default to `false`, meaning the operator may change that dimension.
 
 <a id="adjustresources--cpumemory"></a>
 ### AdjustResources — CPU/Memory
@@ -689,7 +693,9 @@ coexist, is the only safe option available without a deeper KEDA integration (no
 flowchart TD
     Resp(["AdjustResources response<br/>(containerName, targetCpu/targetMemory)"]) --> Named{"containerName<br/>+ at least one target set?"}
     Named -- no --> Failed1(["Watching + Failed"])
-    Named -- yes --> Parse{"quantities parse?"}
+    Named -- yes --> Ext{"profile sets<br/>resourcesExternallyManaged?"}
+    Ext -- yes --> Deferred0(["Watching + Deferred"])
+    Ext -- no --> Parse{"quantities parse?"}
     Parse -- no --> Failed2(["Watching + Failed"])
     Parse -- yes --> Found{"named container<br/>exists in template?"}
     Found -- no --> Failed3(["Watching + Failed"])
@@ -719,13 +725,13 @@ Imposing brand-new requests/limits on it wouldn't be an *adjustment*, it would b
 resource constraint, and would silently flip its QoS class from `BestEffort` to `Guaranteed` — a
 bigger, different decision than this action is meant to make on its own. `dispatchResource`
 checks this (`resolveResourceState`) before ever reaching `Decided`, the same guardrail shape as
-the KEDA-managed check above.
+the externally-managed check above.
 
 **Bounds** (`Reconciler.MinCPU/MaxCPU/MinMemory/MaxMemory`, env `REBALANCE_MIN_CPU` /
 `REBALANCE_MAX_CPU` / `REBALANCE_MIN_MEMORY` / `REBALANCE_MAX_MEMORY`, defaults `50m`–`2` CPU and
 `64Mi`–`2Gi` Memory) are env-var/default only — unlike replica bounds, no existing cluster object
-is consulted. A per-workload CPU/Memory autoscaler (VPA) is a separate CRD this module doesn't
-already depend on; pulling it in for this guardrail was deliberately out of scope.
+is consulted. A workload whose CPU/Memory is owned by a VPA (or anything else) is marked with
+`resourcesExternallyManaged` instead of being detected.
 
 **In-place resize is best-effort, not guaranteed.** `resourceEnactor` always patches the
 workload's pod template first — that alone guarantees the target resources apply eventually (the
@@ -1135,6 +1141,7 @@ Permissions added specifically for this package (`+kubebuilder:rbac` markers liv
 +kubebuilder:rbac:groups="autoscaling",resources=horizontalpodautoscalers,verbs=get;list;watch
 +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 +kubebuilder:rbac:groups="",resources=pods/resize,verbs=update
++kubebuilder:rbac:groups="policy",resources=poddisruptionbudgets,verbs=get;list;watch
 ```
 
 The two `pods` markers (`delete` here, `get;list` from `resource_enactor.go`) merge into the same

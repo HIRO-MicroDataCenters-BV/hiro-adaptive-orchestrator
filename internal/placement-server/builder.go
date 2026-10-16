@@ -63,6 +63,9 @@ type DecisionContextBuilder struct {
 	// eaoGVK is the GroupVersionKind used to list EnergyAwareOrchestration resources.
 	// Configurable via EAO_GROUP / EAO_VERSION / EAO_KIND environment variables.
 	eaoGVK schema.GroupVersionKind
+
+	zoneLabel   string
+	gpuResource corev1.ResourceName
 }
 
 // NewDecisionContextBuilder creates a new builder.
@@ -74,12 +77,19 @@ func NewDecisionContextBuilder(
 	c client.Client,
 	profileIndexField string,
 	eaoGVK schema.GroupVersionKind,
+	opts ...BuilderOption,
 ) *DecisionContextBuilder {
-	return &DecisionContextBuilder{
+	b := &DecisionContextBuilder{
 		client:            c,
 		profileIndexField: profileIndexField,
 		eaoGVK:            eaoGVK,
+		zoneLabel:         DefaultZoneLabel,
+		gpuResource:       DefaultGPUResource,
 	}
+	for _, opt := range opts {
+		opt(b)
+	}
+	return b
 }
 
 // Build assembles a DecisionRequest for a single unscheduled pod.
@@ -157,6 +167,12 @@ func (b *DecisionContextBuilder) Build(
 		}
 	}
 
+	// Best-effort, like energy data: a decider must cope with no NodeStats.
+	nodeStats, err := b.buildNodeStats(ctx, nodes, profile.Spec.ApplicationRef)
+	if err != nil {
+		logger.Info("builder: node stats unavailable, skipping", "pod", pod.Name, "err", err)
+	}
+
 	// -------------------------------------------------------------------------
 	// Step 4: Assemble the full DecisionRequest.
 	// -------------------------------------------------------------------------
@@ -167,6 +183,7 @@ func (b *DecisionContextBuilder) Build(
 		CandidateNodes: nodes,
 		AOProfile:      aoProfile,
 		EAOProfile:     eaoProfile,
+		NodeStats:      nodeStats,
 	}
 
 	logValues := []any{
@@ -180,6 +197,7 @@ func (b *DecisionContextBuilder) Build(
 		"currentPlacementNode", aoProfile.CurrentPlacement.NodeName,
 		"energyEnabled", profile.Spec.Placement.Awareness.Energy,
 		"eaoDataAttached", eaoProfile != nil,
+		"nodeStats", len(nodeStats),
 	}
 	// nil when energy awareness is off or no EAO object exists for the pod.
 	if eaoProfile != nil {
@@ -408,25 +426,49 @@ func mapEAOToProfileContext(eao *unstructured.Unstructured) *EAOProfileContext {
 			Reason:             reason,
 			NextEvaluationTime: nextEval,
 		}
+		slotStart, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "scheduledSlot", "slotStart")
+		slotEnd, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "scheduledSlot", "slotEnd")
+		if slotStart != "" || slotEnd != "" {
+			ctx.Decision.ScheduledSlot = &EAOScheduledSlot{SlotStart: slotStart, SlotEnd: slotEnd}
+		}
 	}
 
+	ctx.LastUpdated, _, _ = unstructured.NestedString(eao.Object, "status", "lastUpdated")
+
 	// --- status.energyMetrics ---
-	requiredWatts, foundRequired, _ := unstructured.NestedFloat64(eao.Object, "status", "energyMetrics", "requiredWatts")
+	requiredWatts, foundRequired := nestedNumber(eao.Object, "status", "energyMetrics", "requiredWatts")
 	sufficient, foundSufficient, _ := unstructured.NestedBool(eao.Object, "status", "energyMetrics", "sufficient")
 	if foundRequired || foundSufficient {
 		ctx.EnergyMetrics = &EAOEnergyMetrics{
 			RequiredWatts: requiredWatts,
 			Sufficient:    sufficient,
 		}
-		ctx.EnergyMetrics.CurrentSlotAvailableWatts, _, _ = unstructured.NestedFloat64(
+		ctx.EnergyMetrics.MeasuredWatts, _ = nestedNumber(eao.Object, "status", "energyMetrics", "measuredWatts")
+		ctx.EnergyMetrics.CurrentSlotAvailableWatts, _ = nestedNumber(
 			eao.Object, "status", "energyMetrics", "currentSlotAvailableWatts",
 		)
-		ctx.EnergyMetrics.CurrentSlotConsumedWatts, _, _ = unstructured.NestedFloat64(
+		ctx.EnergyMetrics.CurrentSlotConsumedWatts, _ = nestedNumber(
 			eao.Object, "status", "energyMetrics", "currentSlotConsumedWatts",
 		)
 	}
 
 	return ctx
+}
+
+// nestedNumber reads a JSON number that unstructured may have decoded as
+// int64 (whole values) or float64; NestedFloat64 alone rejects the former.
+func nestedNumber(obj map[string]any, fields ...string) (float64, bool) {
+	v, found, err := unstructured.NestedFieldNoCopy(obj, fields...)
+	if !found || err != nil {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int64:
+		return float64(n), true
+	}
+	return 0, false
 }
 
 // =============================================================================
@@ -445,6 +487,14 @@ func mapEAOToProfileContext(eao *unstructured.Unstructured) *EAOProfileContext {
 // candidate (there's no scheduling cycle proposing a filtered subset).
 // =============================================================================
 
+// RebalanceFacts are rebalance inputs the engine already resolved (it owns
+// trigger evaluation and HPA/KEDA/PDB knowledge); each may be nil.
+type RebalanceFacts struct {
+	Trigger  *RebalanceTrigger
+	Workload *RebalanceWorkload
+	PDB      *RebalancePDB
+}
+
 // BuildRebalanceContext assembles a DecisionRequest for the rebalance
 // engine's Evaluating stage. Reuses the same AOProfileContext/EAOProfileContext
 // assembly as Build so the AI sees the same profile shape either way — only
@@ -455,6 +505,7 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 	decisionID string,
 	reason string,
 	recentDecisions []orchestrationv1alpha1.RebalanceDecision,
+	facts RebalanceFacts,
 ) (*DecisionRequest, error) {
 	logger := logf.FromContext(ctx)
 
@@ -481,17 +532,27 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 		}
 	}
 
+	nodeStats, err := b.buildNodeStats(ctx, nodes, profile.Spec.ApplicationRef)
+	if err != nil {
+		logger.Info("builder: node stats unavailable for rebalance context, skipping",
+			"profile", profile.Name, "err", err)
+	}
+
 	req := &DecisionRequest{
 		RequestID:      decisionID,
 		Timestamp:      metav1.Now(),
 		CandidateNodes: nodes,
 		AOProfile:      aoProfile,
 		EAOProfile:     eaoProfile,
+		NodeStats:      nodeStats,
 		RebalanceContext: &RebalanceContext{
 			Reason:            reason,
 			DecisionID:        decisionID,
 			CurrentPlacements: buildCurrentPlacements(pods),
 			RecentDecisions:   convertRecentDecisions(recentDecisions),
+			Trigger:           facts.Trigger,
+			Workload:          facts.Workload,
+			PDB:               facts.PDB,
 		},
 	}
 
@@ -501,7 +562,10 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 		"reason", reason,
 		"podCount", len(pods),
 		"candidateNodes", len(nodes),
+		"nodeStats", len(nodeStats),
 		"energyDataAttached", eaoProfile != nil,
+		"workloadAttached", facts.Workload != nil,
+		"pdbAttached", facts.PDB != nil,
 	)
 
 	return req, nil

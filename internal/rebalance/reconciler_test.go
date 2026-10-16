@@ -28,6 +28,7 @@ import (
 	"golang.org/x/time/rate"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	policyv1 "k8s.io/api/policy/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -77,6 +78,9 @@ func newTestReconcilerWithAgent(t *testing.T, agentURL string, objs ...client.Ob
 	if err := autoscalingv2.AddToScheme(scheme); err != nil {
 		t.Fatalf("adding autoscalingv2 scheme: %v", err)
 	}
+	if err := policyv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding policyv1 scheme: %v", err)
+	}
 	if err := orchestrationv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("adding orchestration scheme: %v", err)
 	}
@@ -89,6 +93,7 @@ func newTestReconcilerWithAgent(t *testing.T, agentURL string, objs ...client.Ob
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&orchestrationv1alpha1.OrchestrationProfile{}).
+		WithIndex(&corev1.Pod{}, placementserver.PodNodeNameIndex, placementserver.PodNodeNameIndexFunc).
 		WithObjects(objs...).
 		WithIndex(&orchestrationv1alpha1.OrchestrationProfile{}, testProfileIndexField,
 			func(obj client.Object) []string {

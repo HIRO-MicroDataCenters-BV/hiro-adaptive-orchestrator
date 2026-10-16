@@ -48,6 +48,8 @@ func logInitialPlacementDecision(ctx context.Context, req *DecisionRequest, resp
 		ProfileName: req.AOProfile.ProfileName,
 		TargetNode:  topScoreNodeName(resp.NodeScores),
 		Reason:      resp.Reason,
+		DecidedBy:   resp.DecidedBy,
+		Confidence:  resp.Confidence,
 	}
 
 	logger.Info("audit: decision recorded",

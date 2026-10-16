@@ -97,6 +97,10 @@ hiro-operator:
     EAO_GROUP: eas.hiro.io
     EAO_VERSION: v1
     EAO_KIND: EnergyAwareOrchestration
+    # Per-node snapshot sent to the decision agent: zone label (Spread) and
+    # the extended resource counted as GPU (e.g. amd.com/gpu).
+    NODE_STATS_ZONE_LABEL: topology.kubernetes.io/zone
+    NODE_STATS_GPU_RESOURCE: nvidia.com/gpu
     # Scheduler extender HTTP paths.
     EXTENDER_FILTER_PATH: /extender/filter
     EXTENDER_PRIORITIZE_PATH: /extender/prioritize

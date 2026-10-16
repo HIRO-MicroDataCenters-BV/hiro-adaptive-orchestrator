@@ -26,8 +26,7 @@ import (
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
-	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
-)
+	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server")
 
 // actionDispatcher carries a successful AI response the rest of the way to a
 // terminal transition (directly, or via Decided/Enacting for actions that
@@ -306,9 +305,26 @@ func dispatchMoveDryRun(
 	}
 }
 
+// deferExternallyManaged ends the cycle Deferred because the profile marks dimension as externally managed.
+func (r *Reconciler) deferExternallyManaged(
+	ctx context.Context,
+	key types.NamespacedName,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	resp *placementserver.RebalanceDecisionResponse,
+	cooldown time.Duration,
+	dimension string,
+) {
+	reason := fmt.Sprintf("%s are externally managed (spec.rebalancing): not changing them", dimension)
+	if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeDeferred, Cooldown: cooldown}); err != nil {
+		logf.FromContext(ctx).Error(err, "rebalance: dispatch transition to Watching (Deferred, autoscaler-managed) failed",
+			"profile", profile.Name, "dimension", dimension)
+	}
+}
+
 // dispatchScale applies the same improvement-threshold guardrail as Move,
-// then defers entirely to KEDA if the workload is already KEDA-managed (see
-// resolveReplicaBounds), then a replica-bounds guardrail (an existing
+// then defers entirely if the profile marks replicas externally managed,
+// then a replica-bounds guardrail (an existing
 // HorizontalPodAutoscaler on the workload wins over the package/env
 // defaults), and for an accepted recommendation drives Decided -> Enacting ->
 // scaleEnactor -> Watching. Unlike Move, AdjustReplicas isn't gated by any
@@ -349,15 +365,12 @@ func dispatchScale(
 		return
 	}
 
-	bounds := resolveReplicaBounds(ctx, r.Client, profile, r.MinReplicas, r.MaxReplicas)
-	if bounds.KEDAManaged {
-		reason := fmt.Sprintf("workload is managed by KEDA ScaledObject %s: deferring to its own autoscaling", bounds.KEDAOwner)
-		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeDeferred, Cooldown: cooldown}); err != nil {
-			logger.Error(err, "rebalance: dispatch transition to Watching (Deferred, KEDA-managed) failed", "profile", profile.Name)
-		}
+	if profile.Spec.Rebalancing.ReplicasExternallyManaged {
+		r.deferExternallyManaged(ctx, key, profile, resp, cooldown, "replicas")
 		return
 	}
+
+	bounds := resolveReplicaBounds(ctx, r.Client, profile, r.MinReplicas, r.MaxReplicas)
 
 	if resp.TargetReplicas < bounds.Min || resp.TargetReplicas > bounds.Max {
 		reason := fmt.Sprintf("targetReplicas %d outside [%d, %d] (%s): %s",
@@ -473,6 +486,11 @@ func dispatchResource(
 			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Failed, malformed AdjustResources) failed", "profile", profile.Name)
 		}
+		return
+	}
+
+	if profile.Spec.Rebalancing.ResourcesExternallyManaged {
+		r.deferExternallyManaged(ctx, key, profile, resp, cooldown, "resources")
 		return
 	}
 

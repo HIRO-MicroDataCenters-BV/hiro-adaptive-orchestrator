@@ -292,6 +292,13 @@ Every parameter can be set as an environment variable before calling any deploy 
 | `EAO_VERSION` | `v1` | API version |
 | `EAO_KIND` | `EnergyAwareOrchestration` | Kind name |
 
+#### Operator — Node stats sent to the decision agent
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NODE_STATS_ZONE_LABEL` | `topology.kubernetes.io/zone` | Node label read as `nodeStats[].zone` (used by Spread) |
+| `NODE_STATS_GPU_RESOURCE` | `nvidia.com/gpu` | Extended resource counted as `nodeStats[].*.gpu` (e.g. `amd.com/gpu`) |
+
 #### Operator — Rebalance Engine
 
 | Variable | Default | Description |
@@ -391,6 +398,8 @@ The operator pod reads configuration exclusively from environment variables — 
 | `EAO_GROUP` | `eas.hiro.io` | `decision.NewDecisionContextBuilder` |
 | `EAO_VERSION` | `v1` | `decision.NewDecisionContextBuilder` |
 | `EAO_KIND` | `EnergyAwareOrchestration` | `decision.NewDecisionContextBuilder` |
+| `NODE_STATS_ZONE_LABEL` | `topology.kubernetes.io/zone` | `placementserver.WithNodeStatsLabels` |
+| `NODE_STATS_GPU_RESOURCE` | `nvidia.com/gpu` | `placementserver.WithNodeStatsLabels` |
 | `ENABLE_WEBHOOKS` | `false` | `cmd/main.go` — starts the webhook server when `!= "false"`; set to `true` by Phase 8 after the TLS cert is ready |
 | `HIRO_SCHEDULER_NAME` | `hiro-scheduler` | `cmd/main.go` → `SetupPodWebhookWithManager` — the name injected into `spec.schedulerName` |
 

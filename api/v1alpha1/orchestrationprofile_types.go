@@ -87,6 +87,14 @@ type RebalancingSpec struct {
 	// cycles this workload may have before the rebalance loop escalates and
 	// pauses itself. <= 0 uses DefaultEscalationThreshold.
 	EscalationThreshold int32 `json:"escalationThreshold,omitempty"`
+
+	// replicasExternallyManaged means something outside this operator owns the replica count; it is never changed.
+	// +optional
+	ReplicasExternallyManaged bool `json:"replicasExternallyManaged,omitempty"`
+
+	// resourcesExternallyManaged means something outside this operator owns container CPU/memory; they are never changed.
+	// +optional
+	ResourcesExternallyManaged bool `json:"resourcesExternallyManaged,omitempty"`
 }
 
 // OrchestrationProfileSpec defines the desired state of OrchestrationProfile

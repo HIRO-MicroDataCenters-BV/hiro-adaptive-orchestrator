@@ -142,6 +142,7 @@ func newTestBuilder(t *testing.T, objs ...client.Object) *DecisionContextBuilder
 				return []string{ref.Namespace + "/" + ref.Name}
 			},
 		).
+		WithIndex(&corev1.Pod{}, PodNodeNameIndex, PodNodeNameIndexFunc).
 		Build()
 
 	return NewDecisionContextBuilder(c, testProfileIndexField, testEAOGVK)
@@ -167,7 +168,7 @@ func TestBuildRebalanceContext_AssemblesPlacementsAndCandidateNodes(t *testing.T
 		},
 	}
 
-	req, err := b.BuildRebalanceContext(context.Background(), profile, testDecisionID, "CPUThreshold: node-a at 92%", recentDecisions)
+	req, err := b.BuildRebalanceContext(context.Background(), profile, testDecisionID, "CPUThreshold: node-a at 92%", recentDecisions, RebalanceFacts{})
 	if err != nil {
 		t.Fatalf("BuildRebalanceContext: %v", err)
 	}
@@ -225,7 +226,7 @@ func TestBuildRebalanceContext_EnergyAwareAttachesEAOData(t *testing.T) {
 		testRebalanceEAO("Critical", 500, "DeployImmediately", "window open", false),
 	)
 
-	req, err := b.BuildRebalanceContext(context.Background(), profile, "decision-2", "EnergyThreshold: verdict flipped", nil)
+	req, err := b.BuildRebalanceContext(context.Background(), profile, "decision-2", "EnergyThreshold: verdict flipped", nil, RebalanceFacts{})
 	if err != nil {
 		t.Fatalf("BuildRebalanceContext: %v", err)
 	}

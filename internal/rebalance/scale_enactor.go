@@ -23,7 +23,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -71,24 +70,10 @@ type scaleResult struct {
 	reason  string
 }
 
-// replicaBounds is resolveReplicaBounds' result: the [Min, Max] range
-// dispatchScale's guardrail enforces, plus whether the workload is already
-// managed by KEDA. dispatchScale must defer entirely — bounds included, no
-// patch attempted — whenever KEDAManaged is true, since KEDA already owns
-// the target-replica decision for that workload.
+// replicaBounds is the [Min, Max] range dispatchScale's guardrail enforces.
 type replicaBounds struct {
 	Min, Max int32
 	Source   string
-
-	// KEDAManaged is true when the HPA behind Min/Max was created by a KEDA
-	// ScaledObject (identified by its ownerReferences), not by a user
-	// directly. See resolveReplicaBounds' doc comment for why this is
-	// detectable from the HPA alone.
-	KEDAManaged bool
-
-	// KEDAOwner is the owning ScaledObject's name, for a readable Deferred
-	// reason. Empty unless KEDAManaged.
-	KEDAOwner string
 }
 
 // resolveReplicaBounds returns the [Min, Max] replica range dispatchScale's
@@ -98,13 +83,6 @@ type replicaBounds struct {
 // the standard place a user already expresses "how far this workload may
 // scale," so honour it instead of a second, competing bound. No matching HPA
 // falls back to fallbackMin/fallbackMax (<= 0 uses the package defaults).
-//
-// KEDA doesn't scale a workload's replicas directly — it creates and drives
-// a real HorizontalPodAutoscaler of its own, fed by its custom metrics
-// adapter instead of CPU/memory. That generated HPA's ownerReferences point
-// back to the ScaledObject that created it, so a found HPA is checked for
-// KEDA ownership here — no new RBAC or CRD scheme registration needed, since
-// it only inspects an HPA object already fetched for bounds.
 func resolveReplicaBounds(
 	ctx context.Context,
 	c client.Client,
@@ -131,29 +109,13 @@ func resolveReplicaBounds(
 			if hpa.Spec.MinReplicas != nil {
 				lo = *hpa.Spec.MinReplicas
 			}
-			bounds := replicaBounds{
+			return replicaBounds{
 				Min: lo, Max: hpa.Spec.MaxReplicas,
 				Source: fmt.Sprintf("HorizontalPodAutoscaler %s", hpa.Name),
 			}
-			if owner := kedaScaledObjectOwner(hpa.OwnerReferences); owner != "" {
-				bounds.KEDAManaged = true
-				bounds.KEDAOwner = owner
-			}
-			return bounds
 		}
 	}
 	return replicaBounds{Min: fallbackMin, Max: fallbackMax, Source: "default bounds"}
-}
-
-// kedaScaledObjectOwner returns the name of the owning KEDA ScaledObject, if
-// owners contains one — see resolveReplicaBounds' doc comment.
-func kedaScaledObjectOwner(owners []metav1.OwnerReference) string {
-	for _, owner := range owners {
-		if owner.Kind == "ScaledObject" && owner.APIVersion == "keda.sh/v1alpha1" {
-			return owner.Name
-		}
-	}
-	return ""
 }
 
 // scaleEnactor patches profile's workload (Deployment or StatefulSet) to
