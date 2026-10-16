@@ -28,3 +28,6 @@ spec:
     # EnergyThreshold/CPUThreshold/MemoryThreshold/NodeFailure/Scheduled
     triggerConditions:
       - "EnergyThreshold"
+    # true = an HPA/KEDA/GitOps (replicas) or a VPA (CPU/memory) owns it; never changed
+    replicasExternallyManaged: false
+    resourcesExternallyManaged: false

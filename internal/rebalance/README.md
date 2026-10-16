@@ -681,7 +681,7 @@ spec:
 
 When `replicasExternallyManaged` is set, `dispatchScale` never calls `scaleEnactor`: the cycle
 ends `Watching` + `Deferred`. `resourcesExternallyManaged` does the same for `dispatchResource`.
-Both flags also travel to the decision agent in `rebalanceContext.workload`, so it can avoid
+Both flags also travel to the decision agent in `aoProfile.rebalancing`, so it can avoid
 proposing those actions at all. The operator doesn't try to detect *which* tool owns sizing — any
 controller (KEDA, a custom autoscaler, Argo CD) can, and patching underneath it would just flap.
 Both default to `false`, meaning the operator may change that dimension.

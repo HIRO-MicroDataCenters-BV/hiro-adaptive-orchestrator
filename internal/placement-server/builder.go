@@ -300,9 +300,11 @@ func buildAOProfileContext(
 		},
 		CurrentPlacement: buildCurrentPlacement(pod),
 		Rebalancing: RebalancingConfig{
-			Enabled:           profile.Spec.Rebalancing.Enabled,
-			CooldownSeconds:   profile.Spec.Rebalancing.CooldownSeconds,
-			TriggerConditions: triggerConditions,
+			Enabled:                    profile.Spec.Rebalancing.Enabled,
+			CooldownSeconds:            profile.Spec.Rebalancing.CooldownSeconds,
+			TriggerConditions:          triggerConditions,
+			ReplicasExternallyManaged:  profile.Spec.Rebalancing.ReplicasExternallyManaged,
+			ResourcesExternallyManaged: profile.Spec.Rebalancing.ResourcesExternallyManaged,
 		},
 	}
 }
@@ -518,6 +520,7 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 	if err != nil {
 		return nil, fmt.Errorf("listing candidate nodes for rebalance context: %w", err)
 	}
+	nodes = filterTolerated(ctx, nodes, pods)
 
 	aoProfile := buildAOProfileContext(profile, nil)
 
@@ -591,6 +594,44 @@ func (b *DecisionContextBuilder) listReadyNodes(ctx context.Context) ([]*corev1.
 		}
 	}
 	return ready, nil
+}
+
+// filterTolerated drops nodes with a NoSchedule/NoExecute taint the app's pods don't tolerate,
+// mirroring the scheduler's TaintToleration filter that rebalance candidates otherwise skip.
+func filterTolerated(ctx context.Context, nodes []*corev1.Node, pods []corev1.Pod) []*corev1.Node {
+	var tolerations []corev1.Toleration
+	if len(pods) > 0 {
+		tolerations = pods[0].Spec.Tolerations
+	}
+	kept := make([]*corev1.Node, 0, len(nodes))
+	for _, node := range nodes {
+		if toleratesAll(ctx, node.Spec.Taints, tolerations) {
+			kept = append(kept, node)
+		}
+	}
+	return kept
+}
+
+func toleratesAll(ctx context.Context, taints []corev1.Taint, tolerations []corev1.Toleration) bool {
+	logger := logf.FromContext(ctx)
+	for i := range taints {
+		taint := &taints[i]
+		if taint.Effect == corev1.TaintEffectPreferNoSchedule {
+			continue
+		}
+		tolerated := false
+		for j := range tolerations {
+			// false: the Gt/Lt operators are behind an alpha gate that's off by default.
+			if tolerations[j].ToleratesTaint(logger, taint, false) {
+				tolerated = true
+				break
+			}
+		}
+		if !tolerated {
+			return false
+		}
+	}
+	return true
 }
 
 // fetchEAOProfileForApp is fetchEAOProfile's rebalance-side counterpart: the

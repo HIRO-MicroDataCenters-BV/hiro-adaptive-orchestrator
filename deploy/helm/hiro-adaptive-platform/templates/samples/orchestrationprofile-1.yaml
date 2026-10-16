@@ -25,6 +25,8 @@ spec:
   rebalancing:
     enabled: {{ .Values.samples.rebalancing.enabled }}
     dryRun: {{ .Values.samples.rebalancing.dryRun }}
+    replicasExternallyManaged: {{ .Values.samples.rebalancing.replicasExternallyManaged }}
+    resourcesExternallyManaged: {{ .Values.samples.rebalancing.resourcesExternallyManaged }}
     cooldownSeconds: 300
     triggerConditions:
       - "EnergyThreshold"

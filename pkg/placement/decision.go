@@ -155,10 +155,6 @@ type RebalanceWorkload struct {
 	// must stay within: the HPA's when one exists, else operator defaults.
 	MinReplicas int32 `json:"minReplicas"`
 	MaxReplicas int32 `json:"maxReplicas"`
-
-	// True means the profile says something else owns that dimension; never change it.
-	ReplicasExternallyManaged  bool `json:"replicasExternallyManaged"`
-	ResourcesExternallyManaged bool `json:"resourcesExternallyManaged"`
 }
 
 // RebalancePDB is the disruption budget that limits evictions for a Move.
@@ -342,6 +338,10 @@ type RebalancingConfig struct {
 	Enabled           bool     `json:"enabled"`
 	CooldownSeconds   int      `json:"cooldownSeconds,omitempty"`
 	TriggerConditions []string `json:"triggerConditions,omitempty"`
+
+	// True means the profile says something else owns that dimension; never change it.
+	ReplicasExternallyManaged  bool `json:"replicasExternallyManaged"`
+	ResourcesExternallyManaged bool `json:"resourcesExternallyManaged"`
 }
 
 // =============================================================================

@@ -309,6 +309,9 @@ samples:
   rebalancing:
     enabled: true
     dryRun: false
+    # true = an HPA/KEDA/GitOps (replicas) or a VPA (CPU/memory) owns it; never changed.
+    replicasExternallyManaged: false
+    resourcesExternallyManaged: false
   # Unreferenced by any profile below — ported for parity with
   # config/samples/, which is unreferenced there too.
   nginxApp:

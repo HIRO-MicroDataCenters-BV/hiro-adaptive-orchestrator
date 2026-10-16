@@ -44,7 +44,6 @@ func testPDB(selector *metav1.LabelSelector, allowed int32) *policyv1.PodDisrupt
 
 func TestRebalanceFacts_TriggerWorkloadAndPDB(t *testing.T) {
 	profile := testProfileWithConditions(TriggerCPUThreshold)
-	profile.Spec.Rebalancing.ReplicasExternallyManaged = true
 	pdb := testPDB(&metav1.LabelSelector{MatchLabels: map[string]string{"app": "app-a"}}, 0)
 	r, _ := newTestReconciler(t, testScalableDeployment(1), testHPA("app-a-hpa", 2, 6),
 		testPod("app-a-1", "node-a", corev1.PodRunning), pdb, profile)
@@ -62,10 +61,6 @@ func TestRebalanceFacts_TriggerWorkloadAndPDB(t *testing.T) {
 	w := facts.Workload
 	if w == nil || w.Replicas != 1 || w.MinReplicas != 2 || w.MaxReplicas != 6 {
 		t.Fatalf("workload = %+v, want replicas 1 and HPA bounds [2, 6]", w)
-	}
-	if !w.ReplicasExternallyManaged || w.ResourcesExternallyManaged {
-		t.Errorf("workload flags = replicas %v resources %v, want true/false from the profile",
-			w.ReplicasExternallyManaged, w.ResourcesExternallyManaged)
 	}
 	if facts.PDB == nil || facts.PDB.Name != "app-a-pdb" || facts.PDB.AllowedDisruptions != 0 {
 		t.Errorf("pdb = %+v, want app-a-pdb with 0 allowed disruptions", facts.PDB)
@@ -122,8 +117,11 @@ func TestReconciler_SendsRebalanceFactsToAgent(t *testing.T) {
 	if rc == nil || rc.Trigger == nil || rc.Trigger.Type != string(TriggerScheduled) {
 		t.Fatalf("rebalanceContext = %+v, want trigger Scheduled", rc)
 	}
-	if rc.Workload == nil || !rc.Workload.ResourcesExternallyManaged || rc.Workload.Replicas != 1 {
-		t.Errorf("workload = %+v, want replicas 1 and resourcesExternallyManaged", rc.Workload)
+	if rc.Workload == nil || rc.Workload.Replicas != 1 {
+		t.Errorf("workload = %+v, want replicas 1", rc.Workload)
+	}
+	if reb := got.AOProfile.Rebalancing; !reb.ResourcesExternallyManaged || reb.ReplicasExternallyManaged {
+		t.Errorf("aoProfile.rebalancing = %+v, want resourcesExternallyManaged only", reb)
 	}
 	if rc.PDB != nil {
 		t.Errorf("pdb = %+v, want nil when no PodDisruptionBudget exists", rc.PDB)
@@ -139,7 +137,7 @@ func TestReconciler_ResourceDefersWhenResourcesExternallyManaged(t *testing.T) {
 
 	profile := testProfileWithConditions(TriggerScheduled)
 	profile.Spec.Rebalancing.ResourcesExternallyManaged = true
-	r, c := newTestReconcilerWithAgent(t, server.URL, testResizableDeployment(true), testRunningPod("app-a-1"), profile)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testResizableDeployment(true), testRunningPod("app-a-2"), profile)
 
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
