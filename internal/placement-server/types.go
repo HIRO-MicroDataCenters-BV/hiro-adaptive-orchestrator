@@ -38,7 +38,8 @@ type (
 	ContainerInfo             = placement.ContainerInfo
 	RebalancingConfig         = placement.RebalancingConfig
 	NodeStat                  = placement.NodeStat
-	ResourceAmounts           = placement.ResourceAmounts
+	NodeResource              = placement.NodeResource
+	NodePlatform              = placement.NodePlatform
 	EAOProfileContext         = placement.EAOProfileContext
 	EAODecision               = placement.EAODecision
 	EAOScheduledSlot          = placement.EAOScheduledSlot

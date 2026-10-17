@@ -18,18 +18,23 @@ package placementserver
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+const testGPU = "nvidia.com/gpu"
 
 func withRequests(pod *corev1.Pod, uid, cpu, memory string) *corev1.Pod {
 	pod.UID = types.UID(uid)
 	pod.Spec.Containers = []corev1.Container{{
-		Name: "app",
+		Name:  "app",
+		Image: "nginx",
 		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse(cpu),
 			corev1.ResourceMemory: resource.MustParse(memory),
@@ -38,20 +43,31 @@ func withRequests(pod *corev1.Pod, uid, cpu, memory string) *corev1.Pod {
 	return pod
 }
 
-func sizedNode(name string, labels map[string]string, gpuResource string) *corev1.Node {
+func sizedNode(name string, labels map[string]string) *corev1.Node {
 	node := testNode(name, true)
 	node.Labels = labels
 	node.Status.Allocatable = corev1.ResourceList{
-		corev1.ResourceCPU:               resource.MustParse("4"),
-		corev1.ResourceMemory:            resource.MustParse("8Gi"),
-		corev1.ResourceName(gpuResource): resource.MustParse("2"),
+		corev1.ResourceCPU:    resource.MustParse("4"),
+		corev1.ResourceMemory: resource.MustParse("8Gi"),
+		corev1.ResourcePods:   resource.MustParse("110"),
+		testGPU:               resource.MustParse("2"),
 	}
+	node.Status.NodeInfo = corev1.NodeSystemInfo{Architecture: "arm64", OperatingSystem: "linux", KubeletVersion: "v1.35.0"}
 	return node
 }
 
-func TestBuildNodeStats_SumsRequestsAndCountsAppPods(t *testing.T) {
-	nodeA := sizedNode("node-a", map[string]string{DefaultZoneLabel: "zone-1"}, DefaultGPUResource)
-	nodeB := sizedNode("node-b", nil, DefaultGPUResource)
+func requested(t *testing.T, s NodeStat, name string) int64 {
+	t.Helper()
+	r, ok := s.Resources[name]
+	if !ok || r.Requested == nil {
+		t.Fatalf("resource %q = %+v, want a known requested value", name, r)
+	}
+	return *r.Requested
+}
+
+func TestBuildNodeStats_DescribesNodeAndUsage(t *testing.T) {
+	nodeA := sizedNode("node-a", map[string]string{"topology.kubernetes.io/zone": "zone-1"})
+	nodeB := sizedNode("node-b", nil)
 
 	appPod := withRequests(testAppPod("app-a-1", "node-a", corev1.PodRunning), "uid-1", "500m", "256Mi")
 	otherPod := withRequests(testAppPod("other-1", "node-a", corev1.PodRunning), "uid-2", "250m", "128Mi")
@@ -59,44 +75,95 @@ func TestBuildNodeStats_SumsRequestsAndCountsAppPods(t *testing.T) {
 	donePod := withRequests(testAppPod("app-a-done", "node-a", corev1.PodSucceeded), "uid-3", "1", "1Gi")
 
 	b := newTestBuilder(t, testAppDeployment(), nodeA, nodeB, appPod, otherPod, donePod)
-	stats, err := b.buildNodeStats(context.Background(), []*corev1.Node{nodeA, nodeB}, testAppRef())
-	if err != nil {
-		t.Fatalf("buildNodeStats: %v", err)
-	}
+	stats := b.buildNodeStats(context.Background(), []*corev1.Node{nodeA, nodeB}, testAppRef(), nil)
 	if len(stats) != 2 {
 		t.Fatalf("len(stats) = %d, want 2", len(stats))
 	}
 
 	a := stats[0]
-	if a.Zone != "zone-1" || a.AppPods != 1 {
-		t.Errorf("node-a zone=%q appPods=%d, want zone-1 and 1", a.Zone, a.AppPods)
+	if a.Name != "node-a" || a.Labels["topology.kubernetes.io/zone"] != "zone-1" {
+		t.Errorf("node-a name/labels = %q %v", a.Name, a.Labels)
 	}
-	if a.Requested.CPUMilli != 750 || a.Requested.MemoryBytes != 384*1024*1024 {
-		t.Errorf("node-a requested = %+v, want 750m CPU and 384Mi (succeeded pod excluded)", a.Requested)
+	if a.Conditions["Ready"] != "True" || a.Platform.Arch != "arm64" || a.Platform.Kubelet != "v1.35.0" {
+		t.Errorf("node-a conditions/platform = %v %+v", a.Conditions, a.Platform)
 	}
-	if a.Allocatable.CPUMilli != 4000 || a.Allocatable.GPU != 2 {
-		t.Errorf("node-a allocatable = %+v, want 4000m CPU and 2 GPU", a.Allocatable)
+	if got := requested(t, a, "cpu"); got != 750 {
+		t.Errorf("cpu requested = %d, want 750 (succeeded pod excluded)", got)
 	}
-	if a.Energy != nil {
-		t.Errorf("energy = %v, want nil until a per-node energy source exists", *a.Energy)
+	if got := requested(t, a, "memory"); got != 384*1024*1024 {
+		t.Errorf("memory requested = %d, want 384Mi", got)
 	}
-	if b := stats[1]; b.AppPods != 0 || b.Requested.CPUMilli != 0 || b.Zone != "" {
-		t.Errorf("node-b = %+v, want empty usage and no zone", b)
+	if got := requested(t, a, "pods"); got != 2 {
+		t.Errorf("pods requested = %d, want 2", got)
+	}
+	if a.Resources["cpu"].Allocatable != 4000 || a.Resources[testGPU].Allocatable != 2 {
+		t.Errorf("allocatable = %+v, want 4000m CPU and 2 GPUs", a.Resources)
+	}
+	if a.AppPods == nil || *a.AppPods != 1 {
+		t.Errorf("appPods = %v, want 1", a.AppPods)
+	}
+	if a.Energy != nil || a.Resources["cpu"].Used != nil {
+		t.Errorf("energy/used should stay null until a source exists")
+	}
+	if got := requested(t, stats[1], "cpu"); got != 0 {
+		t.Errorf("node-b cpu requested = %d, want 0", got)
 	}
 }
 
-func TestBuildNodeStats_HonoursConfiguredLabels(t *testing.T) {
-	node := sizedNode("node-a", map[string]string{"example.com/rack": "rack-7"}, "amd.com/gpu")
+// failNodeListClient fails per-node pod lists, as an unsynced or missing index would.
+type failNodeListClient struct{ client.Client }
+
+func (c failNodeListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	for _, o := range opts {
+		if _, ok := o.(client.MatchingFields); ok {
+			return errors.New("index unavailable")
+		}
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+func TestBuildNodeStats_KeepsNodeWhenUsageUnknown(t *testing.T) {
+	node := sizedNode("node-a", nil)
+	b := newTestBuilder(t, testAppDeployment(), node)
+	b.client = failNodeListClient{b.client}
+
+	stats := b.buildNodeStats(context.Background(), []*corev1.Node{node}, testAppRef(), nil)
+	if len(stats) != 1 {
+		t.Fatalf("len(stats) = %d, want the node kept", len(stats))
+	}
+	if r := stats[0].Resources["cpu"]; r.Allocatable != 4000 || r.Requested != nil {
+		t.Errorf("cpu = %+v, want allocatable 4000 and requested null", r)
+	}
+	if stats[0].AppPods != nil {
+		t.Errorf("appPods = %v, want null", *stats[0].AppPods)
+	}
+}
+
+func TestBuildNodeStats_ImagesPresentForPlacedPod(t *testing.T) {
+	node := sizedNode("node-a", nil)
+	node.Status.Images = []corev1.ContainerImage{{Names: []string{"docker.io/library/nginx:latest"}}}
+	pod := withRequests(testAppPod("new", "", corev1.PodPending), "uid-new", "100m", "64Mi")
+	pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: "cache", Image: "redis:7"})
 
 	b := newTestBuilder(t, testAppDeployment(), node)
-	WithNodeStatsLabels("example.com/rack", "amd.com/gpu")(b)
-
-	stats, err := b.buildNodeStats(context.Background(), []*corev1.Node{node}, testAppRef())
-	if err != nil {
-		t.Fatalf("buildNodeStats: %v", err)
+	stats := b.buildNodeStats(context.Background(), []*corev1.Node{node}, testAppRef(), pod)
+	if got := stats[0].ImagesPresent; len(got) != 1 || got[0] != "nginx" {
+		t.Errorf("imagesPresent = %v, want [nginx] (redis:7 not pulled)", got)
 	}
-	if stats[0].Zone != "rack-7" || stats[0].Allocatable.GPU != 2 {
-		t.Errorf("stats = %+v, want zone rack-7 and 2 amd.com/gpu", stats[0])
+}
+
+func TestWithDefaultTag(t *testing.T) {
+	cases := map[string]string{
+		"nginx":                     "nginx:latest",
+		"nginx:1.25":                "nginx:1.25",
+		"registry:5000/team/app":    "registry:5000/team/app:latest",
+		"registry:5000/team/app:v2": "registry:5000/team/app:v2",
+		"nginx@sha256:abc":          "nginx@sha256:abc",
+	}
+	for in, want := range cases {
+		if got := withDefaultTag(in); got != want {
+			t.Errorf("withDefaultTag(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

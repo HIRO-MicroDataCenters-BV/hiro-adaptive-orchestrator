@@ -49,11 +49,6 @@ type DecisionRequest struct {
 	// Sourced from the kube-scheduler placement context (step 4).
 	Pod *corev1.Pod `json:"pod"`
 
-	// CandidateNodes is the list of nodes the kube-scheduler is considering
-	// for this pod. Sourced from the scheduler's placement context (step 4).
-	// The AI agent scores these nodes and returns them ranked.
-	CandidateNodes []*corev1.Node `json:"candidateNodes"`
-
 	// AOProfile is the OrchestrationProfile governing this pod's application.
 	// Contains the placement strategy, resource awareness flags, and the
 	// current placement snapshot of all existing pods of this application.
@@ -65,10 +60,9 @@ type DecisionRequest struct {
 	// nil when energy awareness is disabled or E.A.O data is unavailable.
 	EAOProfile *EAOProfileContext `json:"eaoProfile,omitempty"`
 
-	// NodeStats is one usage snapshot per candidate node, so a decider can
-	// score without parsing full Node/Pod objects. Best-effort: nil when the
-	// snapshot could not be built.
-	NodeStats []NodeStat `json:"nodeStats,omitempty"`
+	// NodeStats is the candidate list: one entry per node the decider may pick
+	// (scheduler-filtered for placement, Ready and tolerated for rebalance).
+	NodeStats []NodeStat `json:"nodeStats"`
 
 	// RebalanceContext is populated only for rebalance evaluations (the
 	// rebalance engine's Evaluating stage), nil for initial-placement
@@ -163,34 +157,51 @@ type RebalancePDB struct {
 	AllowedDisruptions int32  `json:"allowedDisruptions"`
 }
 
-// NodeStat is a per-node usage snapshot taken from the informer cache.
+// NodeStat is a compact, decision-relevant view of one candidate node.
+// Null pointer fields mean unknown, never zero.
 type NodeStat struct {
-	NodeName string `json:"nodeName"`
+	Name   string            `json:"name"`
+	Labels map[string]string `json:"labels,omitempty"`
 
-	// Zone is the node's topology.kubernetes.io/zone label, if any.
-	Zone string `json:"zone,omitempty"`
+	Taints        []corev1.Taint    `json:"taints,omitempty"`
+	Unschedulable bool              `json:"unschedulable"`
+	Conditions    map[string]string `json:"conditions,omitempty"` // condition type → status
 
-	Allocatable ResourceAmounts `json:"allocatable"`
+	Platform NodePlatform `json:"platform"`
 
-	// Requested sums the requests of every non-terminated pod on the node,
-	// excluding the pod being placed.
-	Requested ResourceAmounts `json:"requested"`
+	// Resources covers every resource the node reports, keyed by resource name.
+	Resources map[string]NodeResource `json:"resources"`
 
 	// AppPods counts this application's non-terminated pods on the node.
-	AppPods int `json:"appPods"`
+	AppPods *int `json:"appPods"`
 
-	// Energy is the node's energy score; always null until per-node energy
-	// data exists. Null means unknown and must never be read as 0.
+	// ImagesPresent lists the placed pod's images already on the node (placement only).
+	ImagesPresent []string `json:"imagesPresent,omitempty"`
+
+	// Energy stays null until per-node energy data exists.
 	Energy *float64 `json:"energy"`
 
 	ObservedAt metav1.Time `json:"observedAt"`
 }
 
-// ResourceAmounts is a resource vector in base units.
-type ResourceAmounts struct {
-	CPUMilli    int64 `json:"cpuMilli"`
-	MemoryBytes int64 `json:"memoryBytes"`
-	GPU         int64 `json:"gpu,omitempty"`
+// NodeResource is one resource in base units (CPU in millicores).
+type NodeResource struct {
+	Allocatable int64 `json:"allocatable"`
+
+	// Requested sums non-terminated pods' requests, excluding the pod being placed.
+	Requested *int64 `json:"requested"`
+
+	// Used is live usage; null until a metrics source is wired in.
+	Used *int64 `json:"used"`
+}
+
+// NodePlatform is the node's OS and runtime stack.
+type NodePlatform struct {
+	Arch    string `json:"arch,omitempty"`
+	OS      string `json:"os,omitempty"`
+	Kernel  string `json:"kernel,omitempty"`
+	Runtime string `json:"runtime,omitempty"`
+	Kubelet string `json:"kubelet,omitempty"`
 }
 
 // RebalanceDecisionResponse is the AI's answer to a rebalance evaluation —

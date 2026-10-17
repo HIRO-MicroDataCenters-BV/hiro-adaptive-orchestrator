@@ -398,12 +398,10 @@ func main() {
 		"schedulerName", hiroSchedulerName,
 	)
 
-	// NODE_STATS_ZONE_LABEL / NODE_STATS_GPU_RESOURCE — empty uses the placementserver defaults.
 	contextBuilder := placementserver.NewDecisionContextBuilder(
 		mgr.GetClient(),
 		controller.ProfileByAppRefIndex,
 		eaoGVK,
-		placementserver.WithNodeStatsLabels(os.Getenv("NODE_STATS_ZONE_LABEL"), os.Getenv("NODE_STATS_GPU_RESOURCE")),
 	)
 
 	// Register the pod scheduler MutatingAdmissionWebhook.

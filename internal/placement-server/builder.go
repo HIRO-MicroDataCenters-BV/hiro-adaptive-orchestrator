@@ -63,9 +63,6 @@ type DecisionContextBuilder struct {
 	// eaoGVK is the GroupVersionKind used to list EnergyAwareOrchestration resources.
 	// Configurable via EAO_GROUP / EAO_VERSION / EAO_KIND environment variables.
 	eaoGVK schema.GroupVersionKind
-
-	zoneLabel   string
-	gpuResource corev1.ResourceName
 }
 
 // NewDecisionContextBuilder creates a new builder.
@@ -77,19 +74,12 @@ func NewDecisionContextBuilder(
 	c client.Client,
 	profileIndexField string,
 	eaoGVK schema.GroupVersionKind,
-	opts ...BuilderOption,
 ) *DecisionContextBuilder {
-	b := &DecisionContextBuilder{
+	return &DecisionContextBuilder{
 		client:            c,
 		profileIndexField: profileIndexField,
 		eaoGVK:            eaoGVK,
-		zoneLabel:         DefaultZoneLabel,
-		gpuResource:       DefaultGPUResource,
 	}
-	for _, opt := range opts {
-		opt(b)
-	}
-	return b
 }
 
 // Build assembles a DecisionRequest for a single unscheduled pod.
@@ -167,23 +157,18 @@ func (b *DecisionContextBuilder) Build(
 		}
 	}
 
-	// Best-effort, like energy data: a decider must cope with no NodeStats.
-	nodeStats, err := b.buildNodeStats(ctx, nodes, profile.Spec.ApplicationRef)
-	if err != nil {
-		logger.Info("builder: node stats unavailable, skipping", "pod", pod.Name, "err", err)
-	}
+	nodeStats := b.buildNodeStats(ctx, nodes, profile.Spec.ApplicationRef, pod)
 
 	// -------------------------------------------------------------------------
 	// Step 4: Assemble the full DecisionRequest.
 	// -------------------------------------------------------------------------
 	req := &DecisionRequest{
-		RequestID:      requestID,
-		Timestamp:      metav1.Now(),
-		Pod:            pod,
-		CandidateNodes: nodes,
-		AOProfile:      aoProfile,
-		EAOProfile:     eaoProfile,
-		NodeStats:      nodeStats,
+		RequestID:  requestID,
+		Timestamp:  metav1.Now(),
+		Pod:        pod,
+		AOProfile:  aoProfile,
+		EAOProfile: eaoProfile,
+		NodeStats:  nodeStats,
 	}
 
 	logValues := []any{
@@ -535,19 +520,14 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 		}
 	}
 
-	nodeStats, err := b.buildNodeStats(ctx, nodes, profile.Spec.ApplicationRef)
-	if err != nil {
-		logger.Info("builder: node stats unavailable for rebalance context, skipping",
-			"profile", profile.Name, "err", err)
-	}
+	nodeStats := b.buildNodeStats(ctx, nodes, profile.Spec.ApplicationRef, nil)
 
 	req := &DecisionRequest{
-		RequestID:      decisionID,
-		Timestamp:      metav1.Now(),
-		CandidateNodes: nodes,
-		AOProfile:      aoProfile,
-		EAOProfile:     eaoProfile,
-		NodeStats:      nodeStats,
+		RequestID:  decisionID,
+		Timestamp:  metav1.Now(),
+		AOProfile:  aoProfile,
+		EAOProfile: eaoProfile,
+		NodeStats:  nodeStats,
 		RebalanceContext: &RebalanceContext{
 			Reason:            reason,
 			DecisionID:        decisionID,

@@ -75,12 +75,11 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _placement_response(self, request_id, req):
-        # CandidateNodes is a list of full Kubernetes Node objects.
-        # Extract the name from metadata.name.
-        candidate_nodes = req.get("candidateNodes", [])
+        # nodeStats is the candidate list, one compact entry per node.
+        candidate_nodes = req.get("nodeStats") or []
         node_scores = [
             {
-                "nodeName": node.get("metadata", {}).get("name", f"node-{i}"),
+                "nodeName": node.get("name", f"node-{i}"),
                 "score": round(random.uniform(PLACEMENT_SCORE_MIN, PLACEMENT_SCORE_MAX), 2),
             }
             for i, node in enumerate(candidate_nodes)
@@ -102,25 +101,12 @@ class Handler(BaseHTTPRequestHandler):
     def _rebalance_response(self, request_id, req):
         rebalance_context = req.get("rebalanceContext") or {}
         current_placements = rebalance_context.get("currentPlacements", [])
-        candidate_nodes = req.get("candidateNodes", [])
-
-        # candidateNodes for a rebalance decision is every node in the
-        # cluster, not just Filter-passed ones (unlike initial-placement
-        # scoring) — so control-plane (and other NoSchedule/NoExecute
-        # tainted) nodes are still in the list. Recommending one of those
-        # as a Move target would always fail once the replacement pod
-        # actually tries to schedule there, so skip them the same way a
-        # real agent would need to.
-        def schedulable(node):
-            for taint in node.get("spec", {}).get("taints", []) or []:
-                if taint.get("effect") in ("NoSchedule", "NoExecute"):
-                    return False
-            return True
-
+        # nodeStats already excludes NotReady nodes and taints the app's pods
+        # don't tolerate; only cordoned nodes are left to skip here.
         candidate_names = [
-            n.get("metadata", {}).get("name")
-            for n in candidate_nodes
-            if n.get("metadata", {}).get("name") and schedulable(n)
+            n.get("name")
+            for n in req.get("nodeStats") or []
+            if n.get("name") and not n.get("unschedulable")
         ]
 
         # Escalate: checked first and unconditionally (no Improvement

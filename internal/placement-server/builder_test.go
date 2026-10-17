@@ -179,8 +179,8 @@ func TestBuildRebalanceContext_AssemblesPlacementsAndCandidateNodes(t *testing.T
 	if req.Pod != nil {
 		t.Errorf("Pod = %+v, want nil for a rebalance request", req.Pod)
 	}
-	if len(req.CandidateNodes) != 2 {
-		t.Fatalf("CandidateNodes len = %d, want 2 (NotReady node excluded)", len(req.CandidateNodes))
+	if len(req.NodeStats) != 2 {
+		t.Fatalf("NodeStats len = %d, want 2 (NotReady node excluded)", len(req.NodeStats))
 	}
 
 	if req.AOProfile == nil || req.AOProfile.ProfileName != profile.Name {
