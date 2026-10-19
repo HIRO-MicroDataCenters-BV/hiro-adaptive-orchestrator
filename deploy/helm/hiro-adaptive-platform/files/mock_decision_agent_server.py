@@ -9,6 +9,7 @@
 # templates/mock-agent/configmap.yaml at render time (the deploy/manifests/ original
 # has no such templating and keeps its port hardcoded to 8080).
 import json
+import os
 import random
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -25,12 +26,13 @@ PLACEMENT_SCORE_MAX = 100.0
 # default, bump one of them (see demo/demo_rebalance.sh's
 # bump_mock_agent / _scale / _resources / _escalate) when a test
 # specifically wants to force that action.
-MOVE_PROBABILITY   = 0.0
-SCALE_PROBABILITY  = 0.0
-RESOURCE_PROBABILITY = 0.0
-ESCALATE_PROBABILITY = 0.0
-IMPROVEMENT_MIN    = 10.0
-IMPROVEMENT_MAX    = 100.0
+# Overridable per run with `kubectl set env deployment/mock-decision-agent ...`.
+MOVE_PROBABILITY     = float(os.environ.get("MOVE_PROBABILITY", "0.0"))
+SCALE_PROBABILITY    = float(os.environ.get("SCALE_PROBABILITY", "0.0"))
+RESOURCE_PROBABILITY = float(os.environ.get("RESOURCE_PROBABILITY", "0.0"))
+ESCALATE_PROBABILITY = float(os.environ.get("ESCALATE_PROBABILITY", "0.0"))
+IMPROVEMENT_MIN      = float(os.environ.get("IMPROVEMENT_MIN", "10.0"))
+IMPROVEMENT_MAX      = float(os.environ.get("IMPROVEMENT_MAX", "100.0"))
 
 # Fixed AdjustResources target — deterministic on purpose (unlike Scale's
 # random up/down), since this mock only needs one clearly-in-bounds,

@@ -109,8 +109,6 @@ set -euo pipefail
 
 NAMESPACE=${NAMESPACE:-hiro-adaptive-orchestrator-system}
 APP_NAMESPACE=${APP_NAMESPACE:-default}
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MOCK_AGENT_YAML="$SCRIPT_DIR/../deploy/manifests/mock_decision_agent.yaml"
 
 PROFILE=orchestrationprofile-2
 APP=nginx-deployment-2
@@ -225,83 +223,46 @@ trap cleanup EXIT INT TERM
 
 # ─── Mock agent tuning (beats 3/4 need a guaranteed, above-threshold action) ─
 
-# Applies $MOCK_AGENT_YAML with a fresh redeployed-at timestamp piped in
-# (never written to disk — same non-destructive trick deploy_full_stack.sh
-# uses). Without this, kubectl apply alone sees no pod-template diff when
-# only the ConfigMap-mounted script's constants changed, so it reports
-# "deployment.apps/mock-decision-agent unchanged", the pod never restarts,
-# and the running process keeps serving the OLD MOVE_PROBABILITY /
-# IMPROVEMENT_MIN indefinitely — silently, since rollout status still
-# reports success (there's nothing to roll out).
-apply_mock_agent() {
-  sed -e "s/REPLACE_DEPLOY_TIMESTAMP/$(date -u +%Y-%m-%dT%H:%M:%SZ)/g" \
-    "$MOCK_AGENT_YAML" | run kubectl apply -f -
+# Sets (KEY=VALUE) or removes (KEY-) mock knobs; the env change itself rolls the pod.
+# Env only, never the ConfigMap, so a Helm-installed mock stays Helm-owned.
+set_mock_env() {
+  run kubectl set env deployment/mock-decision-agent -n "$NAMESPACE" "$@"
   run kubectl rollout status deployment/mock-decision-agent -n "$NAMESPACE" --timeout=120s
 }
 
 bump_mock_agent() {
   step "Forcing the mock agent to always recommend an above-threshold Move"
-  sed -i.bak \
-    -e 's/^    MOVE_PROBABILITY   = 0.0$/    MOVE_PROBABILITY   = 1.0/' \
-    -e 's/^    IMPROVEMENT_MIN    = 10.0$/    IMPROVEMENT_MIN    = 30.0/' \
-    "$MOCK_AGENT_YAML"
-  rm -f "$MOCK_AGENT_YAML.bak"
-  apply_mock_agent
+  set_mock_env MOVE_PROBABILITY=1.0 IMPROVEMENT_MIN=30.0
   MOCK_AGENT_MOVE_BUMPED=true
 }
 
 revert_mock_agent() {
   echo "  Reverting mock agent to its default MOVE_PROBABILITY / IMPROVEMENT_MIN"
-  sed -i.bak \
-    -e 's/^    MOVE_PROBABILITY   = 1.0$/    MOVE_PROBABILITY   = 0.0/' \
-    -e 's/^    IMPROVEMENT_MIN    = 30.0$/    IMPROVEMENT_MIN    = 10.0/' \
-    "$MOCK_AGENT_YAML"
-  rm -f "$MOCK_AGENT_YAML.bak"
-  apply_mock_agent
+  set_mock_env MOVE_PROBABILITY- IMPROVEMENT_MIN-
   MOCK_AGENT_MOVE_BUMPED=false
 }
 
 bump_mock_agent_scale() {
   step "Forcing the mock agent to always recommend an above-threshold AdjustReplicas"
-  sed -i.bak \
-    -e 's/^    SCALE_PROBABILITY  = 0.0$/    SCALE_PROBABILITY  = 1.0/' \
-    -e 's/^    IMPROVEMENT_MIN    = 10.0$/    IMPROVEMENT_MIN    = 30.0/' \
-    "$MOCK_AGENT_YAML"
-  rm -f "$MOCK_AGENT_YAML.bak"
-  apply_mock_agent
+  set_mock_env SCALE_PROBABILITY=1.0 IMPROVEMENT_MIN=30.0
   MOCK_AGENT_SCALE_BUMPED=true
 }
 
 revert_mock_agent_scale() {
   echo "  Reverting mock agent to its default SCALE_PROBABILITY / IMPROVEMENT_MIN"
-  sed -i.bak \
-    -e 's/^    SCALE_PROBABILITY  = 1.0$/    SCALE_PROBABILITY  = 0.0/' \
-    -e 's/^    IMPROVEMENT_MIN    = 30.0$/    IMPROVEMENT_MIN    = 10.0/' \
-    "$MOCK_AGENT_YAML"
-  rm -f "$MOCK_AGENT_YAML.bak"
-  apply_mock_agent
+  set_mock_env SCALE_PROBABILITY- IMPROVEMENT_MIN-
   MOCK_AGENT_SCALE_BUMPED=false
 }
 
 bump_mock_agent_resources() {
   step "Forcing the mock agent to always recommend an above-threshold AdjustResources"
-  sed -i.bak \
-    -e 's/^    RESOURCE_PROBABILITY = 0.0$/    RESOURCE_PROBABILITY = 1.0/' \
-    -e 's/^    IMPROVEMENT_MIN    = 10.0$/    IMPROVEMENT_MIN    = 30.0/' \
-    "$MOCK_AGENT_YAML"
-  rm -f "$MOCK_AGENT_YAML.bak"
-  apply_mock_agent
+  set_mock_env RESOURCE_PROBABILITY=1.0 IMPROVEMENT_MIN=30.0
   MOCK_AGENT_RESOURCE_BUMPED=true
 }
 
 revert_mock_agent_resources() {
   echo "  Reverting mock agent to its default RESOURCE_PROBABILITY / IMPROVEMENT_MIN"
-  sed -i.bak \
-    -e 's/^    RESOURCE_PROBABILITY = 1.0$/    RESOURCE_PROBABILITY = 0.0/' \
-    -e 's/^    IMPROVEMENT_MIN    = 30.0$/    IMPROVEMENT_MIN    = 10.0/' \
-    "$MOCK_AGENT_YAML"
-  rm -f "$MOCK_AGENT_YAML.bak"
-  apply_mock_agent
+  set_mock_env RESOURCE_PROBABILITY- IMPROVEMENT_MIN-
   MOCK_AGENT_RESOURCE_BUMPED=false
 }
 
@@ -760,21 +721,13 @@ wait_for_escalated() {
 
 bump_mock_agent_escalate() {
   step "Forcing the mock agent to always recommend Escalate"
-  sed -i.bak \
-    -e 's/^    ESCALATE_PROBABILITY = 0.0$/    ESCALATE_PROBABILITY = 1.0/' \
-    "$MOCK_AGENT_YAML"
-  rm -f "$MOCK_AGENT_YAML.bak"
-  apply_mock_agent
+  set_mock_env ESCALATE_PROBABILITY=1.0
   MOCK_AGENT_ESCALATE_BUMPED=true
 }
 
 revert_mock_agent_escalate() {
   echo "  Reverting mock agent to its default ESCALATE_PROBABILITY"
-  sed -i.bak \
-    -e 's/^    ESCALATE_PROBABILITY = 1.0$/    ESCALATE_PROBABILITY = 0.0/' \
-    "$MOCK_AGENT_YAML"
-  rm -f "$MOCK_AGENT_YAML.bak"
-  apply_mock_agent
+  set_mock_env ESCALATE_PROBABILITY-
   MOCK_AGENT_ESCALATE_BUMPED=false
 }
 

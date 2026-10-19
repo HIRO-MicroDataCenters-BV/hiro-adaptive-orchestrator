@@ -30,5 +30,9 @@ spec:
     resourcesExternallyManaged: {{ .Values.samples.rebalancing.resourcesExternallyManaged }}
     cooldownSeconds: 300
     triggerConditions:
+      - "CpuThreshold"
+      - "MemoryThreshold"
       - "EnergyThreshold"
+      - "NodeFailure"
+      - "Scheduled"
 {{- end }}
