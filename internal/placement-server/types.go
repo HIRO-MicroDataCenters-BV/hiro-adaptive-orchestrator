@@ -26,7 +26,7 @@ import "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/place
 type (
 	DecisionRequest           = placement.DecisionRequest
 	RebalanceContext          = placement.RebalanceContext
-	RebalanceHistoryEntry     = placement.RebalanceHistoryEntry
+	RebalanceHistory          = placement.RebalanceHistory
 	RebalanceTrigger          = placement.RebalanceTrigger
 	RebalanceWorkload         = placement.RebalanceWorkload
 	RebalancePDB              = placement.RebalancePDB

@@ -314,7 +314,7 @@ kind: OrchestrationProfile
 metadata:
   name: my-app-profile
 spec:
-  applicationRef:
+  applicationRef:             # immutable after creation
     apiVersion: apps/v1
     kind: Deployment          # Deployment | StatefulSet | ReplicaSet | Job
     name: my-app

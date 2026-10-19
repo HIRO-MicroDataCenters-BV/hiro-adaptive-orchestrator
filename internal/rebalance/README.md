@@ -78,7 +78,7 @@ Not numbered because they're continuous background wiring rather than steps in a
 Every rebalance evaluation for a workload is an instance of a state machine, tracked in
 `OrchestrationProfile.status.rebalancingStatus`. `state` only ever holds one of five active
 values — it never encodes *how* a cycle ended. The result of a finished cycle is recorded
-separately, as an `outcome` on the `recentDecisions` entry written in the same transition that
+separately, as an `outcome` on the `history.recent` entry written in the same transition that
 returns `state` to `Watching`.
 
 ```mermaid
@@ -95,7 +95,7 @@ stateDiagram-v2
 ```
 
 Active states (`state`): `Watching`, `Triggered`, `Evaluating`, `Decided`, `Enacting`.
-Outcomes (`recentDecisions[].outcome`, never a `state` value): `Enacted`, `NoOp`, `Rejected`,
+Outcomes (`history.recent[].outcome`, never a `state` value): `Enacted`, `NoOp`, `Rejected`,
 `Deferred`, `Failed`, `Escalated` (see
 [Escalation — pausing on repeated failures](#escalation--pausing-on-repeated-failures)).
 
@@ -289,7 +289,7 @@ will need the PDB-aware Eviction API for exactly that reason).
 `Reconciler.enactBypassAction` (in `reconciler.go`) drives this end to end in a single
 `Reconcile` call: `Triggered → Evaluating → Decided → Enacting → Watching` (outcome `Enacted`
 or `Failed`), all through `StateWriter` (so it's fully visible in status/Events/
-`recentDecisions`) — `Evaluating` just records "no AI needed" instead of making an HTTP call,
+`history`) — `Evaluating` just records "no AI needed" instead of making an HTTP call,
 and `Enacting` calls `retryPendingSchedule`. No new edges in the transition table: this still
 only ever reaches `Watching` via `Decided → Enacting`, same as every other action will.
 
@@ -310,7 +310,7 @@ sequenceDiagram
     participant AI as External AI Agent
 
     R->>W: Transition -> Evaluating
-    R->>B: BuildRebalanceContext(profile, recentDecisions)
+    R->>B: BuildRebalanceContext(profile, facts)
     B-->>R: DecisionRequest (or error)
     alt build error
         R->>W: Transition -> Watching (Failed)
@@ -332,14 +332,14 @@ consults the External AI Agent — the same agent the placement server already u
 initial-placement scoring, not a second HTTP path:
 
 1. `StateWriter.Transition` moves the profile `Triggered → Evaluating`, capturing the fresh
-   `decisionId` and the profile's `recentDecisions` history from the write result — no extra
+   `decisionId` and the profile's rebalancing status from the write result — no extra
    `Get()` needed, avoiding the cache-staleness bug class described above.
 2. `DecisionContextBuilder.BuildRebalanceContext` (in `internal/placement-server`) assembles a
    `DecisionRequest`: every pod of the application and its current node (`CurrentPlacements` —
    the AI needs the whole layout, not just one pod, to judge imbalance and pick both which pod
    to move and where), every `Ready` cluster node as a candidate, the profile's strategy/
-   awareness/rebalancing config, optional EAO energy data, the trigger reason, and recent
-   decision history.
+   awareness/rebalancing config, optional EAO energy data, the trigger, workload, PDB, and the
+   history summary (see [Rebalance history](#rebalance-history)).
 3. `DecisionClient.RequestRebalanceDecision` POSTs that request under a configurable timeout
    (`Reconciler.DecisionTimeout`, default 5s) and decodes a `RebalanceDecisionResponse`:
    `Action` (`orchestrationv1alpha1.RebalanceAction` — `Move`, `NoOp`, and other values defined
@@ -499,7 +499,7 @@ call but the response only ever describes one action. Multi-pod convergence (e.g
 need to move to actually balance the workload) is expected to happen over multiple Triggered
 cycles — the AI recommends its single highest-value move this cycle, cooldown elapses, and if
 the workload is still imbalanced the next cycle's request reflects the post-move layout and the
-AI can recommend the next one. `recentDecisions` accumulates the history across cycles. Nothing
+AI can recommend the next one. `history.recent` accumulates the history across cycles. Nothing
 in the schema currently supports batching several decisions into one response, and the state
 machine (one active decision per profile at a time) isn't shaped for concurrent per-pod cycles
 either.
@@ -827,8 +827,8 @@ build a UI or alerting on top of later.
 2. On entering `Triggered`: assigns a fresh `decisionId` (UUID) and resets the previous
    cycle's `action`/`details`.
 3. On transitioning to `Watching`: requires `TransitionOptions.Outcome` (rejects the call
-   otherwise), sets `cooldownUntil` (if a cooldown was passed in), and prepends a record to
-   `recentDecisions` carrying that outcome, trimmed to `MaxRecentDecisions` (10).
+   otherwise), sets `cooldownUntil` (if a cooldown was passed in), and records the outcome in
+   `history.recent` (see [Rebalance history](#rebalance-history)). Dry-run cycles are not recorded.
 4. Persists via `Status().Update`, wrapped in `retry.RetryOnConflict` — callers never need
    their own conflict-retry loop, and re-applying the same transition after a crash is safe
    (it either no-ops because state already moved on, or succeeds idempotently).
@@ -914,7 +914,7 @@ about either:
    AI's own judgment doesn't need to wait for a repeat-failure count to catch up.
 
 Either path sets the same persistent `rs.Escalated` flag (+ `EscalatedReason`) — unlike
-`RecentDecisions`, which is a rolling window, this flag survives until something explicitly
+`history.recent`, which is a rolling window, this flag survives until something explicitly
 clears it. `Reconcile` checks it first thing, right next to the `Spec.Rebalancing.Enabled` check:
 while `Escalated`, the profile is skipped entirely — no trigger evaluation, no bypass actions
 either (a stronger pause than cooldown, which deliberately still lets `RetryPendingSchedule`
@@ -968,7 +968,11 @@ pod. Wired in `cmd/main.go`:
 // package default (rebalance.DefaultX) right here in main.go if unset or
 // <= 0 — so every log line and downstream constructor call sees the value
 // actually in effect, never the raw "0 means unset" sentinel.
-rebalanceMaxRecentDecisions := parseIntEnv("REBALANCE_MAX_RECENT_DECISIONS")      // -> rebalance.DefaultMaxRecentDecisions
+rebalanceHistory := rebalance.HistoryConfig{                                        // -> rebalance.DefaultHistory*
+    Window:     parseDurationEnv("REBALANCE_HISTORY_WINDOW"),
+    MaxEntries: parseIntEnv("REBALANCE_HISTORY_MAX_ENTRIES"),
+    MessageMax: parseIntEnv("REBALANCE_HISTORY_MESSAGE_MAX"),
+}.WithDefaults()
 rebalanceDetectionInterval := parseDurationEnv("REBALANCE_DETECTION_INTERVAL")    // -> rebalance.DefaultDetectionInterval
 rebalanceDecisionTimeout := parseDurationEnv("REBALANCE_DECISION_TIMEOUT")        // -> rebalance.DefaultDecisionTimeout
 rebalanceNodePressureThreshold := parseFloatEnv("REBALANCE_NODE_PRESSURE_THRESHOLD") // -> rebalance.DefaultNodePressureThreshold
@@ -979,7 +983,7 @@ rebalanceMoveRateLimit := parseIntEnv("REBALANCE_MOVE_RATE_LIMIT")              
 
 rebalanceWriter := rebalance.NewStateWriter(
     mgr.GetClient(), mgr.GetAPIReader(), mgr.GetEventRecorderFor("rebalance-engine"),
-    rebalanceMaxRecentDecisions,
+    rebalanceHistory,
 )
 rebalanceEngine := rebalance.NewEngine(mgr.GetClient(), rebalanceWriter)
 mgr.Add(rebalanceEngine)
@@ -1017,7 +1021,7 @@ change or rebuild to tune for a given cluster:
 flowchart LR
     subgraph EnvVars["Environment variables (all optional)"]
         direction TB
-        V1["REBALANCE_MAX_RECENT_DECISIONS"]
+        V1["REBALANCE_HISTORY_WINDOW / _MAX_ENTRIES / _MESSAGE_MAX"]
         V2["REBALANCE_DETECTION_INTERVAL"]
         V3["REBALANCE_DECISION_TIMEOUT"]
         V4["REBALANCE_NODE_PRESSURE_THRESHOLD"]
@@ -1052,7 +1056,7 @@ flowchart LR
     V14 --> Resolve
     V15 --> Resolve
 
-    Resolve -->|"unset → DefaultMaxRecentDecisions (10)"| SW["StateWriter<br/>recentDecisions length"]
+    Resolve -->|"unset → DefaultHistoryWindow (1h)<br/>MaxEntries (20) / MessageMax (200)"| SW["StateWriter<br/>history bounds"]
     Resolve -->|"unset → DefaultDetectionInterval (30s)"| Recon1["Reconciler<br/>periodic detection tick"]
     Resolve -->|"unset → DefaultDecisionTimeout (5s)"| Recon2["Reconciler<br/>AI-consultation timeout"]
     Resolve -->|"unset → DefaultNodePressureThreshold (0.90)"| NPE["NodePressureEvaluator<br/>CPU/Memory pressure fraction"]
@@ -1069,7 +1073,9 @@ flowchart LR
 
 | Environment variable | Overrides | Default |
 |---|---|---|
-| `REBALANCE_MAX_RECENT_DECISIONS` | `StateWriter`'s rolling decision-history length | `DefaultMaxRecentDecisions` (10) |
+| `REBALANCE_HISTORY_WINDOW` | How long `history.recent` entries are kept (Go duration) | `DefaultHistoryWindow` (1h) |
+| `REBALANCE_HISTORY_MAX_ENTRIES` | Max `history.recent` entries per profile | `DefaultHistoryMaxEntries` (20) |
+| `REBALANCE_HISTORY_MESSAGE_MAX` | Max characters of an entry's `message` | `DefaultHistoryMessageMax` (200) |
 | `REBALANCE_DETECTION_INTERVAL` | `Reconciler`'s periodic detection tick (Go duration, e.g. `30s`) | `DefaultDetectionInterval` (30s) |
 | `REBALANCE_DECISION_TIMEOUT` | `Reconciler`'s AI-consultation timeout (Go duration, e.g. `5s`) | `DefaultDecisionTimeout` (5s) |
 | `REBALANCE_NODE_PRESSURE_THRESHOLD` | `NodePressureEvaluator`'s CPU/Memory pressure fraction (e.g. `0.90`) | `DefaultNodePressureThreshold` (0.90) |
@@ -1155,20 +1161,41 @@ Regenerate `config/rbac/role.yaml` with `make manifests` after changing these ma
 ```mermaid
 flowchart TD
     RS["RebalancingStatus"] --> Active["Active fields:<br/>state, reason, decisionId,<br/>action, details, startedAt,<br/>lastTransitionAt, cooldownUntil"]
-    RS --> RD["recentDecisions[]"]
-    RD --> RDF["RebalanceDecision:<br/>outcome, action, reason,<br/>decisionId, details,<br/>startedAt, lastTransitionAt"]
+    RS --> RD["history.recent[]"]
+    RD --> RDF["HistoryEntry:<br/>action, outcome, reason, message,<br/>count, firstAt, at, change facts"]
 ```
 
 `RebalancingStatus` (in `api/v1alpha1/orchestrationprofile_types.go`) carries: `state`
 (OpenAPI-enum-validated against the 5 active states), `reason`, `decisionId`, `action`,
-`details`, `startedAt`, `lastTransitionAt`, `cooldownUntil`, and `recentDecisions` (rolling
-history, each entry shaped like `RebalanceDecision` — `outcome` is its own OpenAPI enum,
-separate from and never overlapping with `state`'s).
+`details`, `startedAt`, `lastTransitionAt`, `cooldownUntil`, and `history.recent` (see
+[Rebalance history](#rebalance-history)). `outcome` and `reason` are plain strings checked in
+Go, not CRD enums, so adding one never needs a CRD upgrade first.
 
 An operator upgrading from the older 9-value `state` enum needs
 `cmd/migrate-rebalance-status` run once against the cluster first — see that command's own
 doc comment for the exact order (apply the new CRD, then run the migration, then roll out the
 new operator build).
+
+### Rebalance history
+
+`status.rebalancingStatus.history.recent` is a short summary of past cycles, newest first.
+
+- Kept for `REBALANCE_HISTORY_WINDOW` (1h), at most `REBALANCE_HISTORY_MAX_ENTRIES` (20).
+- Each entry: `action`, `outcome`, `reason` (a code, e.g. `PDBBlocked`), `message`
+  (cut to `REBALANCE_HISTORY_MESSAGE_MAX`), `count`, `firstAt`, `at`, and change facts:
+  - Move: `podName`, `sourceNode`, `targetNode`, `newPodName`, `newPodNode`
+  - AdjustReplicas: `fromReplicas`, `toReplicas`
+  - AdjustResources: `container`, `fromCpu`/`toCpu`, `fromMemory`/`toMemory`
+- Back-to-back identical entries merge: `count` goes up, `message`/`at` take the newest values.
+- `newPodName`/`newPodNode` are set whenever a replacement pod appeared, including a
+  wrong-node Failed move.
+- Dry-run cycles are not recorded.
+
+The AI request carries `rebalanceContext.history`: `recent` (re-trimmed to the window),
+`window`, `cooldownUntil` (only while active), `consecutiveFailures`, `escalationThreshold`.
+
+`spec.applicationRef` can't be changed after creation, so the history always describes one
+app. To point at another app, create a new profile.
 
 ### Deployment
 

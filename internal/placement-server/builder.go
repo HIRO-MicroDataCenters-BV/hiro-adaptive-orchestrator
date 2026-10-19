@@ -480,6 +480,7 @@ type RebalanceFacts struct {
 	Trigger  *RebalanceTrigger
 	Workload *RebalanceWorkload
 	PDB      *RebalancePDB
+	History  *RebalanceHistory
 }
 
 // BuildRebalanceContext assembles a DecisionRequest for the rebalance
@@ -491,7 +492,6 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 	profile *orchestrationv1alpha1.OrchestrationProfile,
 	decisionID string,
 	reason string,
-	recentDecisions []orchestrationv1alpha1.RebalanceDecision,
 	facts RebalanceFacts,
 ) (*DecisionRequest, error) {
 	logger := logf.FromContext(ctx)
@@ -532,7 +532,7 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 			Reason:            reason,
 			DecisionID:        decisionID,
 			CurrentPlacements: buildCurrentPlacements(pods),
-			RecentDecisions:   convertRecentDecisions(recentDecisions),
+			History:           facts.History,
 			Trigger:           facts.Trigger,
 			Workload:          facts.Workload,
 			PDB:               facts.PDB,
@@ -676,24 +676,6 @@ func quantityString(list corev1.ResourceList, name corev1.ResourceName) string {
 		return ""
 	}
 	return q.String()
-}
-
-// convertRecentDecisions maps the profile's CRD-level decision history into
-// the wire-format shape sent to the AI agent.
-func convertRecentDecisions(decisions []orchestrationv1alpha1.RebalanceDecision) []RebalanceHistoryEntry {
-	if len(decisions) == 0 {
-		return nil
-	}
-	entries := make([]RebalanceHistoryEntry, 0, len(decisions))
-	for _, d := range decisions {
-		entries = append(entries, RebalanceHistoryEntry{
-			Outcome: string(d.Outcome),
-			Action:  string(d.Action),
-			Reason:  d.Reason,
-			When:    d.LastTransitionAt,
-		})
-	}
-	return entries
 }
 
 // =============================================================================

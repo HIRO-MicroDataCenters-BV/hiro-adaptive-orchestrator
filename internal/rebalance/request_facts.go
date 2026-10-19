@@ -18,6 +18,7 @@ package rebalance
 
 import (
 	"context"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -40,11 +41,12 @@ import (
 
 // +kubebuilder:rbac:groups="policy",resources=poddisruptionbudgets,verbs=get;list;watch
 
-// rebalanceFacts resolves the trigger, workload and PDB sent with a rebalance
+// rebalanceFacts resolves the trigger, workload, PDB and history sent with a rebalance
 // request; a failed lookup leaves that fact nil.
 func (r *Reconciler) rebalanceFacts(
 	ctx context.Context,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
+	rs orchestrationv1alpha1.RebalancingStatus,
 	result TriggerResult,
 ) placementserver.RebalanceFacts {
 	logger := logf.FromContext(ctx)
@@ -57,6 +59,8 @@ func (r *Reconciler) rebalanceFacts(
 			Threshold: result.Detail.Threshold,
 		},
 		Workload: r.workloadFacts(ctx, profile),
+		History: summarizeHistory(rs, r.Writer.HistoryConfig(),
+			profile.Spec.Rebalancing.EscalationThreshold, time.Now()),
 	}
 
 	pods, err := utils.FindPodsForApplication(ctx, r.Client, profile.Spec.ApplicationRef)

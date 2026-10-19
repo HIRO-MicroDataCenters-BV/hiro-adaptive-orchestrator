@@ -125,11 +125,11 @@ func TestReconciler_ResourceAboveThresholdReachesEnacted(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeEnacted {
-		t.Fatalf("recentDecisions = %+v, want one Enacted-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeEnacted {
+		t.Fatalf("history = %+v, want one Enacted-outcome entry", rs.History.Recent)
 	}
-	if rs.RecentDecisions[0].Action != orchestrationv1alpha1.RebalanceActionAdjustResources {
-		t.Errorf("recentDecisions[0].Action = %q, want AdjustResources", rs.RecentDecisions[0].Action)
+	if rs.History.Recent[0].Action != orchestrationv1alpha1.RebalanceActionAdjustResources {
+		t.Errorf("history[0].Action = %q, want AdjustResources", rs.History.Recent[0].Action)
 	}
 
 	updated := &appsv1.Deployment{}
@@ -171,11 +171,11 @@ func TestReconciler_ResourceInPlaceResizeConfirmedConverged(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeEnacted {
-		t.Fatalf("recentDecisions = %+v, want one Enacted-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeEnacted {
+		t.Fatalf("history = %+v, want one Enacted-outcome entry", rs.History.Recent)
 	}
-	if !strings.Contains(rs.RecentDecisions[0].Reason, "resized 1 running pod(s) in place") {
-		t.Errorf("reason = %q, want it to confirm the in-place resize, not just the template patch", rs.RecentDecisions[0].Reason)
+	if !strings.Contains(rs.History.Recent[0].Message, "resized 1 running pod(s) in place") {
+		t.Errorf("reason = %q, want it to confirm the in-place resize, not just the template patch", rs.History.Recent[0].Message)
 	}
 }
 
@@ -206,11 +206,11 @@ func TestReconciler_ResourceInPlaceResizeRejectedFallsBackToNextRollout(t *testi
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeEnacted {
-		t.Fatalf("recentDecisions = %+v, want one Enacted-outcome entry (rejected resize is not Failed)", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeEnacted {
+		t.Fatalf("history = %+v, want one Enacted-outcome entry (rejected resize is not Failed)", rs.History.Recent)
 	}
-	if !strings.Contains(rs.RecentDecisions[0].Reason, "in-place resize unavailable") {
-		t.Errorf("reason = %q, want it to note the in-place resize didn't take, not claim success", rs.RecentDecisions[0].Reason)
+	if !strings.Contains(rs.History.Recent[0].Message, "in-place resize unavailable") {
+		t.Errorf("reason = %q, want it to note the in-place resize didn't take, not claim success", rs.History.Recent[0].Message)
 	}
 }
 
@@ -230,8 +230,8 @@ func TestReconciler_ResourceBelowThresholdRejected(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeRejected {
-		t.Fatalf("recentDecisions = %+v, want one Rejected-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeRejected {
+		t.Fatalf("history = %+v, want one Rejected-outcome entry", rs.History.Recent)
 	}
 }
 
@@ -251,8 +251,8 @@ func TestReconciler_ResourceMalformedMissingFieldsFails(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
-		t.Fatalf("recentDecisions = %+v, want one Failed-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeFailed {
+		t.Fatalf("history = %+v, want one Failed-outcome entry", rs.History.Recent)
 	}
 }
 
@@ -272,8 +272,8 @@ func TestReconciler_ResourceInvalidQuantityFails(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
-		t.Fatalf("recentDecisions = %+v, want one Failed-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeFailed {
+		t.Fatalf("history = %+v, want one Failed-outcome entry", rs.History.Recent)
 	}
 }
 
@@ -293,11 +293,11 @@ func TestReconciler_ResourceContainerNotFoundFails(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
-		t.Fatalf("recentDecisions = %+v, want one Failed-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeFailed {
+		t.Fatalf("history = %+v, want one Failed-outcome entry", rs.History.Recent)
 	}
-	if !strings.Contains(rs.RecentDecisions[0].Reason, "no-such-container") {
-		t.Errorf("reason = %q, want it to mention the missing container name", rs.RecentDecisions[0].Reason)
+	if !strings.Contains(rs.History.Recent[0].Message, "no-such-container") {
+		t.Errorf("reason = %q, want it to mention the missing container name", rs.History.Recent[0].Message)
 	}
 }
 
@@ -321,8 +321,8 @@ func TestReconciler_ResourceNoExistingLimitsDeferred(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeDeferred {
-		t.Fatalf("recentDecisions = %+v, want one Deferred-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeDeferred {
+		t.Fatalf("history = %+v, want one Deferred-outcome entry", rs.History.Recent)
 	}
 
 	stillUnset := &appsv1.Deployment{}
@@ -354,8 +354,8 @@ func TestReconciler_ResourceOutsideDefaultBoundsRejected(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeRejected {
-		t.Fatalf("recentDecisions = %+v, want one Rejected-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeRejected {
+		t.Fatalf("history = %+v, want one Rejected-outcome entry", rs.History.Recent)
 	}
 }
 
@@ -379,11 +379,11 @@ func TestReconciler_ResourceDryRunSkipsSideEffects(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeEnacted {
-		t.Fatalf("recentDecisions = %+v, want one Enacted-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 0 {
+		t.Fatalf("history = %+v, want none: a dry-run changes nothing", rs.History.Recent)
 	}
-	if !strings.Contains(rs.RecentDecisions[0].Details, "[dry-run]") {
-		t.Errorf("details = %q, want it to carry the dry-run marker", rs.RecentDecisions[0].Details)
+	if !strings.Contains(rs.Details, "[dry-run]") {
+		t.Errorf("details = %q, want it to carry the dry-run marker", rs.Details)
 	}
 
 	stillOriginal := &appsv1.Deployment{}

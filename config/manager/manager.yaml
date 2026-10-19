@@ -95,8 +95,12 @@ spec:
           value: "/extender/filter"
         - name: EXTENDER_PRIORITIZE_PATH
           value: "/extender/prioritize"
-        - name: REBALANCE_MAX_RECENT_DECISIONS
-          value: "10"
+        - name: REBALANCE_HISTORY_WINDOW
+          value: "1h"
+        - name: REBALANCE_HISTORY_MAX_ENTRIES
+          value: "20"
+        - name: REBALANCE_HISTORY_MESSAGE_MAX
+          value: "200"
         - name: REBALANCE_DETECTION_INTERVAL
           value: "30s"
         - name: REBALANCE_DECISION_TIMEOUT

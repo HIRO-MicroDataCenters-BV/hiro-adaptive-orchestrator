@@ -100,7 +100,9 @@ type RebalancingSpec struct {
 // OrchestrationProfileSpec defines the desired state of OrchestrationProfile
 type OrchestrationProfileSpec struct {
 	// applicationRef references the application for which this orchestration profile is defined.
+	// Immutable: the profile's status describes this one application for its whole life.
 	// +required
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="applicationRef is immutable; create a new OrchestrationProfile for a different application"
 	ApplicationRef ApplicationReference `json:"applicationRef"`
 
 	// placement defines the placement strategy and awareness for the application.
@@ -144,6 +146,7 @@ const (
 	RebalancingStateEnacting   RebalancingStateType = "Enacting"
 )
 
+// RebalanceOutcome is how a decision cycle ended. Not a CRD enum: only the operator writes it.
 type RebalanceOutcome string
 
 const (
@@ -166,35 +169,6 @@ const (
 	RebalanceActionAdjustResources RebalanceAction = "AdjustResources"
 	RebalanceActionEscalate        RebalanceAction = "Escalate"
 )
-
-// RebalanceDecision is a single terminal-outcome record kept in the profile's
-// rolling decision history.
-type RebalanceDecision struct {
-	// decisionId correlates this record with engine logs and Kubernetes Events.
-	DecisionID string `json:"decisionId"`
-
-	// outcome is the terminal outcome of this decision cycle.
-	// +kubebuilder:validation:Enum=Enacted;NoOp;Rejected;Deferred;Failed;Escalated
-	Outcome RebalanceOutcome `json:"outcome,omitempty"`
-
-	// action is the AI-returned action that was processed (e.g. "Move", "NoOp").
-	// Dont use kubebuilder:validation:Enum here because the AI may return new actions in
-	// the future, and we don't want to break the CRD schema for that reason.
-	Action RebalanceAction `json:"action,omitempty"`
-
-	// reason explains why the decision ended in this state.
-	Reason string `json:"reason,omitempty"`
-
-	// details carries free-form, state-specific context (e.g. target node,
-	// improvement score, dry-run marker).
-	Details string `json:"details,omitempty"`
-
-	// startedAt is when this decision's cycle entered Triggered.
-	StartedAt metav1.Time `json:"startedAt,omitempty"`
-
-	// lastTransitionAt is when this decision reached its terminal state.
-	LastTransitionAt metav1.Time `json:"lastTransitionAt,omitempty"`
-}
 
 // Rebalancing Status
 type RebalancingStatus struct {
@@ -235,11 +209,6 @@ type RebalancingStatus struct {
 	// +optional
 	CooldownUntil metav1.Time `json:"cooldownUntil,omitempty"`
 
-	// recentDecisions is a rolling window of the most recent terminal
-	// outcomes, newest first, trimmed to a bounded length (default 10).
-	// +optional
-	RecentDecisions []RebalanceDecision `json:"recentDecisions,omitempty"`
-
 	// consecutiveFailures counts terminal Failed/Deferred outcomes in a row,
 	// reset by any other outcome. Crossing escalationThreshold sets escalated.
 	// +optional
@@ -256,6 +225,68 @@ type RebalancingStatus struct {
 	// escalated is true.
 	// +optional
 	EscalatedReason string `json:"escalatedReason,omitempty"`
+
+	// history is a bounded summary of past decisions; repeats are merged so they can't push out real actions.
+	// +optional
+	History RebalanceHistory `json:"history,omitempty"`
+}
+
+// RebalanceHistory holds recent terminal decisions, newest first, within the history window and size cap.
+type RebalanceHistory struct {
+	// +optional
+	Recent []HistoryEntry `json:"recent,omitempty"`
+}
+
+// HistoryEntry is one terminal decision, or a run of identical ones (count > 1).
+type HistoryEntry struct {
+	// action has no enum: the AI may return new actions.
+	Action  RebalanceAction  `json:"action"`
+	Outcome RebalanceOutcome `json:"outcome"`
+
+	// reason is a short CamelCase code for where the cycle ended; not an enum, so new codes need no CRD change.
+	Reason string `json:"reason"`
+
+	// message is the human-readable detail, truncated to a configured length.
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// count is how many identical decisions in a row this entry stands for.
+	Count int32 `json:"count"`
+
+	// firstAt is when the first of the merged decisions ended; at is the latest.
+	// +optional
+	FirstAt metav1.Time `json:"firstAt,omitempty"`
+	At      metav1.Time `json:"at"`
+
+	// Move facts. newPodName/newPodNode are set whenever a replacement pod appeared.
+	// +optional
+	PodName string `json:"podName,omitempty"`
+	// +optional
+	SourceNode string `json:"sourceNode,omitempty"`
+	// +optional
+	TargetNode string `json:"targetNode,omitempty"`
+	// +optional
+	NewPodName string `json:"newPodName,omitempty"`
+	// +optional
+	NewPodNode string `json:"newPodNode,omitempty"`
+
+	// AdjustReplicas facts.
+	// +optional
+	FromReplicas int32 `json:"fromReplicas,omitempty"`
+	// +optional
+	ToReplicas int32 `json:"toReplicas,omitempty"`
+
+	// AdjustResources facts.
+	// +optional
+	Container string `json:"container,omitempty"`
+	// +optional
+	FromCPU string `json:"fromCpu,omitempty"`
+	// +optional
+	ToCPU string `json:"toCpu,omitempty"`
+	// +optional
+	FromMemory string `json:"fromMemory,omitempty"`
+	// +optional
+	ToMemory string `json:"toMemory,omitempty"`
 }
 
 // ProfileStatus enumerates the OrchestrationProfile's overall status values.

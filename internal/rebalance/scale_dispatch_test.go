@@ -111,11 +111,11 @@ func TestReconciler_ScaleAboveThresholdReachesEnacted(t *testing.T) {
 	if rs.State != StateWatching {
 		t.Fatalf("state = %q, want Watching", rs.State)
 	}
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeEnacted {
-		t.Fatalf("recentDecisions = %+v, want one Enacted-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeEnacted {
+		t.Fatalf("history = %+v, want one Enacted-outcome entry", rs.History.Recent)
 	}
-	if rs.RecentDecisions[0].Action != orchestrationv1alpha1.RebalanceActionAdjustReplicas {
-		t.Errorf("recentDecisions[0].Action = %q, want AdjustReplicas", rs.RecentDecisions[0].Action)
+	if rs.History.Recent[0].Action != orchestrationv1alpha1.RebalanceActionAdjustReplicas {
+		t.Errorf("history[0].Action = %q, want AdjustReplicas", rs.History.Recent[0].Action)
 	}
 
 	updated := &appsv1.Deployment{}
@@ -153,11 +153,11 @@ func TestReconciler_ScaleTimeoutWithClosedEnergyGateIsDeferred(t *testing.T) {
 
 	got := getProfile(t, c, profile.Name)
 	rs := got.Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeDeferred {
-		t.Fatalf("recentDecisions = %+v, want one Deferred-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeDeferred {
+		t.Fatalf("history = %+v, want one Deferred-outcome entry", rs.History.Recent)
 	}
-	if !strings.Contains(rs.RecentDecisions[0].Reason, "energy gate closed") {
-		t.Errorf("reason = %q, want it to mention the energy gate", rs.RecentDecisions[0].Reason)
+	if !strings.Contains(rs.History.Recent[0].Message, "energy gate closed") {
+		t.Errorf("reason = %q, want it to mention the energy gate", rs.History.Recent[0].Message)
 	}
 }
 
@@ -184,8 +184,8 @@ func TestReconciler_ScaleTimeoutWithoutEnergyAwarenessStaysFailed(t *testing.T) 
 
 	got := getProfile(t, c, profile.Name)
 	rs := got.Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
-		t.Fatalf("recentDecisions = %+v, want one Failed-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeFailed {
+		t.Fatalf("history = %+v, want one Failed-outcome entry", rs.History.Recent)
 	}
 }
 
@@ -212,8 +212,8 @@ func TestReconciler_ScaleTimeoutWithOpenEnergyGateStaysFailed(t *testing.T) {
 
 	got := getProfile(t, c, profile.Name)
 	rs := got.Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
-		t.Fatalf("recentDecisions = %+v, want one Failed-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeFailed {
+		t.Fatalf("history = %+v, want one Failed-outcome entry", rs.History.Recent)
 	}
 }
 
@@ -233,8 +233,8 @@ func TestReconciler_ScaleBelowThresholdRejected(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeRejected {
-		t.Fatalf("recentDecisions = %+v, want one Rejected-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeRejected {
+		t.Fatalf("history = %+v, want one Rejected-outcome entry", rs.History.Recent)
 	}
 }
 
@@ -254,8 +254,8 @@ func TestReconciler_ScaleMalformedTargetReplicasFails(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeFailed {
-		t.Fatalf("recentDecisions = %+v, want one Failed-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeFailed {
+		t.Fatalf("history = %+v, want one Failed-outcome entry", rs.History.Recent)
 	}
 }
 
@@ -278,11 +278,11 @@ func TestReconciler_ScaleOutsideDefaultBoundsRejected(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeRejected {
-		t.Fatalf("recentDecisions = %+v, want one Rejected-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeRejected {
+		t.Fatalf("history = %+v, want one Rejected-outcome entry", rs.History.Recent)
 	}
-	if !strings.Contains(rs.RecentDecisions[0].Reason, "default bounds") {
-		t.Errorf("reason = %q, want it to mention default bounds", rs.RecentDecisions[0].Reason)
+	if !strings.Contains(rs.History.Recent[0].Message, "default bounds") {
+		t.Errorf("reason = %q, want it to mention default bounds", rs.History.Recent[0].Message)
 	}
 }
 
@@ -306,8 +306,8 @@ func TestReconciler_ScaleHonoursHPABounds(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeEnacted {
-		t.Fatalf("recentDecisions = %+v, want one Enacted-outcome entry (HPA bounds should have allowed 15)", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeEnacted {
+		t.Fatalf("history = %+v, want one Enacted-outcome entry (HPA bounds should have allowed 15)", rs.History.Recent)
 	}
 }
 
@@ -331,11 +331,11 @@ func TestReconciler_ScaleDefersWhenReplicasExternallyManaged(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeDeferred {
-		t.Fatalf("recentDecisions = %+v, want one Deferred-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeDeferred {
+		t.Fatalf("history = %+v, want one Deferred-outcome entry", rs.History.Recent)
 	}
-	if !strings.Contains(rs.RecentDecisions[0].Reason, "externally managed") {
-		t.Errorf("reason = %q, want it to say replicas are externally managed", rs.RecentDecisions[0].Reason)
+	if !strings.Contains(rs.History.Recent[0].Message, "externally managed") {
+		t.Errorf("reason = %q, want it to say replicas are externally managed", rs.History.Recent[0].Message)
 	}
 
 	stillOne := &appsv1.Deployment{}
@@ -367,11 +367,11 @@ func TestReconciler_ScaleDryRunSkipsSideEffects(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeEnacted {
-		t.Fatalf("recentDecisions = %+v, want one Enacted-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 0 {
+		t.Fatalf("history = %+v, want none: a dry-run changes nothing", rs.History.Recent)
 	}
-	if !strings.Contains(rs.RecentDecisions[0].Details, "[dry-run]") {
-		t.Errorf("details = %q, want it to carry the dry-run marker", rs.RecentDecisions[0].Details)
+	if !strings.Contains(rs.Details, "[dry-run]") {
+		t.Errorf("details = %q, want it to carry the dry-run marker", rs.Details)
 	}
 
 	stillOne := &appsv1.Deployment{}

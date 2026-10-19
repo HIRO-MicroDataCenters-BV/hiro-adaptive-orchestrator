@@ -18,7 +18,7 @@ limitations under the License.
 // state machine: Detection (Triggered) → Decision (Evaluating → Decided) →
 // Enaction (Enacting), always returning to Watching. The outcome of a cycle
 // (Enacted, NoOp, Rejected, Deferred, Failed) is not a `state` value — it is
-// recorded in RecentDecisions alongside the Watching transition that ends
+// recorded in history alongside the Watching transition that ends
 // the cycle.
 //
 // Every transition MUST go through StateWriter (writer.go) — no other code
@@ -58,7 +58,7 @@ const (
 // validTransitions is the authoritative transition table for the decision
 // lifecycle. A cycle always ends by returning to Watching — the outcome of
 // that cycle (Enacted/NoOp/Rejected/Deferred/Failed) is recorded separately
-// in RecentDecisions, not as a `state` value. stateNone and StateWatching
+// in history, not as a `state` value. stateNone and StateWatching
 // are equivalent resting positions.
 var validTransitions = map[orchestrationv1alpha1.RebalancingStateType][]orchestrationv1alpha1.RebalancingStateType{
 	stateNone:     {StateTriggered},

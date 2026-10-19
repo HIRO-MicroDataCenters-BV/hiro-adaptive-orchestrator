@@ -49,7 +49,7 @@ func TestRebalanceFacts_TriggerWorkloadAndPDB(t *testing.T) {
 		testPod("app-a-1", "node-a", corev1.PodRunning), pdb, profile)
 
 	value, threshold := 0.95, 0.90
-	facts := r.rebalanceFacts(context.Background(), profile, TriggerResult{
+	facts := r.rebalanceFacts(context.Background(), profile, orchestrationv1alpha1.RebalancingStatus{}, TriggerResult{
 		Condition: TriggerCPUThreshold,
 		Detail:    TriggerDetail{Node: "node-a", Value: &value, Threshold: &threshold},
 	})
@@ -144,10 +144,10 @@ func TestReconciler_ResourceDefersWhenResourcesExternallyManaged(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.RecentDecisions) != 1 || rs.RecentDecisions[0].Outcome != OutcomeDeferred {
-		t.Fatalf("recentDecisions = %+v, want one Deferred-outcome entry", rs.RecentDecisions)
+	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeDeferred {
+		t.Fatalf("history = %+v, want one Deferred-outcome entry", rs.History.Recent)
 	}
-	if !strings.Contains(rs.RecentDecisions[0].Reason, "resources are externally managed") {
-		t.Errorf("reason = %q, want it to say resources are externally managed", rs.RecentDecisions[0].Reason)
+	if !strings.Contains(rs.History.Recent[0].Message, "resources are externally managed") {
+		t.Errorf("reason = %q, want it to say resources are externally managed", rs.History.Recent[0].Message)
 	}
 }

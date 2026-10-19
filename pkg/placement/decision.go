@@ -96,10 +96,9 @@ type RebalanceContext struct {
 	// judge imbalance and pick both which pod to move and where.
 	CurrentPlacements []PodPlacement `json:"currentPlacements"`
 
-	// RecentDecisions is a short rolling history of this workload's past
-	// rebalance outcomes, so the AI can avoid flip-flopping the same pod
-	// back and forth. Mirrors orchestrationv1alpha1.RebalanceDecision.
-	RecentDecisions []RebalanceHistoryEntry `json:"recentDecisions,omitempty"`
+	// History is this workload's bounded decision summary, so the decider can
+	// avoid repeats and flip-flops without keeping state of its own.
+	History *RebalanceHistory `json:"history,omitempty"`
 
 	// Trigger is the structured form of Reason.
 	Trigger *RebalanceTrigger `json:"trigger,omitempty"`
@@ -113,12 +112,16 @@ type RebalanceContext struct {
 	PDB *RebalancePDB `json:"pdb,omitempty"`
 }
 
-// RebalanceHistoryEntry summarizes one past terminal rebalance decision.
-type RebalanceHistoryEntry struct {
-	Outcome string      `json:"outcome"`
-	Action  string      `json:"action,omitempty"`
-	Reason  string      `json:"reason,omitempty"`
-	When    metav1.Time `json:"when,omitempty"`
+// RebalanceHistory is the decision summary sent with a rebalance request.
+type RebalanceHistory struct {
+	// Recent is the profile's history, newest first, trimmed to Window at request time.
+	Recent []orchestrationv1alpha1.HistoryEntry `json:"recent"`
+	Window metav1.Duration                      `json:"window"`
+
+	// CooldownUntil is nil when no cooldown is active.
+	CooldownUntil       *metav1.Time `json:"cooldownUntil,omitempty"`
+	ConsecutiveFailures int32        `json:"consecutiveFailures"`
+	EscalationThreshold int32        `json:"escalationThreshold"`
 }
 
 // RebalanceTrigger is the trigger condition that started this evaluation.

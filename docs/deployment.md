@@ -296,7 +296,9 @@ Every parameter can be set as an environment variable before calling any deploy 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REBALANCE_MAX_RECENT_DECISIONS` | `10` | Decision-history length kept per profile |
+| `REBALANCE_HISTORY_WINDOW` | `1h` | How long rebalance history is kept in profile status (Go duration) |
+| `REBALANCE_HISTORY_MAX_ENTRIES` | `20` | Max history entries kept per profile |
+| `REBALANCE_HISTORY_MESSAGE_MAX` | `200` | Max characters of a history entry's message |
 | `REBALANCE_DETECTION_INTERVAL` | `30s` | Periodic detection tick (Go duration) |
 | `REBALANCE_DECISION_TIMEOUT` | `5s` | AI-consultation timeout (Go duration) |
 | `REBALANCE_NODE_PRESSURE_THRESHOLD` | `0.90` | CPU/Memory pressure fraction that triggers `CPUThreshold`/`MemoryThreshold` |

@@ -77,6 +77,9 @@ type resourceState struct {
 	// HasExistingLimits is true when the named container already declares at
 	// least one of CPU/Memory, in requests or limits.
 	HasExistingLimits bool
+
+	// CPU and Memory are the container's current requests ("" when unset), for history.
+	CPU, Memory string
 }
 
 // resolveResourceState fetches profile's workload and reports whether the
@@ -109,6 +112,8 @@ func resolveResourceState(
 	return resourceState{
 		Found:             true,
 		HasExistingLimits: hasCPUOrMemory(res.Requests) || hasCPUOrMemory(res.Limits),
+		CPU:               quantityOrEmpty(res.Requests, corev1.ResourceCPU),
+		Memory:            quantityOrEmpty(res.Requests, corev1.ResourceMemory),
 	}, nil
 }
 
@@ -150,6 +155,14 @@ func findContainerByName(containers []corev1.Container, name string) *corev1.Con
 		}
 	}
 	return nil
+}
+
+func quantityOrEmpty(list corev1.ResourceList, name corev1.ResourceName) string {
+	q, ok := list[name]
+	if !ok {
+		return ""
+	}
+	return q.String()
 }
 
 func hasCPUOrMemory(list corev1.ResourceList) bool {

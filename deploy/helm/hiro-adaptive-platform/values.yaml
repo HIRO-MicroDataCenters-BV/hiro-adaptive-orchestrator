@@ -102,7 +102,9 @@ hiro-operator:
     EXTENDER_PRIORITIZE_PATH: /extender/prioritize
     # Rebalance engine tuning. rebalancing.enabled/dryRun are
     # per-OrchestrationProfile fields, not settings here — see samples below.
-    REBALANCE_MAX_RECENT_DECISIONS: "10"
+    REBALANCE_HISTORY_WINDOW: 1h
+    REBALANCE_HISTORY_MAX_ENTRIES: "20"
+    REBALANCE_HISTORY_MESSAGE_MAX: "200"
     REBALANCE_DETECTION_INTERVAL: 30s
     REBALANCE_DECISION_TIMEOUT: 5s
     REBALANCE_NODE_PRESSURE_THRESHOLD: "0.90"

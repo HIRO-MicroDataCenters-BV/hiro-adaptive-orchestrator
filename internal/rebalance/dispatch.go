@@ -74,7 +74,7 @@ func (r *Reconciler) dispatchDecision(
 	if !ok {
 		reason := fmt.Sprintf("no dispatcher for action %q: %s", resp.Action, resp.Reason)
 		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Outcome: OutcomeFailed, Cooldown: cooldown}); err != nil {
+			TransitionOptions{Outcome: OutcomeFailed, Cooldown: cooldown, Reason: ReasonUnknownAction}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Failed, no dispatcher) failed", "profile", profile.Name)
 		}
 		return
@@ -95,7 +95,7 @@ func dispatchNoOp(
 ) {
 	logger := logf.FromContext(ctx)
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, resp.Reason,
-		TransitionOptions{Action: resp.Action, Outcome: OutcomeNoOp, Cooldown: cooldown}); err != nil {
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeNoOp, Cooldown: cooldown, Reason: ReasonNoChange}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Watching (NoOp) failed", "profile", profile.Name)
 	}
 }
@@ -115,7 +115,7 @@ func dispatchReject(
 ) {
 	logger := logf.FromContext(ctx)
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, resp.Reason,
-		TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown, Reason: ReasonRejectedByAI}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Watching (Rejected) failed", "profile", profile.Name)
 	}
 }
@@ -134,7 +134,7 @@ func dispatchDefer(
 ) {
 	logger := logf.FromContext(ctx)
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, resp.Reason,
-		TransitionOptions{Action: resp.Action, Outcome: OutcomeDeferred, Cooldown: cooldown}); err != nil {
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeDeferred, Cooldown: cooldown, Reason: ReasonDeferredByAI}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Watching (Deferred) failed", "profile", profile.Name)
 	}
 }
@@ -155,7 +155,7 @@ func dispatchEscalate(
 ) {
 	logger := logf.FromContext(ctx)
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, resp.Reason,
-		TransitionOptions{Action: resp.Action, Outcome: OutcomeEscalated, Cooldown: cooldown}); err != nil {
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeEscalated, Cooldown: cooldown, Reason: ReasonEscalatedByAI}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Watching (Escalated) failed", "profile", profile.Name)
 	}
 }
@@ -184,7 +184,8 @@ func dispatchMove(
 		reason := fmt.Sprintf("improvement %.2f below threshold %.2f: %s", resp.Improvement, threshold, resp.Reason)
 		metrics.RebalanceGuardrailRejectionsTotal.WithLabelValues(string(resp.Action), metrics.GuardrailThreshold).Inc()
 		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown,
+				Reason: ReasonBelowThreshold, Change: proposedMove(resp)}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected) failed", "profile", profile.Name)
 		}
 		return
@@ -193,7 +194,8 @@ func dispatchMove(
 	if resp.PodName == "" || resp.TargetNode == "" {
 		reason := fmt.Sprintf("Move response missing podName/targetNode: %s", resp.Reason)
 		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); err != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown,
+				Reason: ReasonMalformedResponse}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Failed, malformed Move) failed", "profile", profile.Name)
 		}
 		return
@@ -242,7 +244,8 @@ func dispatchMove(
 		reason := fmt.Sprintf("cluster-wide move rate limit: %v", err)
 		metrics.RebalanceRateLimitExhaustedTotal.WithLabelValues(string(resp.Action)).Inc()
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed}); tErr != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed,
+				Reason: ReasonRateLimited, Change: proposedMove(resp)}); tErr != nil {
 			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, rate limit) failed", "profile", profile.Name)
 		}
 		return
@@ -259,17 +262,36 @@ func dispatchMove(
 		resp.PodName, resp.TargetNode, resp.Reason, decided.DecisionID, r.MoveActionTimeout)
 	if err != nil {
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, err.Error(),
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown,
+				Reason: ReasonEnactFailed, Change: proposedMove(resp)}); tErr != nil {
 			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, move enactor error) failed", "profile", profile.Name)
 		}
 		return
 	}
 
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, result.reason,
-		TransitionOptions{Action: resp.Action, Outcome: result.outcome, Cooldown: cooldown}); err != nil {
+		TransitionOptions{Action: resp.Action, Outcome: result.outcome, Cooldown: cooldown,
+			Reason: result.cause, Change: result.change}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Watching failed",
 			"profile", profile.Name, "outcome", result.outcome)
 	}
+}
+
+// rolloutCause codes the outcome of a scale/resize wait: done, energy gate closed, or timed out.
+func rolloutCause(outcome orchestrationv1alpha1.RebalanceOutcome, done HistoryReason) HistoryReason {
+	switch outcome {
+	case OutcomeEnacted:
+		return done
+	case OutcomeDeferred:
+		return ReasonEnergyGateClosed
+	default:
+		return ReasonTimeout
+	}
+}
+
+// proposedMove is the Move the AI proposed, for history entries of Moves that never ran.
+func proposedMove(resp *placementserver.RebalanceDecisionResponse) orchestrationv1alpha1.HistoryEntry {
+	return orchestrationv1alpha1.HistoryEntry{PodName: resp.PodName, TargetNode: resp.TargetNode}
 }
 
 // dispatchMoveDryRun completes a Move that already cleared every guardrail
@@ -301,7 +323,8 @@ func dispatchMoveDryRun(
 	details := fmt.Sprintf("[dry-run] would move %s to %s (improvement=%.2f): %s",
 		resp.PodName, resp.TargetNode, resp.Improvement, resp.Reason)
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, "dry-run: no side effects applied",
-		TransitionOptions{Action: resp.Action, Outcome: OutcomeEnacted, Details: details, Cooldown: cooldown}); err != nil {
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeEnacted, Details: details, Cooldown: cooldown,
+			SkipHistory: true}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Watching (dry-run Enacted) failed", "profile", profile.Name)
 	}
 }
@@ -317,7 +340,8 @@ func (r *Reconciler) deferExternallyManaged(
 ) {
 	reason := fmt.Sprintf("%s are externally managed (spec.rebalancing): not changing them", dimension)
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-		TransitionOptions{Action: resp.Action, Outcome: OutcomeDeferred, Cooldown: cooldown}); err != nil {
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeDeferred, Cooldown: cooldown,
+			Reason: ReasonExternallyManaged}); err != nil {
 		logf.FromContext(ctx).Error(err, "rebalance: dispatch transition to Watching (Deferred, autoscaler-managed) failed",
 			"profile", profile.Name, "dimension", dimension)
 	}
@@ -342,6 +366,10 @@ func dispatchScale(
 ) {
 	logger := logf.FromContext(ctx)
 	metrics.RebalanceImprovementScore.WithLabelValues(string(resp.Action)).Observe(resp.Improvement)
+	change := orchestrationv1alpha1.HistoryEntry{
+		FromReplicas: workloadReplicas(ctx, r.Client, profile.Spec.ApplicationRef),
+		ToReplicas:   resp.TargetReplicas,
+	}
 
 	threshold := r.ImprovementThreshold
 	if threshold <= 0 {
@@ -351,7 +379,8 @@ func dispatchScale(
 		reason := fmt.Sprintf("improvement %.2f below threshold %.2f: %s", resp.Improvement, threshold, resp.Reason)
 		metrics.RebalanceGuardrailRejectionsTotal.WithLabelValues(string(resp.Action), metrics.GuardrailThreshold).Inc()
 		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown,
+				Reason: ReasonBelowThreshold, Change: change}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected) failed", "profile", profile.Name)
 		}
 		return
@@ -360,7 +389,8 @@ func dispatchScale(
 	if resp.TargetReplicas <= 0 {
 		reason := fmt.Sprintf("AdjustReplicas response missing/invalid targetReplicas: %s", resp.Reason)
 		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); err != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown,
+				Reason: ReasonMalformedResponse}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Failed, malformed AdjustReplicas) failed", "profile", profile.Name)
 		}
 		return
@@ -378,7 +408,8 @@ func dispatchScale(
 			resp.TargetReplicas, bounds.Min, bounds.Max, bounds.Source, resp.Reason)
 		metrics.RebalanceGuardrailRejectionsTotal.WithLabelValues(string(resp.Action), metrics.GuardrailBounds).Inc()
 		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown,
+				Reason: ReasonOutOfBounds, Change: change}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected, out of bounds) failed", "profile", profile.Name)
 		}
 		return
@@ -407,14 +438,16 @@ func dispatchScale(
 	result, err := scaleEnactor(ctx, r.Client, r.Evaluator.eaoGVK, profile, resp.TargetReplicas, resp.Reason, r.ScaleActionTimeout)
 	if err != nil {
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, err.Error(),
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown,
+				Reason: ReasonEnactFailed, Change: change}); tErr != nil {
 			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, scale enactor error) failed", "profile", profile.Name)
 		}
 		return
 	}
 
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, result.reason,
-		TransitionOptions{Action: resp.Action, Outcome: result.outcome, Cooldown: cooldown}); err != nil {
+		TransitionOptions{Action: resp.Action, Outcome: result.outcome, Cooldown: cooldown,
+			Reason: rolloutCause(result.outcome, ReasonScaled), Change: change}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Watching failed",
 			"profile", profile.Name, "outcome", result.outcome)
 	}
@@ -445,7 +478,8 @@ func dispatchScaleDryRun(
 	details := fmt.Sprintf("[dry-run] would scale to %d replicas (improvement=%.2f): %s",
 		resp.TargetReplicas, resp.Improvement, resp.Reason)
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, "dry-run: no side effects applied",
-		TransitionOptions{Action: resp.Action, Outcome: OutcomeEnacted, Details: details, Cooldown: cooldown}); err != nil {
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeEnacted, Details: details, Cooldown: cooldown,
+			SkipHistory: true}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Watching (dry-run Enacted) failed", "profile", profile.Name)
 	}
 }
@@ -466,6 +500,9 @@ func dispatchResource(
 ) {
 	logger := logf.FromContext(ctx)
 	metrics.RebalanceImprovementScore.WithLabelValues(string(resp.Action)).Observe(resp.Improvement)
+	change := orchestrationv1alpha1.HistoryEntry{
+		Container: resp.ContainerName, ToCPU: resp.TargetCPU, ToMemory: resp.TargetMemory,
+	}
 
 	threshold := r.ImprovementThreshold
 	if threshold <= 0 {
@@ -475,7 +512,8 @@ func dispatchResource(
 		reason := fmt.Sprintf("improvement %.2f below threshold %.2f: %s", resp.Improvement, threshold, resp.Reason)
 		metrics.RebalanceGuardrailRejectionsTotal.WithLabelValues(string(resp.Action), metrics.GuardrailThreshold).Inc()
 		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown,
+				Reason: ReasonBelowThreshold, Change: change}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected) failed", "profile", profile.Name)
 		}
 		return
@@ -484,7 +522,8 @@ func dispatchResource(
 	if resp.ContainerName == "" || (resp.TargetCPU == "" && resp.TargetMemory == "") {
 		reason := fmt.Sprintf("AdjustResources response missing containerName and/or targetCpu/targetMemory: %s", resp.Reason)
 		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); err != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown,
+				Reason: ReasonMalformedResponse}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Failed, malformed AdjustResources) failed", "profile", profile.Name)
 		}
 		return
@@ -499,7 +538,8 @@ func dispatchResource(
 	if err != nil {
 		reason := fmt.Sprintf("AdjustResources response has an invalid quantity: %v: %s", err, resp.Reason)
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown,
+				Reason: ReasonMalformedResponse, Change: change}); tErr != nil {
 			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, unparsable AdjustResources) failed", "profile", profile.Name)
 		}
 		return
@@ -508,15 +548,18 @@ func dispatchResource(
 	state, err := resolveResourceState(ctx, r.Client, profile, resp.ContainerName)
 	if err != nil {
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, err.Error(),
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown,
+				Reason: ReasonEnactFailed, Change: change}); tErr != nil {
 			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, resolving resource state) failed", "profile", profile.Name)
 		}
 		return
 	}
+	change.FromCPU, change.FromMemory = state.CPU, state.Memory
 	if !state.Found {
 		reason := fmt.Sprintf("container %q not found in workload template: %s", resp.ContainerName, resp.Reason)
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown,
+				Reason: ReasonMalformedResponse, Change: change}); tErr != nil {
 			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, container not found) failed", "profile", profile.Name)
 		}
 		return
@@ -524,7 +567,8 @@ func dispatchResource(
 	if !state.HasExistingLimits {
 		reason := fmt.Sprintf("container %q has no existing CPU/Memory requests or limits — already scales elastically, deferring rather than imposing new constraints", resp.ContainerName)
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeDeferred, Cooldown: cooldown}); tErr != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeDeferred, Cooldown: cooldown,
+				Reason: ReasonUnsupported, Change: change}); tErr != nil {
 			logger.Error(tErr, "rebalance: dispatch transition to Watching (Deferred, no existing resources) failed", "profile", profile.Name)
 		}
 		return
@@ -535,7 +579,8 @@ func dispatchResource(
 		reason = fmt.Sprintf("%s: %s", reason, resp.Reason)
 		metrics.RebalanceGuardrailRejectionsTotal.WithLabelValues(string(resp.Action), metrics.GuardrailBounds).Inc()
 		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown}); err != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown,
+				Reason: ReasonOutOfBounds, Change: change}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected, out of bounds) failed", "profile", profile.Name)
 		}
 		return
@@ -564,14 +609,16 @@ func dispatchResource(
 	result, err := resourceEnactor(ctx, r.Client, profile, resp.ContainerName, targetCPU, targetMemory, resp.Reason, r.ResourceActionTimeout)
 	if err != nil {
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, err.Error(),
-			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			TransitionOptions{Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown,
+				Reason: ReasonEnactFailed, Change: change}); tErr != nil {
 			logger.Error(tErr, "rebalance: dispatch transition to Watching (Failed, resource enactor error) failed", "profile", profile.Name)
 		}
 		return
 	}
 
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, result.reason,
-		TransitionOptions{Action: resp.Action, Outcome: result.outcome, Cooldown: cooldown}); err != nil {
+		TransitionOptions{Action: resp.Action, Outcome: result.outcome, Cooldown: cooldown,
+			Reason: rolloutCause(result.outcome, ReasonResized), Change: change}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Watching failed",
 			"profile", profile.Name, "outcome", result.outcome)
 	}
@@ -600,7 +647,8 @@ func dispatchResourceDryRun(
 	details := fmt.Sprintf("[dry-run] would set container=%s cpu=%s memory=%s (improvement=%.2f): %s",
 		resp.ContainerName, resp.TargetCPU, resp.TargetMemory, resp.Improvement, resp.Reason)
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, "dry-run: no side effects applied",
-		TransitionOptions{Action: resp.Action, Outcome: OutcomeEnacted, Details: details, Cooldown: cooldown}); err != nil {
+		TransitionOptions{Action: resp.Action, Outcome: OutcomeEnacted, Details: details, Cooldown: cooldown,
+			SkipHistory: true}); err != nil {
 		logger.Error(err, "rebalance: dispatch transition to Watching (dry-run Enacted) failed", "profile", profile.Name)
 	}
 }

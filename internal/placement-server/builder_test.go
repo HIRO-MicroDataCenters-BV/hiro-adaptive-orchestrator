@@ -159,16 +159,16 @@ func TestBuildRebalanceContext_AssemblesPlacementsAndCandidateNodes(t *testing.T
 		testNode("node-c", false), // NotReady — must be excluded
 	)
 
-	recentDecisions := []orchestrationv1alpha1.RebalanceDecision{
-		{
-			Outcome:          orchestrationv1alpha1.RebalanceOutcomeNoOp,
-			Action:           orchestrationv1alpha1.RebalanceActionNoOp,
-			Reason:           "previously balanced",
-			LastTransitionAt: metav1.Now(),
-		},
-	}
+	history := &RebalanceHistory{Recent: []orchestrationv1alpha1.HistoryEntry{{
+		Action:  orchestrationv1alpha1.RebalanceActionNoOp,
+		Outcome: orchestrationv1alpha1.RebalanceOutcomeNoOp,
+		Reason:  "NoChange",
+		Count:   3,
+		At:      metav1.Now(),
+	}}}
 
-	req, err := b.BuildRebalanceContext(context.Background(), profile, testDecisionID, "CPUThreshold: node-a at 92%", recentDecisions, RebalanceFacts{})
+	req, err := b.BuildRebalanceContext(context.Background(), profile, testDecisionID, "CPUThreshold: node-a at 92%",
+		RebalanceFacts{History: history})
 	if err != nil {
 		t.Fatalf("BuildRebalanceContext: %v", err)
 	}
@@ -212,8 +212,8 @@ func TestBuildRebalanceContext_AssemblesPlacementsAndCandidateNodes(t *testing.T
 		t.Errorf("CurrentPlacements = %+v, want app-a-1 on node-a and app-a-2 on node-b", rc.CurrentPlacements)
 	}
 
-	if len(rc.RecentDecisions) != 1 || rc.RecentDecisions[0].Action != "NoOp" {
-		t.Errorf("RecentDecisions = %+v, want one converted NoOp entry", rc.RecentDecisions)
+	if rc.History != history {
+		t.Errorf("History = %+v, want the facts' history passed through unchanged", rc.History)
 	}
 }
 
@@ -226,7 +226,7 @@ func TestBuildRebalanceContext_EnergyAwareAttachesEAOData(t *testing.T) {
 		testRebalanceEAO("Critical", 500, "DeployImmediately", "window open", false),
 	)
 
-	req, err := b.BuildRebalanceContext(context.Background(), profile, "decision-2", "EnergyThreshold: verdict flipped", nil, RebalanceFacts{})
+	req, err := b.BuildRebalanceContext(context.Background(), profile, "decision-2", "EnergyThreshold: verdict flipped", RebalanceFacts{})
 	if err != nil {
 		t.Fatalf("BuildRebalanceContext: %v", err)
 	}
@@ -244,8 +244,8 @@ func TestBuildRebalanceContext_EnergyAwareAttachesEAOData(t *testing.T) {
 		t.Errorf("EAOProfile.EnergyMetrics = %+v, want Sufficient=false", req.EAOProfile.EnergyMetrics)
 	}
 
-	if req.RebalanceContext == nil || len(req.RebalanceContext.RecentDecisions) != 0 {
-		t.Errorf("RecentDecisions = %+v, want empty for nil input", req.RebalanceContext.RecentDecisions)
+	if req.RebalanceContext == nil || req.RebalanceContext.History != nil {
+		t.Errorf("RebalanceContext = %+v, want no history when none is passed", req.RebalanceContext)
 	}
 }
 

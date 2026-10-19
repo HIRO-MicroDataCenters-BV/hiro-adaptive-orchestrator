@@ -18,7 +18,7 @@ limitations under the License.
 // rewrites every OrchestrationProfile whose status.rebalancingStatus.state
 // still holds a legacy terminal value (Enacted, NoOp, Rejected, Deferred,
 // Failed — valid under the old 9-value state enum) into the current model:
-// state=Watching plus a RecentDecisions entry carrying that value as an
+// state=Watching plus a status.rebalancingStatus.history entry carrying that value as an
 // Outcome instead.
 //
 // Run order matters:
@@ -150,15 +150,15 @@ func migrateProfile(
 			return nil // already migrated by a concurrent run, or by the new reconciler
 		}
 
-		rs.RecentDecisions = append([]orchestrationv1alpha1.RebalanceDecision{{
-			DecisionID:       rs.DecisionID,
-			Outcome:          outcome,
-			Action:           rs.Action,
-			Reason:           rs.Reason,
-			Details:          rs.Details,
-			StartedAt:        rs.StartedAt,
-			LastTransitionAt: rs.LastTransitionAt,
-		}}, rs.RecentDecisions...)
+		rs.History.Recent = append([]orchestrationv1alpha1.HistoryEntry{{
+			Action:  rs.Action,
+			Outcome: outcome,
+			Reason:  "Migrated",
+			Message: rs.Reason,
+			Count:   1,
+			FirstAt: rs.LastTransitionAt,
+			At:      rs.LastTransitionAt,
+		}}, rs.History.Recent...)
 		rs.State = orchestrationv1alpha1.RebalancingStateWatching
 		rs.LastTransitionAt = metav1.Now()
 
