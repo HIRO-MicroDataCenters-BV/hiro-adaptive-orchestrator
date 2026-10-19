@@ -31,7 +31,8 @@
 #                                    scheduler pod and no webhook.
 #                         none     — operator only.
 #   USE_MOCK_AGENT        Bundled mock decision agent         (default: true)
-#   DEPLOY_SAMPLES        nginx + OrchestrationProfile samples (default: true)
+#   DEPLOY_SAMPLES        nginx + OrchestrationProfile samples from config/samples/,
+#                         applied with kubectl after Helm, never Helm-owned (default: true)
 #   DEPLOY_PROMETHEUS     Bundle kube-prometheus-stack and turn on both
 #                         ServiceMonitors, so the hiro_* metrics are actually
 #                         scraped instead of just exposed      (default: false)
@@ -284,8 +285,7 @@ deploy_stack() {
       --set hiro-operator.metrics.port=${OPERATOR_METRICS_PORT} \
       --set prerequisites.prometheus.enable=${DEPLOY_PROMETHEUS} \
       --set hiro-operator.prometheus.enabled=${DEPLOY_PROMETHEUS} \
-      --set mockAgent.enable=${USE_MOCK_AGENT} \
-      --set samples.enabled=${DEPLOY_SAMPLES}"
+      --set mockAgent.enable=${USE_MOCK_AGENT}"
 
   # Settings are keys of one map, so a single --set changes one of them.
   if [ -n "$OTLP_ENDPOINT" ]; then
@@ -368,6 +368,15 @@ check_placement_server_health() {
   exit 1
 }
 
+# kubectl, not Helm: other repos (e.g. EAO) create the same sample apps, and a
+# Helm-owned copy would conflict with theirs. Runs last, once the operator and webhook are up.
+apply_samples() {
+  [ "$DEPLOY_SAMPLES" = "true" ] || return 0
+  step "Applying samples from config/samples/"
+  kubectl apply -k "$REPO_ROOT/config/samples/"
+  kubectl get orchestrationprofiles
+}
+
 # Service names are resolved at runtime, never guessed — Helm truncates them
 # based on release name and chart version.
 svc_by_label() {
@@ -442,7 +451,7 @@ print_summary() {
     echo -e "\033[33m    Mock agent        : not deployed  (using real agent)\033[0m"
   fi
   if [ "$DEPLOY_SAMPLES" = "true" ]; then
-    echo -e "\033[32m    Samples           : deployed  (nginx + OrchestrationProfiles)\033[0m"
+    echo -e "\033[32m    Samples           : applied with kubectl  (config/samples/)\033[0m"
   else
     echo -e "\033[33m    Samples           : not deployed  (no workload to score)\033[0m"
   fi
@@ -622,6 +631,7 @@ run_deploy() {
     METRICS_READER="${HELM_NAMESPACE}:$(operator_sa_name)"
   fi
   check_placement_server_health
+  apply_samples
   print_summary
   print_port_forward_guide
   print_access_urls
@@ -633,6 +643,11 @@ run_deploy() {
 # ---------------------------------------------------------------------------
 
 run_clean() {
+  # Only our sample profiles; the nginx sample apps may be shared with other repos.
+  step "Deleting sample OrchestrationProfiles"
+  kubectl delete orchestrationprofiles --ignore-not-found \
+    -l app.kubernetes.io/name=hiro-adaptive-orchestrator,app.kubernetes.io/managed-by=kustomize
+
   if ! helm status "$HELM_PLATFORM_RELEASE" -n "$HELM_NAMESPACE" >/dev/null 2>&1; then
     step "No release '$HELM_PLATFORM_RELEASE' in $HELM_NAMESPACE — nothing to uninstall"
     return

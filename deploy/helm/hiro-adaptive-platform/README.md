@@ -51,7 +51,7 @@ Makefile targets are just convenience wrappers.
 ## One install
 
 Everything the stack needs from itself is computed at render time, so
-operator, scheduler, webhook, mock agent and samples go up together:
+operator, scheduler, webhook and mock agent go up together:
 
 - The scheduler plugin's PlacementServer URL defaults to the operator's own
   Service, whose name the chart derives from the release name
@@ -66,9 +66,10 @@ Typical demo install, one command:
 
 ```sh
 helm upgrade --install hiro deploy/helm/hiro-adaptive-platform -n hiro-system --create-namespace --wait \
-  --set mockAgent.enable=true --set samples.enabled=true \
+  --set mockAgent.enable=true \
   --set scheduler.mode=plugin --set scheduler.plugin.image.tag=<tag> \
   --set webhook.enable=true
+kubectl apply -k config/samples/   # optional demo apps + profiles, never Helm-owned
 ```
 
 ## What gets deployed
@@ -81,7 +82,6 @@ helm upgrade --install hiro deploy/helm/hiro-adaptive-platform -n hiro-system --
 | Scheduler plugin (standalone scheduler Deployment) | `scheduler.mode: plugin` | Pods opt in via `spec.schedulerName` — the webhook sets this automatically, or you can set it by hand without the webhook. |
 | Scheduler extender (patches the cluster's kube-scheduler) | `scheduler.mode: extender` | Affects every pod via the default scheduler. Privileged hook Jobs — see [Scheduler extender privileges](#scheduler-extender-privileges). |
 | Mock decision agent | `mockAgent.enable` | Demo/eval only. Real deployments point `DECISION_AGENT_URL` at their own agent instead. |
-| Sample `OrchestrationProfile` CRs + nginx Deployments | `samples.enabled` | Demo/eval only. |
 | Bundled cert-manager / metrics-server / kube-prometheus-stack | `prerequisites.{certManager,metricsServer,prometheus}.enable` | Off by default — see [Bundled prerequisites](#bundled-prerequisites). cert-manager is only useful with `webhook.tls.mode=certManager`, and then must be installed first. |
 
 ## Values reference
@@ -210,24 +210,13 @@ external PlacementServer.
 label selector at install/upgrade time, when they have real cluster access
 (see [Scheduler extender](#scheduler-extender-privileges)).
 
-### `samples`
+### Samples (not in this chart)
 
-```yaml
-samples:
-  enabled: false
-  namespace: default
-  nginxImage: nginx:latest
-  rebalancing: { enabled: true, dryRun: false }
-  nginxApp / nginxApp1 / nginxApp2: { deploymentName: ..., serviceName: ... }
-  profileSample / profile1 / profile2: { name: ..., targetDeploymentName: ... }
-```
-
-Demo/eval only, off by default. `rebalancing.enabled`/`dryRun` here are
-per-`OrchestrationProfile` CR spec fields — unrelated to
-`hiro-operator.config`'s rebalance tuning despite the similar name.
-Each `profileN.targetDeploymentName` is a plain string reference kept in
-sync by hand with the matching `nginxAppN.deploymentName` — there's no
-cross-reference Helm can enforce between two independent template files.
+The demo profiles and nginx apps live in `config/samples/` and are applied
+with `kubectl apply -k config/samples/` after install
+(`deploy_full_stack_with_helm.sh` does this when `DEPLOY_SAMPLES=true`).
+They stay out of Helm because other repos (e.g. EAO) create the same apps,
+and a Helm-owned copy would conflict with theirs on upgrade.
 
 ## Worked examples
 
@@ -253,15 +242,15 @@ HELM_EXTRA_ARGS="\
 HELM_EXTRA_ARGS="--set scheduler.mode=extender" make helm-platform-deploy
 ```
 
-**Demo/eval on Kind — mock agent, samples, bundled monitoring:**
+**Demo/eval on Kind — mock agent, bundled monitoring, then samples:**
 
 ```sh
 HELM_EXTRA_ARGS="\
   --set mockAgent.enable=true \
-  --set samples.enabled=true \
   --set prerequisites.metricsServer.enable=true \
   --set prerequisites.prometheus.enable=true" \
   make helm-platform-deploy
+kubectl apply -k config/samples/
 ```
 
 ## Migrating from the two-pass chart

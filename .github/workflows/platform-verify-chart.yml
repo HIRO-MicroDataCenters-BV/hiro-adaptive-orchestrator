@@ -146,7 +146,6 @@ jobs:
             --set hiro-operator.manager.image.tag=ci \
             --set hiro-operator.manager.image.pullPolicy=IfNotPresent \
             --set mockAgent.enable=true \
-            --set samples.enabled=true \
             --set scheduler.mode=plugin \
             --set scheduler.plugin.image.repository=hiro-scheduler \
             --set scheduler.plugin.image.tag=ci-k8s$SCHED_K8S_VERSION \

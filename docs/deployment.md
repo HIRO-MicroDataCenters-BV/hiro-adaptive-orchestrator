@@ -38,7 +38,7 @@ Prefer `clean` over `destroy` in extender mode: the chart's kube-scheduler resto
 `pre-delete` hook, so only a Helm uninstall reverts the patch. The `OrchestrationProfile` CRD is
 annotated `helm.sh/resource-policy: keep`, so it and any profiles you created survive a `clean`.
 
-Deploys everything — operator, webhook, scheduler (plugin or extender), mock agent, samples, optional bundled prerequisites — as one Helm release via the umbrella chart at `deploy/helm/hiro-adaptive-platform`, against a local Kind cluster. Creates (or reuses) the Kind cluster, builds the operator + scheduler-plugin images, loads them straight into the cluster (no registry needed), deploys everything with one `helm upgrade --install`, and health-checks the result.
+Deploys everything — operator, webhook, scheduler (plugin or extender), mock agent, optional bundled prerequisites — as one Helm release via the umbrella chart at `deploy/helm/hiro-adaptive-platform`, against a local Kind cluster. Creates (or reuses) the Kind cluster, builds the operator + scheduler-plugin images, loads them straight into the cluster (no registry needed), deploys everything with one `helm upgrade --install`, health-checks the result, and finally applies the samples with `kubectl apply -k config/samples/` (outside Helm, since other repos create the same sample apps).
 
 **No `GITHUB_PAT_TOKEN` or registry needed** — images build locally and load directly into Kind. This is the one deploy path in this document that doesn't require a GHCR token.
 
@@ -57,7 +57,7 @@ always matches what was deployed:
 |----------|---------|-------------|
 | `SCHEDULER_MODE` | `plugin` | `plugin` (scheduler Deployment + webhook), `extender` (patches the cluster's own kube-scheduler), or `none` (operator only) |
 | `USE_MOCK_AGENT` | `true` | Deploy the bundled mock decision agent |
-| `DEPLOY_SAMPLES` | `true` | Deploy the nginx + `OrchestrationProfile` samples |
+| `DEPLOY_SAMPLES` | `true` | Apply the nginx + `OrchestrationProfile` samples from `config/samples/` with kubectl after Helm. `clean` deletes only the sample profiles, not the shared nginx apps |
 | `DEPLOY_PROMETHEUS` | `false` | Bundle kube-prometheus-stack and turn on both ServiceMonitors, so the `hiro_*` metrics are scraped rather than just exposed |
 | `OTLP_ENDPOINT` | *(empty)* | OTLP gRPC collector for traces, e.g. `alloy.observability.svc:4317`. Empty disables tracing entirely |
 

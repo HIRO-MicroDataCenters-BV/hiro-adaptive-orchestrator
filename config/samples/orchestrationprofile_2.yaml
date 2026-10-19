@@ -27,7 +27,11 @@ spec:
     cooldownSeconds: 300
     # EnergyThreshold/CPUThreshold/MemoryThreshold/NodeFailure/Scheduled
     triggerConditions:
+      - "CPUThreshold"
+      - "MemoryThreshold"
       - "EnergyThreshold"
+      - "NodeFailure"
+      - "Scheduled"
     # true = an HPA/KEDA/GitOps (replicas) or a VPA (CPU/memory) owns it; never changed
     replicasExternallyManaged: false
     resourcesExternallyManaged: false
