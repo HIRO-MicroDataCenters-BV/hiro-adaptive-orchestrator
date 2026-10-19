@@ -96,9 +96,8 @@ type RebalanceContext struct {
 	// judge imbalance and pick both which pod to move and where.
 	CurrentPlacements []PodPlacement `json:"currentPlacements"`
 
-	// History is this workload's bounded decision summary, so the decider can
-	// avoid repeats and flip-flops without keeping state of its own.
-	History *RebalanceHistory `json:"history,omitempty"`
+	// RebalanceState is inlined: its fields sit directly in rebalanceContext.
+	RebalanceState `json:",inline"`
 
 	// Trigger is the structured form of Reason.
 	Trigger *RebalanceTrigger `json:"trigger,omitempty"`
@@ -112,11 +111,12 @@ type RebalanceContext struct {
 	PDB *RebalancePDB `json:"pdb,omitempty"`
 }
 
-// RebalanceHistory is the decision summary sent with a rebalance request.
-type RebalanceHistory struct {
-	// Recent is the profile's history, newest first, trimmed to Window at request time.
-	Recent []orchestrationv1alpha1.HistoryEntry `json:"recent"`
-	Window metav1.Duration                      `json:"window"`
+// RebalanceState is the workload's past decisions plus its current cooldown and failure streak,
+// so the decider can avoid repeats and flip-flops without keeping state of its own.
+type RebalanceState struct {
+	// History is newest first, trimmed to HistoryWindow at request time.
+	History       []orchestrationv1alpha1.HistoryEntry `json:"history"`
+	HistoryWindow metav1.Duration                      `json:"historyWindow"`
 
 	// CooldownUntil is nil when no cooldown is active.
 	CooldownUntil       *metav1.Time `json:"cooldownUntil,omitempty"`

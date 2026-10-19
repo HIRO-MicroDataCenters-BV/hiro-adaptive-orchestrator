@@ -219,7 +219,7 @@ func (w *StateWriter) Transition(
 				entry.Reason = string(historyReason)
 				entry.Message = reason
 				entry.At = now
-				rs.History.Recent = recordHistory(rs.History.Recent, entry, w.history, now.Time)
+				rs.History = recordHistory(rs.History, entry, w.history, now.Time)
 			}
 
 			escalatedStatus := metav1.ConditionFalse
@@ -229,6 +229,8 @@ func (w *StateWriter) Transition(
 				escalatedStatus = metav1.ConditionTrue
 				escalatedReason = "Escalated"
 				escalatedMessage = rs.EscalatedReason
+			} else {
+				rs.EscalatedReason = "" // stale once escalation was cleared
 			}
 			apimeta.SetStatusCondition(&profile.Status.Conditions, metav1.Condition{
 				Type:    orchestrationv1alpha1.ConditionRebalancingEscalated,

@@ -221,8 +221,8 @@ func TestReconciler_StaleCycleRecoveredByWatchdog(t *testing.T) {
 	if rs.State != StateWatching {
 		t.Fatalf("state = %q, want Watching after watchdog recovery", rs.State)
 	}
-	if len(rs.History.Recent) == 0 || rs.History.Recent[len(rs.History.Recent)-1].Outcome != OutcomeFailed {
-		t.Errorf("recovery outcome = %+v, want the latest decision recorded as Failed", rs.History.Recent)
+	if len(rs.History) == 0 || rs.History[len(rs.History)-1].Outcome != OutcomeFailed {
+		t.Errorf("recovery outcome = %+v, want the latest decision recorded as Failed", rs.History)
 	}
 	if rs.CooldownUntil.IsZero() {
 		t.Error("CooldownUntil unset, want the watchdog recovery to apply the profile's cooldown")
@@ -301,8 +301,8 @@ func TestReconciler_ScheduledTriggerReachesFailedWhenAIUnreachable(t *testing.T)
 	if rs.DecisionID == "" {
 		t.Error("expected decisionId to be assigned entering the cycle")
 	}
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeFailed {
-		t.Errorf("history = %+v, want one Failed-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeFailed {
+		t.Errorf("history = %+v, want one Failed-outcome entry", rs.History)
 	}
 }
 
@@ -335,8 +335,8 @@ func TestReconciler_EnergyVerdictFlipTriggersWorkload(t *testing.T) {
 	if rs.DecisionID == "" {
 		t.Error("expected decisionId to be assigned entering the cycle")
 	}
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeFailed {
-		t.Errorf("history = %+v, want one Failed-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeFailed {
+		t.Errorf("history = %+v, want one Failed-outcome entry", rs.History)
 	}
 }
 
@@ -374,11 +374,11 @@ func TestReconciler_MoveBelowThresholdRejected(t *testing.T) {
 	if rs.State != StateWatching {
 		t.Fatalf("state = %q, want Watching — a below-threshold Move is rejected without reaching Decided", rs.State)
 	}
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeRejected {
-		t.Errorf("history = %+v, want one Rejected-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeRejected {
+		t.Errorf("history = %+v, want one Rejected-outcome entry", rs.History)
 	}
-	if rs.History.Recent[0].Action != orchestrationv1alpha1.RebalanceActionMove {
-		t.Errorf("history[0].Action = %q, want Move", rs.History.Recent[0].Action)
+	if rs.History[0].Action != orchestrationv1alpha1.RebalanceActionMove {
+		t.Errorf("history[0].Action = %q, want Move", rs.History[0].Action)
 	}
 }
 
@@ -407,8 +407,8 @@ func TestReconciler_NoOpDispatchedDirectly(t *testing.T) {
 	if rs.State != StateWatching {
 		t.Fatalf("state = %q, want Watching", rs.State)
 	}
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeNoOp {
-		t.Errorf("history = %+v, want one NoOp-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeNoOp {
+		t.Errorf("history = %+v, want one NoOp-outcome entry", rs.History)
 	}
 }
 
@@ -439,8 +439,8 @@ func TestReconciler_UnrecognizedActionFailsDirectly(t *testing.T) {
 	if rs.State != StateWatching {
 		t.Fatalf("state = %q, want Watching", rs.State)
 	}
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeFailed {
-		t.Errorf("history = %+v, want one Failed-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeFailed {
+		t.Errorf("history = %+v, want one Failed-outcome entry", rs.History)
 	}
 }
 
@@ -471,8 +471,8 @@ func TestReconciler_RejectDispatchedDirectly(t *testing.T) {
 	if rs.State != StateWatching {
 		t.Fatalf("state = %q, want Watching", rs.State)
 	}
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeRejected {
-		t.Errorf("history = %+v, want one Rejected-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeRejected {
+		t.Errorf("history = %+v, want one Rejected-outcome entry", rs.History)
 	}
 }
 
@@ -503,8 +503,8 @@ func TestReconciler_DeferDispatchedDirectly(t *testing.T) {
 	if rs.State != StateWatching {
 		t.Fatalf("state = %q, want Watching", rs.State)
 	}
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeDeferred {
-		t.Errorf("history = %+v, want one Deferred-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeDeferred {
+		t.Errorf("history = %+v, want one Deferred-outcome entry", rs.History)
 	}
 	if rs.CooldownUntil.IsZero() {
 		t.Errorf("cooldownUntil = zero, want a cooldown to be applied after Defer")
@@ -538,8 +538,8 @@ func TestReconciler_EscalateDispatchedDirectly(t *testing.T) {
 	if rs.State != StateWatching {
 		t.Fatalf("state = %q, want Watching", rs.State)
 	}
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeEscalated {
-		t.Errorf("history = %+v, want one Escalated-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeEscalated {
+		t.Errorf("history = %+v, want one Escalated-outcome entry", rs.History)
 	}
 	if !rs.Escalated {
 		t.Error("escalated = false, want true after a direct AI-requested Escalate")
@@ -567,8 +567,8 @@ func TestReconciler_AutoEscalatesAfterConsecutiveFailures(t *testing.T) {
 	if !rs.Escalated {
 		t.Fatalf("escalated = false after %d consecutive Failed cycles crossing threshold (2), want true", rs.ConsecutiveFailures)
 	}
-	if len(rs.History.Recent) != 2 || rs.History.Recent[0].Outcome != OutcomeEscalated {
-		t.Errorf("history = %+v, want the 2nd cycle promoted to Escalated", rs.History.Recent)
+	if len(rs.History) != 2 || rs.History[0].Outcome != OutcomeEscalated {
+		t.Errorf("history = %+v, want the 2nd cycle promoted to Escalated", rs.History)
 	}
 }
 
@@ -591,8 +591,8 @@ func TestReconciler_EscalatedProfileSkipsDetection(t *testing.T) {
 
 	got := getProfile(t, c, profile.Name)
 	rs := got.Status.RebalancingStatus
-	if len(rs.History.Recent) != 0 {
-		t.Errorf("history = %+v, want none — an escalated profile must not run any cycle", rs.History.Recent)
+	if len(rs.History) != 0 {
+		t.Errorf("history = %+v, want none — an escalated profile must not run any cycle", rs.History)
 	}
 	if !rs.Escalated {
 		t.Error("escalated flipped to false unexpectedly")
@@ -624,8 +624,8 @@ func TestReconciler_ClearingEscalatedResumesDetection(t *testing.T) {
 
 	got = getProfile(t, c, profile.Name)
 	rs := got.Status.RebalancingStatus
-	if len(rs.History.Recent) != 1 {
-		t.Errorf("history = %+v, want one entry — detection should have run normally", rs.History.Recent)
+	if len(rs.History) != 1 {
+		t.Errorf("history = %+v, want one entry — detection should have run normally", rs.History)
 	}
 }
 
@@ -668,11 +668,11 @@ func TestReconciler_MoveAboveThresholdReachesEnacting(t *testing.T) {
 	if rs.State != StateWatching {
 		t.Fatalf("state = %q, want Watching", rs.State)
 	}
-	if len(rs.History.Recent) != 1 {
-		t.Fatalf("history = %+v, want exactly one entry", rs.History.Recent)
+	if len(rs.History) != 1 {
+		t.Fatalf("history = %+v, want exactly one entry", rs.History)
 	}
-	if rs.History.Recent[0].Action != orchestrationv1alpha1.RebalanceActionMove {
-		t.Errorf("history[0].Action = %q, want Move", rs.History.Recent[0].Action)
+	if rs.History[0].Action != orchestrationv1alpha1.RebalanceActionMove {
+		t.Errorf("history[0].Action = %q, want Move", rs.History[0].Action)
 	}
 }
 
@@ -703,11 +703,11 @@ func TestReconciler_MoveTimeoutWithClosedEnergyGateIsDeferred(t *testing.T) {
 
 	got := getProfile(t, c, profile.Name)
 	rs := got.Status.RebalancingStatus
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeDeferred {
-		t.Fatalf("history = %+v, want one Deferred-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeDeferred {
+		t.Fatalf("history = %+v, want one Deferred-outcome entry", rs.History)
 	}
-	if !strings.Contains(rs.History.Recent[0].Message, "energy gate closed") {
-		t.Errorf("reason = %q, want it to mention the energy gate", rs.History.Recent[0].Message)
+	if !strings.Contains(rs.History[0].Message, "energy gate closed") {
+		t.Errorf("reason = %q, want it to mention the energy gate", rs.History[0].Message)
 	}
 }
 
@@ -737,8 +737,8 @@ func TestReconciler_MoveTimeoutWithoutEnergyAwarenessStaysFailed(t *testing.T) {
 
 	got := getProfile(t, c, profile.Name)
 	rs := got.Status.RebalancingStatus
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeFailed {
-		t.Fatalf("history = %+v, want one Failed-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeFailed {
+		t.Fatalf("history = %+v, want one Failed-outcome entry", rs.History)
 	}
 }
 
@@ -768,8 +768,8 @@ func TestReconciler_MoveTimeoutWithOpenEnergyGateStaysFailed(t *testing.T) {
 
 	got := getProfile(t, c, profile.Name)
 	rs := got.Status.RebalancingStatus
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeFailed {
-		t.Fatalf("history = %+v, want one Failed-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeFailed {
+		t.Fatalf("history = %+v, want one Failed-outcome entry", rs.History)
 	}
 }
 
@@ -809,11 +809,11 @@ func TestReconciler_MoveWrongNodeStaysFailedEvenWithClosedEnergyGate(t *testing.
 
 	got := getProfile(t, c, profile.Name)
 	rs := got.Status.RebalancingStatus
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeFailed {
-		t.Fatalf("history = %+v, want one Failed-outcome entry (wrong node, not a timeout)", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeFailed {
+		t.Fatalf("history = %+v, want one Failed-outcome entry (wrong node, not a timeout)", rs.History)
 	}
-	if !strings.Contains(rs.History.Recent[0].Message, "intent not honoured") {
-		t.Errorf("reason = %q, want the wrong-node reason, not a timeout/energy-gate one", rs.History.Recent[0].Message)
+	if !strings.Contains(rs.History[0].Message, "intent not honoured") {
+		t.Errorf("reason = %q, want the wrong-node reason, not a timeout/energy-gate one", rs.History[0].Message)
 	}
 }
 
@@ -852,11 +852,11 @@ func TestReconciler_MoveRateLimitedFailsCleanly(t *testing.T) {
 	if rs.State != StateWatching {
 		t.Fatalf("state = %q, want Watching — a rate-limited Move must still resolve cleanly", rs.State)
 	}
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeFailed {
-		t.Fatalf("history = %+v, want one Failed-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeFailed {
+		t.Fatalf("history = %+v, want one Failed-outcome entry", rs.History)
 	}
-	if !strings.Contains(rs.History.Recent[0].Message, "rate limit") {
-		t.Errorf("reason = %q, want it to mention the rate limit", rs.History.Recent[0].Message)
+	if !strings.Contains(rs.History[0].Message, "rate limit") {
+		t.Errorf("reason = %q, want it to mention the rate limit", rs.History[0].Message)
 	}
 }
 
@@ -895,8 +895,8 @@ func TestReconciler_MoveDryRunSkipsSideEffectsAndRateLimit(t *testing.T) {
 	if rs.State != StateWatching {
 		t.Fatalf("state = %q, want Watching", rs.State)
 	}
-	if len(rs.History.Recent) != 0 {
-		t.Fatalf("history = %+v, want none: a dry-run changes nothing", rs.History.Recent)
+	if len(rs.History) != 0 {
+		t.Fatalf("history = %+v, want none: a dry-run changes nothing", rs.History)
 	}
 	if !strings.Contains(rs.Details, "[dry-run]") {
 		t.Errorf("details = %q, want it to carry the dry-run marker", rs.Details)
@@ -936,8 +936,8 @@ func TestReconciler_MoveDryRunBelowThresholdStillRejected(t *testing.T) {
 
 	got := getProfile(t, c, profile.Name)
 	rs := got.Status.RebalancingStatus
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeRejected {
-		t.Fatalf("history = %+v, want one Rejected-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeRejected {
+		t.Fatalf("history = %+v, want one Rejected-outcome entry", rs.History)
 	}
 }
 
@@ -971,8 +971,8 @@ func TestReconciler_EnergyPendingRetryBypassesToEnacted(t *testing.T) {
 	if rs.Action != orchestrationv1alpha1.RebalanceAction(ActionRetryPendingSchedule) {
 		t.Errorf("action = %q, want %q", rs.Action, ActionRetryPendingSchedule)
 	}
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeEnacted {
-		t.Errorf("history = %+v, want one Enacted-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeEnacted {
+		t.Errorf("history = %+v, want one Enacted-outcome entry", rs.History)
 	}
 
 	// The whole point: the pending pod should actually be gone, so its
@@ -1016,8 +1016,8 @@ func TestReconciler_BypassIgnoresActiveCooldown(t *testing.T) {
 	if rs.Action != orchestrationv1alpha1.RebalanceAction(ActionRetryPendingSchedule) {
 		t.Errorf("action = %q, want %q", rs.Action, ActionRetryPendingSchedule)
 	}
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeEnacted {
-		t.Errorf("history = %+v, want one Enacted-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeEnacted {
+		t.Errorf("history = %+v, want one Enacted-outcome entry", rs.History)
 	}
 
 	err = c.Get(context.Background(), types.NamespacedName{Name: "app-a-pending", Namespace: "default"}, &corev1.Pod{})

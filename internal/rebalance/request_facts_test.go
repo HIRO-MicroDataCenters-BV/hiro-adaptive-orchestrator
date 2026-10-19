@@ -144,10 +144,10 @@ func TestReconciler_ResourceDefersWhenResourcesExternallyManaged(t *testing.T) {
 	}
 
 	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
-	if len(rs.History.Recent) != 1 || rs.History.Recent[0].Outcome != OutcomeDeferred {
-		t.Fatalf("history = %+v, want one Deferred-outcome entry", rs.History.Recent)
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeDeferred {
+		t.Fatalf("history = %+v, want one Deferred-outcome entry", rs.History)
 	}
-	if !strings.Contains(rs.History.Recent[0].Message, "resources are externally managed") {
-		t.Errorf("reason = %q, want it to say resources are externally managed", rs.History.Recent[0].Message)
+	if !strings.Contains(rs.History[0].Message, "resources are externally managed") {
+		t.Errorf("reason = %q, want it to say resources are externally managed", rs.History[0].Message)
 	}
 }

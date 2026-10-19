@@ -18,6 +18,7 @@ package placementserver
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -159,16 +160,20 @@ func TestBuildRebalanceContext_AssemblesPlacementsAndCandidateNodes(t *testing.T
 		testNode("node-c", false), // NotReady — must be excluded
 	)
 
-	history := &RebalanceHistory{Recent: []orchestrationv1alpha1.HistoryEntry{{
-		Action:  orchestrationv1alpha1.RebalanceActionNoOp,
-		Outcome: orchestrationv1alpha1.RebalanceOutcomeNoOp,
-		Reason:  "NoChange",
-		Count:   3,
-		At:      metav1.Now(),
-	}}}
+	state := RebalanceState{
+		History: []orchestrationv1alpha1.HistoryEntry{{
+			Action:  orchestrationv1alpha1.RebalanceActionNoOp,
+			Outcome: orchestrationv1alpha1.RebalanceOutcomeNoOp,
+			Reason:  "NoChange",
+			Count:   3,
+			At:      metav1.Now(),
+		}},
+		ConsecutiveFailures: 1,
+		EscalationThreshold: 3,
+	}
 
 	req, err := b.BuildRebalanceContext(context.Background(), profile, testDecisionID, "CPUThreshold: node-a at 92%",
-		RebalanceFacts{History: history})
+		RebalanceFacts{State: state})
 	if err != nil {
 		t.Fatalf("BuildRebalanceContext: %v", err)
 	}
@@ -212,8 +217,23 @@ func TestBuildRebalanceContext_AssemblesPlacementsAndCandidateNodes(t *testing.T
 		t.Errorf("CurrentPlacements = %+v, want app-a-1 on node-a and app-a-2 on node-b", rc.CurrentPlacements)
 	}
 
-	if rc.History != history {
-		t.Errorf("History = %+v, want the facts' history passed through unchanged", rc.History)
+	if len(rc.History) != 1 || rc.ConsecutiveFailures != 1 || rc.EscalationThreshold != 3 {
+		t.Errorf("RebalanceState = %+v, want the facts' state passed through unchanged", rc.RebalanceState)
+	}
+
+	// The state is inlined: its fields must sit directly in rebalanceContext on the wire.
+	raw, err := json.Marshal(rc)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	for _, key := range []string{"history", "historyWindow", "consecutiveFailures", "escalationThreshold"} {
+		if _, ok := wire[key]; !ok {
+			t.Errorf("rebalanceContext JSON has no top-level %q: %s", key, raw)
+		}
 	}
 }
 
@@ -244,7 +264,7 @@ func TestBuildRebalanceContext_EnergyAwareAttachesEAOData(t *testing.T) {
 		t.Errorf("EAOProfile.EnergyMetrics = %+v, want Sufficient=false", req.EAOProfile.EnergyMetrics)
 	}
 
-	if req.RebalanceContext == nil || req.RebalanceContext.History != nil {
+	if req.RebalanceContext == nil || len(req.RebalanceContext.History) != 0 {
 		t.Errorf("RebalanceContext = %+v, want no history when none is passed", req.RebalanceContext)
 	}
 }

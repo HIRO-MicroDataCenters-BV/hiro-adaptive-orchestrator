@@ -140,10 +140,10 @@ func TestStateWriter_Transition_TerminalRecordsHistoryAndCooldown(t *testing.T) 
 	if rs.CooldownUntil.IsZero() {
 		t.Error("cooldownUntil not set on terminal transition")
 	}
-	if len(rs.History.Recent) != 1 {
-		t.Fatalf("history len = %d, want 1", len(rs.History.Recent))
+	if len(rs.History) != 1 {
+		t.Fatalf("history len = %d, want 1", len(rs.History))
 	}
-	if e := rs.History.Recent[0]; e.Outcome != OutcomeNoOp || e.Count != 1 || e.Reason != string(ReasonOther) {
+	if e := rs.History[0]; e.Outcome != OutcomeNoOp || e.Count != 1 || e.Reason != string(ReasonOther) {
 		t.Errorf("history[0] = %+v, want one NoOp entry with the Other reason (none was passed)", e)
 	}
 }
@@ -177,16 +177,16 @@ func TestStateWriter_Transition_EscalatesAfterConsecutiveFailures(t *testing.T) 
 	if rs.ConsecutiveFailures != 1 || rs.Escalated {
 		t.Fatalf("after 1st Failed: consecutiveFailures=%d escalated=%v, want 1/false", rs.ConsecutiveFailures, rs.Escalated)
 	}
-	if rs.History.Recent[0].Outcome != OutcomeFailed {
-		t.Errorf("history[0].Outcome = %q, want Failed (not yet promoted)", rs.History.Recent[0].Outcome)
+	if rs.History[0].Outcome != OutcomeFailed {
+		t.Errorf("history[0].Outcome = %q, want Failed (not yet promoted)", rs.History[0].Outcome)
 	}
 
 	rs = runRebalanceCycle(t, writer, key, OutcomeDeferred)
 	if rs.ConsecutiveFailures != 2 || !rs.Escalated {
 		t.Fatalf("after 2nd Failed/Deferred: consecutiveFailures=%d escalated=%v, want 2/true", rs.ConsecutiveFailures, rs.Escalated)
 	}
-	if rs.History.Recent[0].Outcome != OutcomeEscalated {
-		t.Errorf("history[0].Outcome = %q, want Escalated once the threshold is crossed", rs.History.Recent[0].Outcome)
+	if rs.History[0].Outcome != OutcomeEscalated {
+		t.Errorf("history[0].Outcome = %q, want Escalated once the threshold is crossed", rs.History[0].Outcome)
 	}
 	if rs.EscalatedReason == "" {
 		t.Error("escalatedReason not set")
@@ -253,8 +253,8 @@ func TestStateWriter_Transition_DirectEscalateBypassesThreshold(t *testing.T) {
 	if rs.ConsecutiveFailures != 0 {
 		t.Errorf("consecutiveFailures = %d, want 0 — a direct escalate isn't a failure streak", rs.ConsecutiveFailures)
 	}
-	if rs.History.Recent[0].Outcome != OutcomeEscalated {
-		t.Errorf("history[0].Outcome = %q, want Escalated", rs.History.Recent[0].Outcome)
+	if rs.History[0].Outcome != OutcomeEscalated {
+		t.Errorf("history[0].Outcome = %q, want Escalated", rs.History[0].Outcome)
 	}
 }
 
@@ -297,7 +297,7 @@ func historyOf(t *testing.T, writer *StateWriter, key types.NamespacedName) []or
 	if err := writer.client.Get(context.Background(), key, got); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	return got.Status.RebalancingStatus.History.Recent
+	return got.Status.RebalancingStatus.History
 }
 
 func TestStateWriter_History_MergesRepeats(t *testing.T) {
@@ -367,5 +367,22 @@ func TestStateWriter_History_SkipHistory(t *testing.T) {
 	endCycle(t, writer, key, "dry-run", TransitionOptions{Outcome: OutcomeEnacted, SkipHistory: true})
 	if h := historyOf(t, writer, key); len(h) != 0 {
 		t.Errorf("history = %+v, want none for a skipped (dry-run) cycle", h)
+	}
+}
+
+func TestStateWriter_Transition_ClearedEscalationDropsReason(t *testing.T) {
+	profile := testProfile("profile-i")
+	profile.Status.RebalancingStatus.EscalatedReason = "old: AI unavailable"
+	writer, _ := newTestWriter(t, profile)
+	key := types.NamespacedName{Name: "profile-i"}
+
+	endCycle(t, writer, key, "nothing to do", TransitionOptions{Outcome: OutcomeNoOp, Reason: ReasonNoChange})
+
+	got := &orchestrationv1alpha1.OrchestrationProfile{}
+	if err := writer.client.Get(context.Background(), key, got); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if r := got.Status.RebalancingStatus.EscalatedReason; r != "" {
+		t.Errorf("escalatedReason = %q, want it cleared when not escalated", r)
 	}
 }

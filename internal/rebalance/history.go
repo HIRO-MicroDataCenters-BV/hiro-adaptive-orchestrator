@@ -146,21 +146,21 @@ func truncate(s string, max int) string {
 	return string(runes[:max-1]) + "…"
 }
 
-// summarizeHistory builds the request's history from the profile status, re-trimming by
-// the window so entries don't outlive it when nothing has been written for a while.
-func summarizeHistory(
+// rebalanceState builds the request's history and streak facts from the profile status,
+// re-trimming by the window so entries don't outlive it when nothing has been written for a while.
+func rebalanceState(
 	rs orchestrationv1alpha1.RebalancingStatus,
 	cfg HistoryConfig,
 	escalationThreshold int32,
 	now time.Time,
-) *placement.RebalanceHistory {
+) placement.RebalanceState {
 	cfg = cfg.WithDefaults()
 	if escalationThreshold <= 0 {
 		escalationThreshold = DefaultEscalationThreshold
 	}
-	h := &placement.RebalanceHistory{
-		Recent:              trimHistory(rs.History.Recent, cfg, now),
-		Window:              metav1.Duration{Duration: cfg.Window},
+	h := placement.RebalanceState{
+		History:             trimHistory(rs.History, cfg, now),
+		HistoryWindow:       metav1.Duration{Duration: cfg.Window},
 		ConsecutiveFailures: rs.ConsecutiveFailures,
 		EscalationThreshold: escalationThreshold,
 	}

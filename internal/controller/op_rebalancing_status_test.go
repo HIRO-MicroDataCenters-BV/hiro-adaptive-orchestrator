@@ -85,7 +85,7 @@ var _ = Describe("OrchestrationProfile rebalancingStatus.state CRD validation", 
 			profile := newProfile("rebalance-outcome-valid-" + strings.ToLower(string(outcome)))
 			Expect(k8sClient.Create(testCtx, profile)).To(Succeed())
 
-			profile.Status.RebalancingStatus.History.Recent = []orchestrationv1alpha1.HistoryEntry{
+			profile.Status.RebalancingStatus.History = []orchestrationv1alpha1.HistoryEntry{
 				historyEntry(outcome),
 			}
 			Expect(k8sClient.Status().Update(testCtx, profile)).To(Succeed())
@@ -103,7 +103,7 @@ var _ = Describe("OrchestrationProfile rebalancingStatus.state CRD validation", 
 
 		entry := historyEntry(orchestrationv1alpha1.RebalanceOutcomeDeferred)
 		entry.Reason = "SomeFutureReason"
-		profile.Status.RebalancingStatus.History.Recent = []orchestrationv1alpha1.HistoryEntry{entry}
+		profile.Status.RebalancingStatus.History = []orchestrationv1alpha1.HistoryEntry{entry}
 		Expect(k8sClient.Status().Update(testCtx, profile)).To(Succeed())
 	})
 })

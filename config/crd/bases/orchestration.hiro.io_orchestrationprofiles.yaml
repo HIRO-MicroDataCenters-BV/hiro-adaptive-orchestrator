@@ -295,83 +295,81 @@ spec:
                       escalated is true.
                     type: string
                   history:
-                    description: history is a bounded summary of past decisions; repeats
-                      are merged so they can't push out real actions.
-                    properties:
-                      recent:
-                        items:
-                          description: HistoryEntry is one terminal decision, or a
-                            run of identical ones (count > 1).
-                          properties:
-                            action:
-                              description: 'action has no enum: the AI may return
-                                new actions.'
-                              type: string
-                            at:
-                              format: date-time
-                              type: string
-                            container:
-                              description: AdjustResources facts.
-                              type: string
-                            count:
-                              description: count is how many identical decisions in
-                                a row this entry stands for.
-                              format: int32
-                              type: integer
-                            firstAt:
-                              description: firstAt is when the first of the merged
-                                decisions ended; at is the latest.
-                              format: date-time
-                              type: string
-                            fromCpu:
-                              type: string
-                            fromMemory:
-                              type: string
-                            fromReplicas:
-                              description: AdjustReplicas facts.
-                              format: int32
-                              type: integer
-                            message:
-                              description: message is the human-readable detail, truncated
-                                to a configured length.
-                              type: string
-                            newPodName:
-                              type: string
-                            newPodNode:
-                              type: string
-                            outcome:
-                              description: 'RebalanceOutcome is how a decision cycle
-                                ended. Not a CRD enum: only the operator writes it.'
-                              type: string
-                            podName:
-                              description: Move facts. newPodName/newPodNode are set
-                                whenever a replacement pod appeared.
-                              type: string
-                            reason:
-                              description: reason is a short CamelCase code for where
-                                the cycle ended; not an enum, so new codes need no
-                                CRD change.
-                              type: string
-                            sourceNode:
-                              type: string
-                            targetNode:
-                              type: string
-                            toCpu:
-                              type: string
-                            toMemory:
-                              type: string
-                            toReplicas:
-                              format: int32
-                              type: integer
-                          required:
-                          - action
-                          - at
-                          - count
-                          - outcome
-                          - reason
-                          type: object
-                        type: array
-                    type: object
+                    description: |-
+                      history holds recent terminal decisions, newest first, within the history window and size cap.
+                      Repeats are merged so they can't push out real actions.
+                    items:
+                      description: HistoryEntry is one terminal decision, or a run
+                        of identical ones (count > 1).
+                      properties:
+                        action:
+                          description: 'action has no enum: the AI may return new
+                            actions.'
+                          type: string
+                        at:
+                          format: date-time
+                          type: string
+                        container:
+                          description: AdjustResources facts.
+                          type: string
+                        count:
+                          description: count is how many identical decisions in a
+                            row this entry stands for.
+                          format: int32
+                          type: integer
+                        firstAt:
+                          description: firstAt is when the first of the merged decisions
+                            ended; at is the latest.
+                          format: date-time
+                          type: string
+                        fromCpu:
+                          type: string
+                        fromMemory:
+                          type: string
+                        fromReplicas:
+                          description: AdjustReplicas facts.
+                          format: int32
+                          type: integer
+                        message:
+                          description: message is the human-readable detail, truncated
+                            to a configured length.
+                          type: string
+                        newPodName:
+                          type: string
+                        newPodNode:
+                          type: string
+                        outcome:
+                          description: 'RebalanceOutcome is how a decision cycle ended.
+                            Not a CRD enum: only the operator writes it.'
+                          type: string
+                        podName:
+                          description: Move facts. newPodName/newPodNode are set whenever
+                            a replacement pod appeared.
+                          type: string
+                        reason:
+                          description: reason is a short CamelCase code for where
+                            the cycle ended; not an enum, so new codes need no CRD
+                            change.
+                          type: string
+                        sourceNode:
+                          type: string
+                        targetNode:
+                          type: string
+                        toCpu:
+                          type: string
+                        toMemory:
+                          type: string
+                        toReplicas:
+                          format: int32
+                          type: integer
+                      required:
+                      - action
+                      - at
+                      - count
+                      - outcome
+                      - reason
+                      type: object
+                    type: array
                   lastTransitionAt:
                     description: lastTransitionAt is when state last changed.
                     format: date-time

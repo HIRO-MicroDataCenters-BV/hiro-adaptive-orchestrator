@@ -475,12 +475,12 @@ func nestedNumber(obj map[string]any, fields ...string) (float64, bool) {
 // =============================================================================
 
 // RebalanceFacts are rebalance inputs the engine already resolved (it owns
-// trigger evaluation and HPA/KEDA/PDB knowledge); each may be nil.
+// trigger evaluation and HPA/KEDA/PDB knowledge); each pointer may be nil.
 type RebalanceFacts struct {
 	Trigger  *RebalanceTrigger
 	Workload *RebalanceWorkload
 	PDB      *RebalancePDB
-	History  *RebalanceHistory
+	State    RebalanceState
 }
 
 // BuildRebalanceContext assembles a DecisionRequest for the rebalance
@@ -532,7 +532,7 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 			Reason:            reason,
 			DecisionID:        decisionID,
 			CurrentPlacements: buildCurrentPlacements(pods),
-			History:           facts.History,
+			RebalanceState:    facts.State,
 			Trigger:           facts.Trigger,
 			Workload:          facts.Workload,
 			PDB:               facts.PDB,

@@ -78,7 +78,7 @@ Not numbered because they're continuous background wiring rather than steps in a
 Every rebalance evaluation for a workload is an instance of a state machine, tracked in
 `OrchestrationProfile.status.rebalancingStatus`. `state` only ever holds one of five active
 values — it never encodes *how* a cycle ended. The result of a finished cycle is recorded
-separately, as an `outcome` on the `history.recent` entry written in the same transition that
+separately, as an `outcome` on the `history` entry written in the same transition that
 returns `state` to `Watching`.
 
 ```mermaid
@@ -95,7 +95,7 @@ stateDiagram-v2
 ```
 
 Active states (`state`): `Watching`, `Triggered`, `Evaluating`, `Decided`, `Enacting`.
-Outcomes (`history.recent[].outcome`, never a `state` value): `Enacted`, `NoOp`, `Rejected`,
+Outcomes (`history[].outcome`, never a `state` value): `Enacted`, `NoOp`, `Rejected`,
 `Deferred`, `Failed`, `Escalated` (see
 [Escalation — pausing on repeated failures](#escalation--pausing-on-repeated-failures)).
 
@@ -499,7 +499,7 @@ call but the response only ever describes one action. Multi-pod convergence (e.g
 need to move to actually balance the workload) is expected to happen over multiple Triggered
 cycles — the AI recommends its single highest-value move this cycle, cooldown elapses, and if
 the workload is still imbalanced the next cycle's request reflects the post-move layout and the
-AI can recommend the next one. `history.recent` accumulates the history across cycles. Nothing
+AI can recommend the next one. `history` accumulates the history across cycles. Nothing
 in the schema currently supports batching several decisions into one response, and the state
 machine (one active decision per profile at a time) isn't shaped for concurrent per-pod cycles
 either.
@@ -828,7 +828,7 @@ build a UI or alerting on top of later.
    cycle's `action`/`details`.
 3. On transitioning to `Watching`: requires `TransitionOptions.Outcome` (rejects the call
    otherwise), sets `cooldownUntil` (if a cooldown was passed in), and records the outcome in
-   `history.recent` (see [Rebalance history](#rebalance-history)). Dry-run cycles are not recorded.
+   `history` (see [Rebalance history](#rebalance-history)). Dry-run cycles are not recorded.
 4. Persists via `Status().Update`, wrapped in `retry.RetryOnConflict` — callers never need
    their own conflict-retry loop, and re-applying the same transition after a crash is safe
    (it either no-ops because state already moved on, or succeeds idempotently).
@@ -914,7 +914,7 @@ about either:
    AI's own judgment doesn't need to wait for a repeat-failure count to catch up.
 
 Either path sets the same persistent `rs.Escalated` flag (+ `EscalatedReason`) — unlike
-`history.recent`, which is a rolling window, this flag survives until something explicitly
+`history`, which is a rolling window, this flag survives until something explicitly
 clears it. `Reconcile` checks it first thing, right next to the `Spec.Rebalancing.Enabled` check:
 while `Escalated`, the profile is skipped entirely — no trigger evaluation, no bypass actions
 either (a stronger pause than cooldown, which deliberately still lets `RetryPendingSchedule`
@@ -1073,8 +1073,8 @@ flowchart LR
 
 | Environment variable | Overrides | Default |
 |---|---|---|
-| `REBALANCE_HISTORY_WINDOW` | How long `history.recent` entries are kept (Go duration) | `DefaultHistoryWindow` (1h) |
-| `REBALANCE_HISTORY_MAX_ENTRIES` | Max `history.recent` entries per profile | `DefaultHistoryMaxEntries` (20) |
+| `REBALANCE_HISTORY_WINDOW` | How long `history` entries are kept (Go duration) | `DefaultHistoryWindow` (1h) |
+| `REBALANCE_HISTORY_MAX_ENTRIES` | Max `history` entries per profile | `DefaultHistoryMaxEntries` (20) |
 | `REBALANCE_HISTORY_MESSAGE_MAX` | Max characters of an entry's `message` | `DefaultHistoryMessageMax` (200) |
 | `REBALANCE_DETECTION_INTERVAL` | `Reconciler`'s periodic detection tick (Go duration, e.g. `30s`) | `DefaultDetectionInterval` (30s) |
 | `REBALANCE_DECISION_TIMEOUT` | `Reconciler`'s AI-consultation timeout (Go duration, e.g. `5s`) | `DefaultDecisionTimeout` (5s) |
@@ -1161,13 +1161,13 @@ Regenerate `config/rbac/role.yaml` with `make manifests` after changing these ma
 ```mermaid
 flowchart TD
     RS["RebalancingStatus"] --> Active["Active fields:<br/>state, reason, decisionId,<br/>action, details, startedAt,<br/>lastTransitionAt, cooldownUntil"]
-    RS --> RD["history.recent[]"]
+    RS --> RD["history[]"]
     RD --> RDF["HistoryEntry:<br/>action, outcome, reason, message,<br/>count, firstAt, at, change facts"]
 ```
 
 `RebalancingStatus` (in `api/v1alpha1/orchestrationprofile_types.go`) carries: `state`
 (OpenAPI-enum-validated against the 5 active states), `reason`, `decisionId`, `action`,
-`details`, `startedAt`, `lastTransitionAt`, `cooldownUntil`, and `history.recent` (see
+`details`, `startedAt`, `lastTransitionAt`, `cooldownUntil`, and `history` (see
 [Rebalance history](#rebalance-history)). `outcome` and `reason` are plain strings checked in
 Go, not CRD enums, so adding one never needs a CRD upgrade first.
 
@@ -1178,7 +1178,7 @@ new operator build).
 
 ### Rebalance history
 
-`status.rebalancingStatus.history.recent` is a short summary of past cycles, newest first.
+`status.rebalancingStatus.history` is a short summary of past cycles, newest first.
 
 - Kept for `REBALANCE_HISTORY_WINDOW` (1h), at most `REBALANCE_HISTORY_MAX_ENTRIES` (20).
 - Each entry: `action`, `outcome`, `reason` (a code, e.g. `PDBBlocked`), `message`
@@ -1191,8 +1191,9 @@ new operator build).
   wrong-node Failed move.
 - Dry-run cycles are not recorded.
 
-The AI request carries `rebalanceContext.history`: `recent` (re-trimmed to the window),
-`window`, `cooldownUntil` (only while active), `consecutiveFailures`, `escalationThreshold`.
+The AI request carries the same facts directly in `rebalanceContext`: `history` (re-trimmed
+to the window), `historyWindow`, `cooldownUntil` (only while active), `consecutiveFailures`,
+`escalationThreshold`.
 
 `spec.applicationRef` can't be changed after creation, so the history always describes one
 app. To point at another app, create a new profile.

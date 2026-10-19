@@ -226,15 +226,10 @@ type RebalancingStatus struct {
 	// +optional
 	EscalatedReason string `json:"escalatedReason,omitempty"`
 
-	// history is a bounded summary of past decisions; repeats are merged so they can't push out real actions.
+	// history holds recent terminal decisions, newest first, within the history window and size cap.
+	// Repeats are merged so they can't push out real actions.
 	// +optional
-	History RebalanceHistory `json:"history,omitempty"`
-}
-
-// RebalanceHistory holds recent terminal decisions, newest first, within the history window and size cap.
-type RebalanceHistory struct {
-	// +optional
-	Recent []HistoryEntry `json:"recent,omitempty"`
+	History []HistoryEntry `json:"history,omitempty"`
 }
 
 // HistoryEntry is one terminal decision, or a run of identical ones (count > 1).

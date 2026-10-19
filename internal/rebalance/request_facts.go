@@ -59,7 +59,7 @@ func (r *Reconciler) rebalanceFacts(
 			Threshold: result.Detail.Threshold,
 		},
 		Workload: r.workloadFacts(ctx, profile),
-		History: summarizeHistory(rs, r.Writer.HistoryConfig(),
+		State: rebalanceState(rs, r.Writer.HistoryConfig(),
 			profile.Spec.Rebalancing.EscalationThreshold, time.Now()),
 	}
 

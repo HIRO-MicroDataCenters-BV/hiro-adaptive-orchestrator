@@ -29,26 +29,26 @@ func entryAt(at time.Time, reason HistoryReason) orchestrationv1alpha1.HistoryEn
 	return orchestrationv1alpha1.HistoryEntry{Outcome: OutcomeNoOp, Reason: string(reason), At: metav1.NewTime(at)}
 }
 
-func TestSummarizeHistory_TrimsByWindowAtReadTime(t *testing.T) {
+func TestRebalanceState_TrimsByWindowAtReadTime(t *testing.T) {
 	now := time.Now()
 	rs := orchestrationv1alpha1.RebalancingStatus{
-		History: orchestrationv1alpha1.RebalanceHistory{Recent: []orchestrationv1alpha1.HistoryEntry{
+		History: []orchestrationv1alpha1.HistoryEntry{
 			entryAt(now.Add(-10*time.Minute), ReasonNoChange),
 			entryAt(now.Add(-2*time.Hour), ReasonBelowThreshold),
-		}},
+		},
 		ConsecutiveFailures: 2,
 	}
 
-	h := summarizeHistory(rs, HistoryConfig{}, 5, now)
-	if len(h.Recent) != 1 || h.Recent[0].Reason != string(ReasonNoChange) {
-		t.Errorf("recent = %+v, want only the entry inside the 1h window", h.Recent)
+	s := rebalanceState(rs, HistoryConfig{}, 5, now)
+	if len(s.History) != 1 || s.History[0].Reason != string(ReasonNoChange) {
+		t.Errorf("history = %+v, want only the entry inside the 1h window", s.History)
 	}
-	if h.Window.Duration != DefaultHistoryWindow || h.ConsecutiveFailures != 2 || h.EscalationThreshold != 5 {
-		t.Errorf("history = %+v, want default window, 2 failures, threshold 5", h)
+	if s.HistoryWindow.Duration != DefaultHistoryWindow || s.ConsecutiveFailures != 2 || s.EscalationThreshold != 5 {
+		t.Errorf("state = %+v, want default window, 2 failures, threshold 5", s)
 	}
 }
 
-func TestSummarizeHistory_Cooldown(t *testing.T) {
+func TestRebalanceState_Cooldown(t *testing.T) {
 	now := time.Now()
 	cases := []struct {
 		name  string
@@ -61,7 +61,7 @@ func TestSummarizeHistory_Cooldown(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := summarizeHistory(orchestrationv1alpha1.RebalancingStatus{CooldownUntil: tc.until}, HistoryConfig{}, 0, now)
+			h := rebalanceState(orchestrationv1alpha1.RebalancingStatus{CooldownUntil: tc.until}, HistoryConfig{}, 0, now)
 			if (h.CooldownUntil != nil) != tc.want {
 				t.Errorf("cooldownUntil = %v, want set=%v", h.CooldownUntil, tc.want)
 			}
@@ -69,8 +69,8 @@ func TestSummarizeHistory_Cooldown(t *testing.T) {
 	}
 }
 
-func TestSummarizeHistory_UnsetThresholdUsesDefault(t *testing.T) {
-	h := summarizeHistory(orchestrationv1alpha1.RebalancingStatus{}, HistoryConfig{}, 0, time.Now())
+func TestRebalanceState_UnsetThresholdUsesDefault(t *testing.T) {
+	h := rebalanceState(orchestrationv1alpha1.RebalancingStatus{}, HistoryConfig{}, 0, time.Now())
 	if h.EscalationThreshold != DefaultEscalationThreshold {
 		t.Errorf("escalationThreshold = %d, want default %d", h.EscalationThreshold, DefaultEscalationThreshold)
 	}
