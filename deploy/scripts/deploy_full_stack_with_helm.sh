@@ -101,6 +101,7 @@ KIND_KUBECONFIG_PATH="${REPO_ROOT}/.kind-kubeconfig-${KIND_CLUSTER_NAME}.yaml"
 PLACEMENT_SERVER_LABEL_SELECTOR="app.kubernetes.io/component=placement-server"
 SCHEDULER_METRICS_LABEL_SELECTOR="app.kubernetes.io/component=scheduler-metrics"
 OPERATOR_LABEL_SELECTOR="control-plane=controller-manager"
+SCHEDULER_LABEL_SELECTOR="app.kubernetes.io/name=hiro-scheduler"
 
 # Both are sent to Helm below, so these are the single source of truth rather
 # than a guess at what the chart defaulted to.
@@ -328,6 +329,20 @@ deploy_stack() {
     HELM_NAMESPACE="$HELM_NAMESPACE" \
     HELM_PLATFORM_RELEASE="$HELM_PLATFORM_RELEASE" \
     HELM_EXTRA_ARGS="${operator_args} ${scheduler_args} ${tracing_args} ${reader_args}"
+}
+
+# Image tags are fixed and pullPolicy is IfNotPresent, so helm sees no spec change on a
+# rebuild and the old pods would keep running the old image. Restart to pick up the new build.
+restart_operator_and_scheduler() {
+  step "Restarting operator and scheduler to run the images just built"
+  local sel deploy
+  for sel in "$OPERATOR_LABEL_SELECTOR" "$SCHEDULER_LABEL_SELECTOR"; do
+    for deploy in $(kubectl -n "$HELM_NAMESPACE" get deploy \
+      -l "$sel,app.kubernetes.io/instance=$HELM_PLATFORM_RELEASE" -o name); do
+      kubectl -n "$HELM_NAMESPACE" rollout restart "$deploy"
+      kubectl -n "$HELM_NAMESPACE" rollout status "$deploy" --timeout=300s
+    done
+  done
 }
 
 # Read back, not guessed: the chart named the Service, so ask the cluster for
@@ -626,6 +641,7 @@ run_deploy() {
   load_images_into_kind
   resolve_metrics_reader
   deploy_stack
+  restart_operator_and_scheduler
   resolve_placement_server_url
   if [ "$GRANT_OPERATOR_SA" = "true" ]; then
     METRICS_READER="${HELM_NAMESPACE}:$(operator_sa_name)"
