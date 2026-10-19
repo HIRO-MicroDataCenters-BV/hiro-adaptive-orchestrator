@@ -143,8 +143,8 @@ func TestStateWriter_Transition_TerminalRecordsHistoryAndCooldown(t *testing.T) 
 	if len(rs.History) != 1 {
 		t.Fatalf("history len = %d, want 1", len(rs.History))
 	}
-	if e := rs.History[0]; e.Outcome != OutcomeNoOp || e.Count != 1 || e.Reason != string(ReasonOther) {
-		t.Errorf("history[0] = %+v, want one NoOp entry with the Other reason (none was passed)", e)
+	if e := rs.History[0]; e.Outcome != OutcomeNoOp || e.Count != 0 || !e.FirstAt.IsZero() || e.Reason != string(ReasonOther) {
+		t.Errorf("history[0] = %+v, want one unmerged NoOp (no count/firstAt) with the Other reason", e)
 	}
 }
 
@@ -329,13 +329,45 @@ func TestStateWriter_History_DifferentFactsDoNotMerge(t *testing.T) {
 	key := types.NamespacedName{Name: "profile-f"}
 
 	for _, node := range []string{"n1", "n2"} {
-		endCycle(t, writer, key, "moved", TransitionOptions{
-			Action: orchestrationv1alpha1.RebalanceActionMove, Outcome: OutcomeEnacted, Reason: ReasonMoved,
-			Change: orchestrationv1alpha1.HistoryEntry{SourceNode: "n0", TargetNode: node, NewPodNode: node},
+		endCycle(t, writer, key, "blocked by PDB", TransitionOptions{
+			Action: orchestrationv1alpha1.RebalanceActionMove, Outcome: OutcomeDeferred, Reason: ReasonPDBBlocked,
+			Change: orchestrationv1alpha1.HistoryEntry{SourceNode: "n0", TargetNode: node},
 		})
 	}
 	if h := historyOf(t, writer, key); len(h) != 2 {
 		t.Errorf("history = %+v, want two separate Moves: different targets must not merge", h)
+	}
+}
+
+func TestStateWriter_History_EnactedNeverMerges(t *testing.T) {
+	writer, _ := newTestWriter(t, testProfile("profile-j"))
+	key := types.NamespacedName{Name: "profile-j"}
+
+	for range 2 {
+		endCycle(t, writer, key, "scaled", TransitionOptions{
+			Action: orchestrationv1alpha1.RebalanceActionAdjustReplicas, Outcome: OutcomeEnacted, Reason: ReasonScaled,
+			Change: orchestrationv1alpha1.HistoryEntry{FromReplicas: 1, ToReplicas: 2},
+		})
+	}
+	h := historyOf(t, writer, key)
+	if len(h) != 2 {
+		t.Fatalf("history = %+v, want two separate Enacted entries", h)
+	}
+	if h[0].Count != 0 || !h[0].FirstAt.IsZero() {
+		t.Errorf("history[0] = %+v, want no count/firstAt on an unmerged entry", h[0])
+	}
+}
+
+func TestStateWriter_History_OtherReasonNeverMerges(t *testing.T) {
+	writer, _ := newTestWriter(t, testProfile("profile-k"))
+	key := types.NamespacedName{Name: "profile-k"}
+
+	for _, msg := range []string{"first problem", "second problem"} {
+		endCycle(t, writer, key, msg, TransitionOptions{Outcome: OutcomeFailed}) // no code → Other
+	}
+	h := historyOf(t, writer, key)
+	if len(h) != 2 || h[1].Message != "first problem" {
+		t.Errorf("history = %+v, want two separate Other entries, keeping the first message", h)
 	}
 }
 

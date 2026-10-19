@@ -203,8 +203,6 @@ func migrateProfile(
 			Outcome: outcome,
 			Reason:  "Migrated",
 			Message: rs.Reason,
-			Count:   1,
-			FirstAt: rs.LastTransitionAt,
 			At:      rs.LastTransitionAt,
 		}}, rs.History...)
 		rs.State = orchestrationv1alpha1.RebalancingStateWatching

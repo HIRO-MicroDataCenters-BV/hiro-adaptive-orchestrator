@@ -1186,7 +1186,14 @@ new operator build).
   - Move: `podName`, `sourceNode`, `targetNode`, `newPodName`, `newPodNode`
   - AdjustReplicas: `fromReplicas`, `toReplicas`
   - AdjustResources: `container`, `fromCpu`/`toCpu`, `fromMemory`/`toMemory`
-- Back-to-back identical entries merge: `count` goes up, `message`/`at` take the newest values.
+- Back-to-back identical entries merge: `count` goes up, `message`/`at` take the newest values,
+  and `firstAt` keeps the first. `count`/`firstAt` appear only on merged entries.
+- `Enacted` entries never merge: each is a real change that gates count one by one. Only
+  outcomes that changed nothing (NoOp, Rejected, Deferred, Failed) merge, so a stuck
+  condition can't push real actions out of the cap. The merge key includes the reason
+  code, so e.g. `Failed/AIUnavailable` and `Failed/Timeout` stay separate.
+- Reason `Other` (a path that set no code) never merges: it's a catch-all, so two such
+  entries may be different problems.
 - `newPodName`/`newPodNode` are set whenever a replacement pod appeared, including a
   wrong-node Failed move.
 - Dry-run cycles are not recorded.

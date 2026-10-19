@@ -111,6 +111,6 @@ var _ = Describe("OrchestrationProfile rebalancingStatus.state CRD validation", 
 func historyEntry(outcome orchestrationv1alpha1.RebalanceOutcome) orchestrationv1alpha1.HistoryEntry {
 	return orchestrationv1alpha1.HistoryEntry{
 		Action: orchestrationv1alpha1.RebalanceActionNoOp, Outcome: outcome,
-		Reason: "NoChange", Count: 1, At: metav1.Now(),
+		Reason: "NoChange", At: metav1.Now(),
 	}
 }

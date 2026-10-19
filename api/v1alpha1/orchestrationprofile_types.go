@@ -245,8 +245,9 @@ type HistoryEntry struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	// count is how many identical decisions in a row this entry stands for.
-	Count int32 `json:"count"`
+	// count is how many identical decisions in a row this entry stands for; unset means 1.
+	// +optional
+	Count int32 `json:"count,omitempty"`
 
 	// firstAt is when the first of the merged decisions ended; at is the latest.
 	// +optional

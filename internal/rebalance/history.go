@@ -87,6 +87,8 @@ func (c HistoryConfig) WithDefaults() HistoryConfig {
 
 // recordHistory adds entry at the front, merging it into the newest entry when it
 // repeats it exactly, then drops entries outside the window and beyond the cap.
+// Enacted never merges: each one is a real change that gates must count.
+// Other never merges either: it's a catch-all, so two may be different problems.
 func recordHistory(
 	recent []orchestrationv1alpha1.HistoryEntry,
 	entry orchestrationv1alpha1.HistoryEntry,
@@ -94,15 +96,17 @@ func recordHistory(
 	now time.Time,
 ) []orchestrationv1alpha1.HistoryEntry {
 	entry.Message = truncate(entry.Message, cfg.MessageMax)
-	if len(recent) > 0 && sameDecision(recent[0], entry) {
+	mergeable := entry.Outcome != OutcomeEnacted && entry.Reason != string(ReasonOther)
+	if len(recent) > 0 && mergeable && sameDecision(recent[0], entry) {
 		merged := recent[0]
+		if merged.Count == 0 {
+			merged.Count, merged.FirstAt = 1, merged.At // first repeat: start counting
+		}
 		merged.Count++
 		merged.Message = entry.Message
 		merged.At = entry.At
 		recent = append([]orchestrationv1alpha1.HistoryEntry{merged}, recent[1:]...)
 	} else {
-		entry.Count = 1
-		entry.FirstAt = entry.At
 		recent = append([]orchestrationv1alpha1.HistoryEntry{entry}, recent...)
 	}
 	return trimHistory(recent, cfg, now)

@@ -317,7 +317,7 @@ spec:
                           type: string
                         count:
                           description: count is how many identical decisions in a
-                            row this entry stands for.
+                            row this entry stands for; unset means 1.
                           format: int32
                           type: integer
                         firstAt:
@@ -368,7 +368,6 @@ spec:
                       required:
                       - action
                       - at
-                      - count
                       - outcome
                       - reason
                       type: object
