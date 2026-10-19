@@ -102,25 +102,37 @@ hiro-operator:
     EXTENDER_PRIORITIZE_PATH: /extender/prioritize
     # Rebalance engine tuning. rebalancing.enabled/dryRun are
     # per-OrchestrationProfile fields, not settings here — see config/samples/.
+
+    # History kept in profile status (and sent to the AI).
     REBALANCE_HISTORY_WINDOW: 1h
     REBALANCE_HISTORY_MAX_ENTRIES: "20"
     REBALANCE_HISTORY_MESSAGE_MAX: "200"
+
+    # Detection: how often triggers are checked, and when a stuck cycle is force-ended.
     REBALANCE_DETECTION_INTERVAL: 30s
-    REBALANCE_DECISION_TIMEOUT: 5s
     REBALANCE_NODE_PRESSURE_THRESHOLD: "0.90"
+    REBALANCE_WATCHDOG_STALE_THRESHOLD: 15m
+
+    # AI call: how long to wait, and the minimum improvement worth acting on.
+    REBALANCE_DECISION_TIMEOUT: 5s
     REBALANCE_IMPROVEMENT_THRESHOLD: "20"
+
+    # Move: placement-bias lifetime, replacement-pod wait, cluster-wide moves per minute.
     REBALANCE_DECISION_STORE_TTL: 60s
     REBALANCE_MOVE_ACTION_TIMEOUT: 60s
     REBALANCE_MOVE_RATE_LIMIT: "5"
+
+    # AdjustReplicas: ready-replicas wait, and bounds when no HPA sets them.
     REBALANCE_SCALE_ACTION_TIMEOUT: 60s
     REBALANCE_MIN_REPLICAS: "1"
     REBALANCE_MAX_REPLICAS: "10"
+
+    # AdjustResources: resize wait, and the allowed CPU/memory range.
     REBALANCE_RESOURCE_ACTION_TIMEOUT: 60s
     REBALANCE_MIN_CPU: 50m
     REBALANCE_MAX_CPU: "2"
     REBALANCE_MIN_MEMORY: 64Mi
     REBALANCE_MAX_MEMORY: 2Gi
-    REBALANCE_WATCHDOG_STALE_THRESHOLD: 15m
 
   manager:
     # Everything comes from the ConfigMap above (envFrom); an inline entry
