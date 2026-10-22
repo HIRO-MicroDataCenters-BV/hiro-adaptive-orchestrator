@@ -35,10 +35,6 @@ import (
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 )
 
-// DefaultMaxRecentDecisions bounds the rolling history kept on profile
-// status when NewStateWriter isn't given an override.
-const DefaultMaxRecentDecisions = 10
-
 // EventReasonRebalanceTransition is the Kubernetes Event reason emitted for
 // every rebalance state transition.
 const EventReasonRebalanceTransition = "RebalanceTransition"
@@ -59,13 +55,23 @@ type TransitionOptions struct {
 	Details string
 
 	// Outcome is required whenever to == StateWatching — it is how the
-	// cycle that just ended is recorded in RecentDecisions. Ignored on
+	// cycle that just ended is recorded in history. Ignored on
 	// every other transition.
 	Outcome orchestrationv1alpha1.RebalanceOutcome
 
 	// Cooldown, when non-zero, sets CooldownUntil = now + Cooldown. Only
 	// meaningful when to == StateWatching.
 	Cooldown time.Duration
+
+	// Reason is the history code for a terminal transition; empty records ReasonOther.
+	Reason HistoryReason
+
+	// Change carries the facts of what the cycle changed (Move/AdjustReplicas/AdjustResources
+	// fields); only those fields are read, the writer fills the rest of the history entry.
+	Change orchestrationv1alpha1.HistoryEntry
+
+	// SkipHistory leaves the history untouched, for cycles that changed nothing real (dry-run).
+	SkipHistory bool
 }
 
 // StateWriter is the single component permitted to mutate
@@ -76,10 +82,10 @@ type TransitionOptions struct {
 //
 // StateWriter is safe for concurrent use.
 type StateWriter struct {
-	client             client.Client
-	reader             client.Reader
-	recorder           record.EventRecorder
-	maxRecentDecisions int
+	client   client.Client
+	reader   client.Reader
+	recorder record.EventRecorder
+	history  HistoryConfig
 }
 
 // NewStateWriter creates a StateWriter.
@@ -95,12 +101,14 @@ type StateWriter struct {
 // Status().Update always goes straight to the API server regardless, so
 // only the read side needs the uncached reader.
 //
-// maxRecentDecisions <= 0 uses DefaultMaxRecentDecisions.
-func NewStateWriter(c client.Client, reader client.Reader, recorder record.EventRecorder, maxRecentDecisions int) *StateWriter {
-	if maxRecentDecisions <= 0 {
-		maxRecentDecisions = DefaultMaxRecentDecisions
-	}
-	return &StateWriter{client: c, reader: reader, recorder: recorder, maxRecentDecisions: maxRecentDecisions}
+// Zero fields of history use the History defaults.
+func NewStateWriter(c client.Client, reader client.Reader, recorder record.EventRecorder, history HistoryConfig) *StateWriter {
+	return &StateWriter{client: c, reader: reader, recorder: recorder, history: history.WithDefaults()}
+}
+
+// HistoryConfig returns the effective history bounds, for building request summaries.
+func (w *StateWriter) HistoryConfig() HistoryConfig {
+	return w.history
 }
 
 // Transition moves the OrchestrationProfile identified by key from its
@@ -186,8 +194,10 @@ func (w *StateWriter) Transition(
 			if threshold <= 0 {
 				threshold = DefaultEscalationThreshold
 			}
+			historyReason := opts.Reason
 			if opts.Outcome != OutcomeEscalated && rs.ConsecutiveFailures >= threshold {
 				effectiveOutcome = OutcomeEscalated
+				historyReason = ReasonFailureStreak
 				rs.Escalated = true
 				rs.EscalatedReason = fmt.Sprintf("%d consecutive Failed/Deferred outcomes, latest: %s",
 					rs.ConsecutiveFailures, reason)
@@ -199,15 +209,18 @@ func (w *StateWriter) Transition(
 			if opts.Cooldown > 0 {
 				rs.CooldownUntil = metav1.NewTime(now.Add(opts.Cooldown))
 			}
-			rs.RecentDecisions = w.prependDecision(rs.RecentDecisions, orchestrationv1alpha1.RebalanceDecision{
-				DecisionID:       rs.DecisionID,
-				Outcome:          effectiveOutcome,
-				Action:           rs.Action,
-				Reason:           reason,
-				Details:          rs.Details,
-				StartedAt:        rs.StartedAt,
-				LastTransitionAt: now,
-			})
+			if !opts.SkipHistory {
+				if historyReason == "" {
+					historyReason = ReasonOther
+				}
+				entry := opts.Change
+				entry.Action = rs.Action
+				entry.Outcome = effectiveOutcome
+				entry.Reason = string(historyReason)
+				entry.Message = reason
+				entry.At = now
+				rs.History = recordHistory(rs.History, entry, w.history, now.Time)
+			}
 
 			escalatedStatus := metav1.ConditionFalse
 			escalatedReason := "NotEscalated"
@@ -216,6 +229,8 @@ func (w *StateWriter) Transition(
 				escalatedStatus = metav1.ConditionTrue
 				escalatedReason = "Escalated"
 				escalatedMessage = rs.EscalatedReason
+			} else {
+				rs.EscalatedReason = "" // stale once escalation was cleared
 			}
 			apimeta.SetStatusCondition(&profile.Status.Conditions, metav1.Condition{
 				Type:    orchestrationv1alpha1.ConditionRebalancingEscalated,
@@ -265,19 +280,6 @@ func (w *StateWriter) emitEvent(
 	w.recorder.Eventf(profile, eventType, EventReasonRebalanceTransition,
 		"%s -> %s: %s (decisionId=%s)", emptyAsNone(from), to, reason, decisionID,
 	)
-}
-
-// prependDecision inserts a new decision at the front of the rolling window
-// and trims it to w.maxRecentDecisions.
-func (w *StateWriter) prependDecision(
-	existing []orchestrationv1alpha1.RebalanceDecision,
-	next orchestrationv1alpha1.RebalanceDecision,
-) []orchestrationv1alpha1.RebalanceDecision {
-	updated := append([]orchestrationv1alpha1.RebalanceDecision{next}, existing...)
-	if len(updated) > w.maxRecentDecisions {
-		updated = updated[:w.maxRecentDecisions]
-	}
-	return updated
 }
 
 // emptyAsNone renders the unset state as "None" for readable log/event output.

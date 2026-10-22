@@ -57,7 +57,9 @@
 #   EAO_KIND                  CRD Kind                    (default: EnergyAwareOrchestration)
 #
 # ─── Rebalance Engine ────────────────────────────────────────────────────────
-#   REBALANCE_MAX_RECENT_DECISIONS      decision-history length per profile (default: 10)
+#   REBALANCE_HISTORY_WINDOW            how long history is kept, Go duration (default: 1h)
+#   REBALANCE_HISTORY_MAX_ENTRIES       max history entries per profile      (default: 20)
+#   REBALANCE_HISTORY_MESSAGE_MAX       max characters per history message   (default: 200)
 #   REBALANCE_DETECTION_INTERVAL        periodic detection tick, Go duration (default: 30s)
 #   REBALANCE_DECISION_TIMEOUT          AI-consultation timeout, Go duration (default: 5s)
 #   REBALANCE_NODE_PRESSURE_THRESHOLD   CPU/Memory pressure fraction         (default: 0.90)
@@ -133,7 +135,9 @@ export EAO_KIND="${EAO_KIND:-EnergyAwareOrchestration}"
 
 # Rebalance Engine — all optional, mirroring the operator's own package
 # defaults (internal/rebalance). See internal/rebalance/README.md#configuration.
-export REBALANCE_MAX_RECENT_DECISIONS="${REBALANCE_MAX_RECENT_DECISIONS:-10}"
+export REBALANCE_HISTORY_WINDOW="${REBALANCE_HISTORY_WINDOW:-1h}"
+export REBALANCE_HISTORY_MAX_ENTRIES="${REBALANCE_HISTORY_MAX_ENTRIES:-20}"
+export REBALANCE_HISTORY_MESSAGE_MAX="${REBALANCE_HISTORY_MESSAGE_MAX:-200}"
 export REBALANCE_DETECTION_INTERVAL="${REBALANCE_DETECTION_INTERVAL:-30s}"
 export REBALANCE_DECISION_TIMEOUT="${REBALANCE_DECISION_TIMEOUT:-5s}"
 export REBALANCE_NODE_PRESSURE_THRESHOLD="${REBALANCE_NODE_PRESSURE_THRESHOLD:-0.90}"
@@ -180,7 +184,9 @@ print_config() {
   echo "  Overlay                : $([ "$DEPLOY_SCHEDULER_PLUGIN" = "true" ] && echo config/default-with-webhook || echo config/default)"
   echo "EAO CRD            : $EAO_GROUP/$EAO_VERSION, Kind=$EAO_KIND"
   echo "Rebalance Engine   :"
-  echo "  Max Recent Decisions   : $REBALANCE_MAX_RECENT_DECISIONS"
+  echo "  History Window         : $REBALANCE_HISTORY_WINDOW"
+  echo "  History Max Entries    : $REBALANCE_HISTORY_MAX_ENTRIES"
+  echo "  History Message Max    : $REBALANCE_HISTORY_MESSAGE_MAX"
   echo "  Detection Interval     : $REBALANCE_DETECTION_INTERVAL"
   echo "  Decision Timeout       : $REBALANCE_DECISION_TIMEOUT"
   echo "  Node Pressure Threshold: $REBALANCE_NODE_PRESSURE_THRESHOLD"
@@ -289,7 +295,9 @@ inject_operator_env_vars() {
     EAO_GROUP="$EAO_GROUP" \
     EAO_VERSION="$EAO_VERSION" \
     EAO_KIND="$EAO_KIND" \
-    REBALANCE_MAX_RECENT_DECISIONS="$REBALANCE_MAX_RECENT_DECISIONS" \
+    REBALANCE_HISTORY_WINDOW="$REBALANCE_HISTORY_WINDOW" \
+    REBALANCE_HISTORY_MAX_ENTRIES="$REBALANCE_HISTORY_MAX_ENTRIES" \
+    REBALANCE_HISTORY_MESSAGE_MAX="$REBALANCE_HISTORY_MESSAGE_MAX" \
     REBALANCE_DETECTION_INTERVAL="$REBALANCE_DETECTION_INTERVAL" \
     REBALANCE_DECISION_TIMEOUT="$REBALANCE_DECISION_TIMEOUT" \
     REBALANCE_NODE_PRESSURE_THRESHOLD="$REBALANCE_NODE_PRESSURE_THRESHOLD" \

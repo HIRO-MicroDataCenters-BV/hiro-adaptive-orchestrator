@@ -78,7 +78,7 @@ Not numbered because they're continuous background wiring rather than steps in a
 Every rebalance evaluation for a workload is an instance of a state machine, tracked in
 `OrchestrationProfile.status.rebalancingStatus`. `state` only ever holds one of five active
 values — it never encodes *how* a cycle ended. The result of a finished cycle is recorded
-separately, as an `outcome` on the `recentDecisions` entry written in the same transition that
+separately, as an `outcome` on the `history` entry written in the same transition that
 returns `state` to `Watching`.
 
 ```mermaid
@@ -95,7 +95,7 @@ stateDiagram-v2
 ```
 
 Active states (`state`): `Watching`, `Triggered`, `Evaluating`, `Decided`, `Enacting`.
-Outcomes (`recentDecisions[].outcome`, never a `state` value): `Enacted`, `NoOp`, `Rejected`,
+Outcomes (`history[].outcome`, never a `state` value): `Enacted`, `NoOp`, `Rejected`,
 `Deferred`, `Failed`, `Escalated` (see
 [Escalation — pausing on repeated failures](#escalation--pausing-on-repeated-failures)).
 
@@ -289,7 +289,7 @@ will need the PDB-aware Eviction API for exactly that reason).
 `Reconciler.enactBypassAction` (in `reconciler.go`) drives this end to end in a single
 `Reconcile` call: `Triggered → Evaluating → Decided → Enacting → Watching` (outcome `Enacted`
 or `Failed`), all through `StateWriter` (so it's fully visible in status/Events/
-`recentDecisions`) — `Evaluating` just records "no AI needed" instead of making an HTTP call,
+`history`) — `Evaluating` just records "no AI needed" instead of making an HTTP call,
 and `Enacting` calls `retryPendingSchedule`. No new edges in the transition table: this still
 only ever reaches `Watching` via `Decided → Enacting`, same as every other action will.
 
@@ -310,7 +310,7 @@ sequenceDiagram
     participant AI as External AI Agent
 
     R->>W: Transition -> Evaluating
-    R->>B: BuildRebalanceContext(profile, recentDecisions)
+    R->>B: BuildRebalanceContext(profile, facts)
     B-->>R: DecisionRequest (or error)
     alt build error
         R->>W: Transition -> Watching (Failed)
@@ -332,14 +332,14 @@ consults the External AI Agent — the same agent the placement server already u
 initial-placement scoring, not a second HTTP path:
 
 1. `StateWriter.Transition` moves the profile `Triggered → Evaluating`, capturing the fresh
-   `decisionId` and the profile's `recentDecisions` history from the write result — no extra
+   `decisionId` and the profile's rebalancing status from the write result — no extra
    `Get()` needed, avoiding the cache-staleness bug class described above.
 2. `DecisionContextBuilder.BuildRebalanceContext` (in `internal/placement-server`) assembles a
    `DecisionRequest`: every pod of the application and its current node (`CurrentPlacements` —
    the AI needs the whole layout, not just one pod, to judge imbalance and pick both which pod
    to move and where), every `Ready` cluster node as a candidate, the profile's strategy/
-   awareness/rebalancing config, optional EAO energy data, the trigger reason, and recent
-   decision history.
+   awareness/rebalancing config, optional EAO energy data, the trigger, workload, PDB, and the
+   history summary (see [Rebalance history](#rebalance-history)).
 3. `DecisionClient.RequestRebalanceDecision` POSTs that request under a configurable timeout
    (`Reconciler.DecisionTimeout`, default 5s) and decodes a `RebalanceDecisionResponse`:
    `Action` (`orchestrationv1alpha1.RebalanceAction` — `Move`, `NoOp`, and other values defined
@@ -499,7 +499,7 @@ call but the response only ever describes one action. Multi-pod convergence (e.g
 need to move to actually balance the workload) is expected to happen over multiple Triggered
 cycles — the AI recommends its single highest-value move this cycle, cooldown elapses, and if
 the workload is still imbalanced the next cycle's request reflects the post-move layout and the
-AI can recommend the next one. `recentDecisions` accumulates the history across cycles. Nothing
+AI can recommend the next one. `history` accumulates the history across cycles. Nothing
 in the schema currently supports batching several decisions into one response, and the state
 machine (one active decision per profile at a time) isn't shaped for concurrent per-pod cycles
 either.
@@ -648,11 +648,11 @@ will need its own the same way.
 
 ```mermaid
 flowchart LR
-    Resp(["AdjustReplicas response"]) --> Q{"HorizontalPodAutoscaler<br/>targeting this workload?"}
-    Q -- yes --> Owner{"HPA owned by a<br/>KEDA ScaledObject?"}
+    Resp(["AdjustReplicas response"]) --> Ext{"profile sets<br/>replicasExternallyManaged?"}
+    Ext -- yes --> Deferred(["Watching + Deferred<br/>(never patches Spec.Replicas)"])
+    Ext -- no --> Q{"HorizontalPodAutoscaler<br/>targeting this workload?"}
     Q -- no --> Def["[Reconciler.MinReplicas,<br/>Reconciler.MaxReplicas]<br/>(env-configurable, default [1, 10])"]
-    Owner -- yes --> Deferred(["Watching + Deferred<br/>(never patches Spec.Replicas)"])
-    Owner -- no --> HPA["[hpa.Spec.MinReplicas,<br/>hpa.Spec.MaxReplicas]"]
+    Q -- yes --> HPA["[hpa.Spec.MinReplicas,<br/>hpa.Spec.MaxReplicas]"]
     HPA --> Check{"TargetReplicas<br/>in range?"}
     Def --> Check
     Check -- no --> Rej(["Watching + Rejected"])
@@ -670,17 +670,21 @@ No matching HPA falls back to `Reconciler.MinReplicas`/`MaxReplicas` (`REBALANCE
 misbehaving or overly aggressive AI response from scaling to zero or to something absurd, not
 to express real capacity planning for any given workload.
 
-**KEDA-managed workloads are deferred to entirely, not just bounded.** KEDA doesn't scale a
-workload's replicas directly — it creates and drives a real `HorizontalPodAutoscaler` of its
-own, fed by its custom metrics adapter instead of CPU/memory. That generated HPA's
-`ownerReferences` point back to the `ScaledObject` that created it, so a found HPA is checked
-for KEDA ownership (`Kind: ScaledObject, apiVersion: keda.sh/v1alpha1`) — no new RBAC or CRD
-scheme registration needed, since it only inspects an HPA object already fetched for bounds. If
-KEDA-owned, `dispatchScale` never calls `scaleEnactor` at all: the cycle ends `Watching` +
-`Deferred` with a reason naming the owning `ScaledObject`. Patching `Spec.Replicas` on a
-KEDA-managed workload would just compete with KEDA's own reconcile loop — whichever writes most
-recently wins, and they'd flap back and forth — so stepping back entirely, rather than trying to
-coexist, is the only safe option available without a deeper KEDA integration (not built).
+**Externally managed sizing is never touched.** The profile states it as intent:
+
+```yaml
+spec:
+  rebalancing:
+    replicasExternallyManaged: true   # an HPA, KEDA, GitOps, ... owns the replica count
+    resourcesExternallyManaged: true  # a VPA or similar owns container CPU/memory
+```
+
+When `replicasExternallyManaged` is set, `dispatchScale` never calls `scaleEnactor`: the cycle
+ends `Watching` + `Deferred`. `resourcesExternallyManaged` does the same for `dispatchResource`.
+Both flags also travel to the decision agent in `aoProfile.rebalancing`, so it can avoid
+proposing those actions at all. The operator doesn't try to detect *which* tool owns sizing — any
+controller (KEDA, a custom autoscaler, Argo CD) can, and patching underneath it would just flap.
+Both default to `false`, meaning the operator may change that dimension.
 
 <a id="adjustresources--cpumemory"></a>
 ### AdjustResources — CPU/Memory
@@ -689,7 +693,9 @@ coexist, is the only safe option available without a deeper KEDA integration (no
 flowchart TD
     Resp(["AdjustResources response<br/>(containerName, targetCpu/targetMemory)"]) --> Named{"containerName<br/>+ at least one target set?"}
     Named -- no --> Failed1(["Watching + Failed"])
-    Named -- yes --> Parse{"quantities parse?"}
+    Named -- yes --> Ext{"profile sets<br/>resourcesExternallyManaged?"}
+    Ext -- yes --> Deferred0(["Watching + Deferred"])
+    Ext -- no --> Parse{"quantities parse?"}
     Parse -- no --> Failed2(["Watching + Failed"])
     Parse -- yes --> Found{"named container<br/>exists in template?"}
     Found -- no --> Failed3(["Watching + Failed"])
@@ -719,13 +725,13 @@ Imposing brand-new requests/limits on it wouldn't be an *adjustment*, it would b
 resource constraint, and would silently flip its QoS class from `BestEffort` to `Guaranteed` — a
 bigger, different decision than this action is meant to make on its own. `dispatchResource`
 checks this (`resolveResourceState`) before ever reaching `Decided`, the same guardrail shape as
-the KEDA-managed check above.
+the externally-managed check above.
 
 **Bounds** (`Reconciler.MinCPU/MaxCPU/MinMemory/MaxMemory`, env `REBALANCE_MIN_CPU` /
 `REBALANCE_MAX_CPU` / `REBALANCE_MIN_MEMORY` / `REBALANCE_MAX_MEMORY`, defaults `50m`–`2` CPU and
 `64Mi`–`2Gi` Memory) are env-var/default only — unlike replica bounds, no existing cluster object
-is consulted. A per-workload CPU/Memory autoscaler (VPA) is a separate CRD this module doesn't
-already depend on; pulling it in for this guardrail was deliberately out of scope.
+is consulted. A workload whose CPU/Memory is owned by a VPA (or anything else) is marked with
+`resourcesExternallyManaged` instead of being detected.
 
 **In-place resize is best-effort, not guaranteed.** `resourceEnactor` always patches the
 workload's pod template first — that alone guarantees the target resources apply eventually (the
@@ -821,8 +827,8 @@ build a UI or alerting on top of later.
 2. On entering `Triggered`: assigns a fresh `decisionId` (UUID) and resets the previous
    cycle's `action`/`details`.
 3. On transitioning to `Watching`: requires `TransitionOptions.Outcome` (rejects the call
-   otherwise), sets `cooldownUntil` (if a cooldown was passed in), and prepends a record to
-   `recentDecisions` carrying that outcome, trimmed to `MaxRecentDecisions` (10).
+   otherwise), sets `cooldownUntil` (if a cooldown was passed in), and records the outcome in
+   `history` (see [Rebalance history](#rebalance-history)). Dry-run cycles are not recorded.
 4. Persists via `Status().Update`, wrapped in `retry.RetryOnConflict` — callers never need
    their own conflict-retry loop, and re-applying the same transition after a crash is safe
    (it either no-ops because state already moved on, or succeeds idempotently).
@@ -908,7 +914,7 @@ about either:
    AI's own judgment doesn't need to wait for a repeat-failure count to catch up.
 
 Either path sets the same persistent `rs.Escalated` flag (+ `EscalatedReason`) — unlike
-`RecentDecisions`, which is a rolling window, this flag survives until something explicitly
+`history`, which is a rolling window, this flag survives until something explicitly
 clears it. `Reconcile` checks it first thing, right next to the `Spec.Rebalancing.Enabled` check:
 while `Escalated`, the profile is skipped entirely — no trigger evaluation, no bypass actions
 either (a stronger pause than cooldown, which deliberately still lets `RetryPendingSchedule`
@@ -962,7 +968,11 @@ pod. Wired in `cmd/main.go`:
 // package default (rebalance.DefaultX) right here in main.go if unset or
 // <= 0 — so every log line and downstream constructor call sees the value
 // actually in effect, never the raw "0 means unset" sentinel.
-rebalanceMaxRecentDecisions := parseIntEnv("REBALANCE_MAX_RECENT_DECISIONS")      // -> rebalance.DefaultMaxRecentDecisions
+rebalanceHistory := rebalance.HistoryConfig{                                        // -> rebalance.DefaultHistory*
+    Window:     parseDurationEnv("REBALANCE_HISTORY_WINDOW"),
+    MaxEntries: parseIntEnv("REBALANCE_HISTORY_MAX_ENTRIES"),
+    MessageMax: parseIntEnv("REBALANCE_HISTORY_MESSAGE_MAX"),
+}.WithDefaults()
 rebalanceDetectionInterval := parseDurationEnv("REBALANCE_DETECTION_INTERVAL")    // -> rebalance.DefaultDetectionInterval
 rebalanceDecisionTimeout := parseDurationEnv("REBALANCE_DECISION_TIMEOUT")        // -> rebalance.DefaultDecisionTimeout
 rebalanceNodePressureThreshold := parseFloatEnv("REBALANCE_NODE_PRESSURE_THRESHOLD") // -> rebalance.DefaultNodePressureThreshold
@@ -973,7 +983,7 @@ rebalanceMoveRateLimit := parseIntEnv("REBALANCE_MOVE_RATE_LIMIT")              
 
 rebalanceWriter := rebalance.NewStateWriter(
     mgr.GetClient(), mgr.GetAPIReader(), mgr.GetEventRecorderFor("rebalance-engine"),
-    rebalanceMaxRecentDecisions,
+    rebalanceHistory,
 )
 rebalanceEngine := rebalance.NewEngine(mgr.GetClient(), rebalanceWriter)
 mgr.Add(rebalanceEngine)
@@ -1011,7 +1021,7 @@ change or rebuild to tune for a given cluster:
 flowchart LR
     subgraph EnvVars["Environment variables (all optional)"]
         direction TB
-        V1["REBALANCE_MAX_RECENT_DECISIONS"]
+        V1["REBALANCE_HISTORY_WINDOW / _MAX_ENTRIES / _MESSAGE_MAX"]
         V2["REBALANCE_DETECTION_INTERVAL"]
         V3["REBALANCE_DECISION_TIMEOUT"]
         V4["REBALANCE_NODE_PRESSURE_THRESHOLD"]
@@ -1046,7 +1056,7 @@ flowchart LR
     V14 --> Resolve
     V15 --> Resolve
 
-    Resolve -->|"unset → DefaultMaxRecentDecisions (10)"| SW["StateWriter<br/>recentDecisions length"]
+    Resolve -->|"unset → DefaultHistoryWindow (1h)<br/>MaxEntries (20) / MessageMax (200)"| SW["StateWriter<br/>history bounds"]
     Resolve -->|"unset → DefaultDetectionInterval (30s)"| Recon1["Reconciler<br/>periodic detection tick"]
     Resolve -->|"unset → DefaultDecisionTimeout (5s)"| Recon2["Reconciler<br/>AI-consultation timeout"]
     Resolve -->|"unset → DefaultNodePressureThreshold (0.90)"| NPE["NodePressureEvaluator<br/>CPU/Memory pressure fraction"]
@@ -1063,7 +1073,9 @@ flowchart LR
 
 | Environment variable | Overrides | Default |
 |---|---|---|
-| `REBALANCE_MAX_RECENT_DECISIONS` | `StateWriter`'s rolling decision-history length | `DefaultMaxRecentDecisions` (10) |
+| `REBALANCE_HISTORY_WINDOW` | How long `history` entries are kept (Go duration) | `DefaultHistoryWindow` (1h) |
+| `REBALANCE_HISTORY_MAX_ENTRIES` | Max `history` entries per profile | `DefaultHistoryMaxEntries` (20) |
+| `REBALANCE_HISTORY_MESSAGE_MAX` | Max characters of an entry's `message` | `DefaultHistoryMessageMax` (200) |
 | `REBALANCE_DETECTION_INTERVAL` | `Reconciler`'s periodic detection tick (Go duration, e.g. `30s`) | `DefaultDetectionInterval` (30s) |
 | `REBALANCE_DECISION_TIMEOUT` | `Reconciler`'s AI-consultation timeout (Go duration, e.g. `5s`) | `DefaultDecisionTimeout` (5s) |
 | `REBALANCE_NODE_PRESSURE_THRESHOLD` | `NodePressureEvaluator`'s CPU/Memory pressure fraction (e.g. `0.90`) | `DefaultNodePressureThreshold` (0.90) |
@@ -1135,6 +1147,7 @@ Permissions added specifically for this package (`+kubebuilder:rbac` markers liv
 +kubebuilder:rbac:groups="autoscaling",resources=horizontalpodautoscalers,verbs=get;list;watch
 +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 +kubebuilder:rbac:groups="",resources=pods/resize,verbs=update
++kubebuilder:rbac:groups="policy",resources=poddisruptionbudgets,verbs=get;list;watch
 ```
 
 The two `pods` markers (`delete` here, `get;list` from `resource_enactor.go`) merge into the same
@@ -1148,20 +1161,49 @@ Regenerate `config/rbac/role.yaml` with `make manifests` after changing these ma
 ```mermaid
 flowchart TD
     RS["RebalancingStatus"] --> Active["Active fields:<br/>state, reason, decisionId,<br/>action, details, startedAt,<br/>lastTransitionAt, cooldownUntil"]
-    RS --> RD["recentDecisions[]"]
-    RD --> RDF["RebalanceDecision:<br/>outcome, action, reason,<br/>decisionId, details,<br/>startedAt, lastTransitionAt"]
+    RS --> RD["history[]"]
+    RD --> RDF["HistoryEntry:<br/>action, outcome, reason, message,<br/>count, firstAt, at, change facts"]
 ```
 
 `RebalancingStatus` (in `api/v1alpha1/orchestrationprofile_types.go`) carries: `state`
 (OpenAPI-enum-validated against the 5 active states), `reason`, `decisionId`, `action`,
-`details`, `startedAt`, `lastTransitionAt`, `cooldownUntil`, and `recentDecisions` (rolling
-history, each entry shaped like `RebalanceDecision` — `outcome` is its own OpenAPI enum,
-separate from and never overlapping with `state`'s).
+`details`, `startedAt`, `lastTransitionAt`, `cooldownUntil`, and `history` (see
+[Rebalance history](#rebalance-history)). `outcome` and `reason` are plain strings checked in
+Go, not CRD enums, so adding one never needs a CRD upgrade first.
 
 An operator upgrading from the older 9-value `state` enum needs
 `cmd/migrate-rebalance-status` run once against the cluster first — see that command's own
 doc comment for the exact order (apply the new CRD, then run the migration, then roll out the
 new operator build).
+
+### Rebalance history
+
+`status.rebalancingStatus.history` is a short summary of past cycles, newest first.
+
+- Kept for `REBALANCE_HISTORY_WINDOW` (1h), at most `REBALANCE_HISTORY_MAX_ENTRIES` (20).
+- Each entry: `action`, `outcome`, `reason` (a code, e.g. `PDBBlocked`), `message`
+  (cut to `REBALANCE_HISTORY_MESSAGE_MAX`), `count`, `firstAt`, `at`, and change facts:
+  - Move: `podName`, `sourceNode`, `targetNode`, `newPodName`, `newPodNode`
+  - AdjustReplicas: `fromReplicas`, `toReplicas`
+  - AdjustResources: `container`, `fromCpu`/`toCpu`, `fromMemory`/`toMemory`
+- Back-to-back identical entries merge: `count` goes up, `message`/`at` take the newest values,
+  and `firstAt` keeps the first. `count`/`firstAt` appear only on merged entries.
+- `Enacted` entries never merge: each is a real change that gates count one by one. Only
+  outcomes that changed nothing (NoOp, Rejected, Deferred, Failed) merge, so a stuck
+  condition can't push real actions out of the cap. The merge key includes the reason
+  code, so e.g. `Failed/AIUnavailable` and `Failed/Timeout` stay separate.
+- Reason `Other` (a path that set no code) never merges: it's a catch-all, so two such
+  entries may be different problems.
+- `newPodName`/`newPodNode` are set whenever a replacement pod appeared, including a
+  wrong-node Failed move.
+- Dry-run cycles are not recorded.
+
+The AI request carries the same facts directly in `rebalanceContext`: `history` (re-trimmed
+to the window), `historyWindow`, `cooldownUntil` (only while active), `consecutiveFailures`,
+`escalationThreshold`.
+
+`spec.applicationRef` can't be changed after creation, so the history always describes one
+app. To point at another app, create a new profile.
 
 ### Deployment
 

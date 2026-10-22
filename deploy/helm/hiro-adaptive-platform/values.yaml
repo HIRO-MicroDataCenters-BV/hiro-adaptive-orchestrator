@@ -101,24 +101,38 @@ hiro-operator:
     EXTENDER_FILTER_PATH: /extender/filter
     EXTENDER_PRIORITIZE_PATH: /extender/prioritize
     # Rebalance engine tuning. rebalancing.enabled/dryRun are
-    # per-OrchestrationProfile fields, not settings here — see samples below.
-    REBALANCE_MAX_RECENT_DECISIONS: "10"
+    # per-OrchestrationProfile fields, not settings here — see config/samples/.
+
+    # History kept in profile status (and sent to the AI).
+    REBALANCE_HISTORY_WINDOW: 1h
+    REBALANCE_HISTORY_MAX_ENTRIES: "20"
+    REBALANCE_HISTORY_MESSAGE_MAX: "200"
+
+    # Detection: how often triggers are checked, and when a stuck cycle is force-ended.
     REBALANCE_DETECTION_INTERVAL: 30s
-    REBALANCE_DECISION_TIMEOUT: 5s
     REBALANCE_NODE_PRESSURE_THRESHOLD: "0.90"
+    REBALANCE_WATCHDOG_STALE_THRESHOLD: 15m
+
+    # AI call: how long to wait, and the minimum improvement worth acting on.
+    REBALANCE_DECISION_TIMEOUT: 5s
     REBALANCE_IMPROVEMENT_THRESHOLD: "20"
+
+    # Move: placement-bias lifetime, replacement-pod wait, cluster-wide moves per minute.
     REBALANCE_DECISION_STORE_TTL: 60s
     REBALANCE_MOVE_ACTION_TIMEOUT: 60s
     REBALANCE_MOVE_RATE_LIMIT: "5"
+
+    # AdjustReplicas: ready-replicas wait, and bounds when no HPA sets them.
     REBALANCE_SCALE_ACTION_TIMEOUT: 60s
     REBALANCE_MIN_REPLICAS: "1"
     REBALANCE_MAX_REPLICAS: "10"
+
+    # AdjustResources: resize wait, and the allowed CPU/memory range.
     REBALANCE_RESOURCE_ACTION_TIMEOUT: 60s
     REBALANCE_MIN_CPU: 50m
     REBALANCE_MAX_CPU: "2"
     REBALANCE_MIN_MEMORY: 64Mi
     REBALANCE_MAX_MEMORY: 2Gi
-    REBALANCE_WATCHDOG_STALE_THRESHOLD: 15m
 
   manager:
     # Everything comes from the ConfigMap above (envFrom); an inline entry
@@ -289,41 +303,5 @@ mockAgent:
       cpu: 200m
       memory: 128Mi
 
-## ╔═════════════════════════════════════════════════════════════════════╗
-## ║  SAMPLES · demo workloads and profiles                              ║
-## ╚═════════════════════════════════════════════════════════════════════╝
-## Sample OrchestrationProfile CRs + nginx Deployments, for demos/eval. Off
-## by default (production installs shouldn't get demo workloads).
-## rebalancing.enabled/dryRun are per-CR fields, unrelated to
-## hiro-operator.config despite the similar name. Each
-## targetDeploymentName is just a string reference — keep it in sync by
-## hand with the matching nginxAppN.deploymentName.
-samples:
-  enabled: false
-  namespace: default
-  nginxImage: nginx:latest
-  rebalancing:
-    enabled: true
-    dryRun: false
-  # Unreferenced by any profile below — ported for parity with
-  # config/samples/, which is unreferenced there too.
-  nginxApp:
-    deploymentName: nginx-deployment
-    serviceName: nginx-service
-  # Targeted by profileSample and profile1.
-  nginxApp1:
-    deploymentName: nginx-deployment-1
-    serviceName: nginx-service-1
-  # Targeted by profile2 (the one demo/demo_rebalance.sh drives).
-  nginxApp2:
-    deploymentName: nginx-deployment-2
-    serviceName: nginx-service-2
-  profileSample:
-    name: orchestrationprofile-sample
-    targetDeploymentName: nginx-deployment-1
-  profile1:
-    name: orchestrationprofile-1
-    targetDeploymentName: nginx-deployment-1
-  profile2:
-    name: orchestrationprofile-2
-    targetDeploymentName: nginx-deployment-2
+## Sample profiles and nginx apps are not part of this chart: other repos create the
+## same objects. Apply them after install with `kubectl apply -k config/samples/`.

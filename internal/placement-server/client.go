@@ -114,7 +114,7 @@ func (c *DecisionClient) RequestDecision(
 		"namespace", req.Pod.Namespace,
 		"profile", req.AOProfile.ProfileName,
 		"strategy", req.AOProfile.Strategy,
-		"candidateNodes", len(req.CandidateNodes),
+		"candidateNodes", len(req.NodeStats),
 		"currentPlacementNode", req.AOProfile.CurrentPlacement.NodeName,
 		"energyDataAttached", req.EAOProfile != nil,
 	)
@@ -206,7 +206,7 @@ func (c *DecisionClient) RequestRebalanceDecision(
 		"decisionId", req.RebalanceContext.DecisionID,
 		"reason", req.RebalanceContext.Reason,
 		"currentPlacements", len(req.RebalanceContext.CurrentPlacements),
-		"candidateNodes", len(req.CandidateNodes),
+		"candidateNodes", len(req.NodeStats),
 		"energyDataAttached", req.EAOProfile != nil,
 	)
 

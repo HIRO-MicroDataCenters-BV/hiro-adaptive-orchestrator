@@ -76,6 +76,20 @@ type TriggerResult struct {
 	// Empty means the normal flow applies: Evaluating calls the AI, which may
 	// return Move/NoOp/etc.
 	BypassAction string
+
+	// Detail is the measurement behind the match, for node-scoped triggers.
+	Detail TriggerDetail
+}
+
+// TriggerDetail is where and by how much a node-scoped trigger fired.
+type TriggerDetail struct {
+	// Node is the node the condition was observed on (pressure, NodeFailure).
+	Node string
+
+	// Value and Threshold are the usage ratio and its limit (fractions of
+	// allocatable) for CPU/MemoryThreshold; nil otherwise.
+	Value     *float64
+	Threshold *float64
 }
 
 // TriggerEvaluator evaluates an OrchestrationProfile's declared rebalancing
@@ -114,17 +128,18 @@ func (e *TriggerEvaluator) Evaluate(
 			ok     bool
 			r      string
 			bypass string
+			detail TriggerDetail
 		)
 
 		switch cond {
 		case TriggerEnergyThreshold:
 			ok, r, bypass = e.evaluateEnergyThreshold(ctx, profile, pods)
 		case TriggerCPUThreshold:
-			ok, r = e.evaluateNodeResource(ctx, pods, cond, e.pressure.EvaluateCPUPressure)
+			ok, r, detail = e.evaluateNodeResource(ctx, pods, cond, e.pressure.readCPU)
 		case TriggerMemoryThreshold:
-			ok, r = e.evaluateNodeResource(ctx, pods, cond, e.pressure.EvaluateMemoryPressure)
+			ok, r, detail = e.evaluateNodeResource(ctx, pods, cond, e.pressure.readMemory)
 		case TriggerNodeFailure:
-			ok, r = e.evaluateNodeFailure(ctx, pods, cond)
+			ok, r, detail = e.evaluateNodeFailure(ctx, pods, cond)
 		case TriggerScheduled:
 			ok, r = true, "scheduled rebalance window reached"
 		default:
@@ -135,7 +150,7 @@ func (e *TriggerEvaluator) Evaluate(
 			WithLabelValues(string(cond), strconv.FormatBool(ok)).Inc()
 
 		if ok {
-			return true, TriggerResult{Condition: cond, Reason: r, BypassAction: bypass}, nil
+			return true, TriggerResult{Condition: cond, Reason: r, BypassAction: bypass, Detail: detail}, nil
 		}
 	}
 	return false, TriggerResult{}, nil
@@ -150,8 +165,8 @@ func (e *TriggerEvaluator) evaluateNodeResource(
 	ctx context.Context,
 	pods []corev1.Pod,
 	cond orchestrationv1alpha1.TriggerCondition,
-	check func(ctx context.Context, nodeName string) (bool, string, error),
-) (bool, string) {
+	check func(ctx context.Context, nodeName string) (pressureReading, error),
+) (bool, string, TriggerDetail) {
 	logger := logf.FromContext(ctx)
 
 	seen := map[string]bool{}
@@ -162,18 +177,20 @@ func (e *TriggerEvaluator) evaluateNodeResource(
 		}
 		seen[nodeName] = true
 
-		ok, reason, err := check(ctx, nodeName)
+		reading, err := check(ctx, nodeName)
 		if err != nil {
 			metrics.RebalanceTriggerErrorsTotal.WithLabelValues(string(cond)).Inc()
 			logger.V(1).Info("rebalance: node pressure check unavailable, skipping",
 				"node", nodeName, "err", err)
 			continue
 		}
-		if ok {
-			return true, reason
+		if reading.exceeded {
+			return true, reading.reason, TriggerDetail{
+				Node: nodeName, Value: &reading.ratio, Threshold: &reading.threshold,
+			}
 		}
 	}
-	return false, ""
+	return false, "", TriggerDetail{}
 }
 
 // evaluateNodeFailure reports whether any node hosting one of the
@@ -182,7 +199,7 @@ func (e *TriggerEvaluator) evaluateNodeFailure(
 	ctx context.Context,
 	pods []corev1.Pod,
 	cond orchestrationv1alpha1.TriggerCondition,
-) (bool, string) {
+) (bool, string, TriggerDetail) {
 	logger := logf.FromContext(ctx)
 
 	seen := map[string]bool{}
@@ -202,11 +219,12 @@ func (e *TriggerEvaluator) evaluateNodeFailure(
 		}
 		for _, cond := range node.Status.Conditions {
 			if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
-				return true, fmt.Sprintf("node %s is not Ready (pod %s)", nodeName, pod.Name)
+				return true, fmt.Sprintf("node %s is not Ready (pod %s)", nodeName, pod.Name),
+					TriggerDetail{Node: nodeName}
 			}
 		}
 	}
-	return false, ""
+	return false, "", TriggerDetail{}
 }
 
 // evaluateEnergyThreshold finds the EnergyAwareOrchestration resource

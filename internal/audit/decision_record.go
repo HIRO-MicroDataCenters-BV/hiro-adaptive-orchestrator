@@ -47,4 +47,6 @@ type DecisionRecord struct {
 	TargetNode  string    `json:"targetNode"`
 	Reason      string    `json:"reason,omitempty"`
 	Improvement float64   `json:"improvement,omitempty"` // rebalance only
+	DecidedBy   string    `json:"decidedBy,omitempty"`   // which part of the Decision Service answered
+	Confidence  float64   `json:"confidence,omitempty"`
 }

@@ -277,6 +277,10 @@ func main() {
 		setupLog.Error(err, "unable to register profile indexes")
 		os.Exit(1)
 	}
+	if err := placementserver.RegisterPodIndexes(mgr); err != nil {
+		setupLog.Error(err, "unable to register pod indexes")
+		os.Exit(1)
+	}
 
 	if err := (&controller.OrchestrationProfileReconciler{
 		Client:   mgr.GetClient(),
@@ -426,14 +430,16 @@ func main() {
 	// Runtime loop that acts on the AI's guidance after initial placement:
 	// Watching -> Triggered -> Evaluating -> Decided -> Enacting, always
 	// returning to Watching with the cycle's outcome (Enacted/NoOp/Rejected/
-	// Deferred/Failed) recorded on recentDecisions. Registered as a
+	// Deferred/Failed) recorded in history. Registered as a
 	// manager.Runnable so its lifecycle matches every other component here.
 	//
 	// StateWriter is the only component permitted to mutate
 	// status.rebalancingStatus — see internal/rebalance/writer.go.
 	//
 	// Environment variables (all optional; unset/0 uses the package default):
-	//   REBALANCE_MAX_RECENT_DECISIONS     — decision-history length kept per profile
+	//   REBALANCE_HISTORY_WINDOW           — how far back status history is kept, e.g. "1h"
+	//   REBALANCE_HISTORY_MAX_ENTRIES      — max history entries kept per profile, e.g. "20"
+	//   REBALANCE_HISTORY_MESSAGE_MAX      — max characters of a history entry's message, e.g. "200"
 	//   REBALANCE_DETECTION_INTERVAL       — periodic detection tick, e.g. "30s"
 	//   REBALANCE_DECISION_TIMEOUT         — AI consultation timeout, e.g. "5s"
 	//   REBALANCE_NODE_PRESSURE_THRESHOLD  — CPU/Memory pressure fraction, e.g. "0.90"
@@ -451,10 +457,12 @@ func main() {
 	//   REBALANCE_MAX_MEMORY               — AdjustResources guardrail upper bound, e.g. "2Gi"
 	//   REBALANCE_WATCHDOG_STALE_THRESHOLD — max time stuck mid-cycle before force-recovery, e.g. "15m"
 	// -------------------------------------------------------------------------
-	rebalanceMaxRecentDecisions := parseIntEnv("REBALANCE_MAX_RECENT_DECISIONS")
-	if rebalanceMaxRecentDecisions <= 0 {
-		rebalanceMaxRecentDecisions = rebalance.DefaultMaxRecentDecisions
-	}
+	// Unset/0 fields fall back to the rebalance.DefaultHistory* values.
+	rebalanceHistory := rebalance.HistoryConfig{
+		Window:     parseDurationEnv("REBALANCE_HISTORY_WINDOW"),
+		MaxEntries: parseIntEnv("REBALANCE_HISTORY_MAX_ENTRIES"),
+		MessageMax: parseIntEnv("REBALANCE_HISTORY_MESSAGE_MAX"),
+	}.WithDefaults()
 	rebalanceDetectionInterval := parseDurationEnv("REBALANCE_DETECTION_INTERVAL")
 	if rebalanceDetectionInterval <= 0 {
 		rebalanceDetectionInterval = rebalance.DefaultDetectionInterval
@@ -523,7 +531,9 @@ func main() {
 	// line — and everything downstream — reflects what's actually in
 	// effect, not "0" for anything the deployer left unset.
 	setupLog.Info("rebalance engine configured",
-		"maxRecentDecisions", rebalanceMaxRecentDecisions,
+		"historyWindow", rebalanceHistory.Window,
+		"historyMaxEntries", rebalanceHistory.MaxEntries,
+		"historyMessageMax", rebalanceHistory.MessageMax,
 		"detectionInterval", rebalanceDetectionInterval,
 		"decisionTimeout", rebalanceDecisionTimeout,
 		"nodePressureThreshold", rebalanceNodePressureThreshold,
@@ -551,7 +561,7 @@ func main() {
 		mgr.GetClient(),
 		mgr.GetAPIReader(), // uncached — see NewStateWriter's doc comment on why
 		mgr.GetEventRecorderFor("rebalance-engine"), //nolint:staticcheck
-		rebalanceMaxRecentDecisions,
+		rebalanceHistory,
 	)
 	rebalanceEngine := rebalance.NewEngine(mgr.GetClient(), rebalanceWriter)
 	if err := mgr.Add(rebalanceEngine); err != nil {

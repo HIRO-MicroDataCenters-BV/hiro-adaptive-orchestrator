@@ -384,7 +384,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl
 // no AI consultation (result.BypassAction is already the answer). Evaluating
 // and Decided are synthesized locally instead of calling the external AI —
 // every transition still goes through StateWriter, so the sequence is fully
-// visible in status/Events/recentDecisions, it just never makes an HTTP
+// visible in status/Events/history, it just never makes an HTTP
 // round trip.
 //
 // Errors are recorded via the terminal (Watching, Outcome Failed) transition,
@@ -428,14 +428,16 @@ func (r *Reconciler) enactBypassAction(
 
 	if err := r.enact(ctx, profile, result.BypassAction); err != nil {
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, err.Error(),
-			TransitionOptions{Action: bypassAction, Outcome: OutcomeFailed, Cooldown: cooldown}); tErr != nil {
+			TransitionOptions{Action: bypassAction, Outcome: OutcomeFailed, Cooldown: cooldown,
+				Reason: ReasonEnactFailed}); tErr != nil {
 			logger.Error(tErr, "rebalance: bypass transition to Watching (Failed) failed", "profile", profile.Name)
 		}
 		return
 	}
 
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-		TransitionOptions{Action: bypassAction, Outcome: OutcomeEnacted, Cooldown: cooldown}); err != nil {
+		TransitionOptions{Action: bypassAction, Outcome: OutcomeEnacted, Cooldown: cooldown,
+			Reason: ReasonRetried}); err != nil {
 		logger.Error(err, "rebalance: bypass transition to Watching (Enacted) failed", "profile", profile.Name)
 	}
 }
@@ -473,7 +475,7 @@ func (r *Reconciler) recoverStuckCycle(
 	metrics.RebalanceWatchdogRecoveriesTotal.Inc()
 
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-		TransitionOptions{Outcome: OutcomeFailed, Cooldown: cooldown}); err != nil {
+		TransitionOptions{Outcome: OutcomeFailed, Cooldown: cooldown, Reason: ReasonWatchdog}); err != nil {
 		logger.Error(err, "rebalance: watchdog recovery transition to Watching failed", "profile", profile.Name)
 	}
 }
@@ -517,17 +519,18 @@ func (r *Reconciler) evaluateWithAI(
 	start := time.Now()
 	defer func() { metrics.RebalanceAIDuration.Observe(time.Since(start).Seconds()) }()
 
-	req, err := r.ContextBuilder.BuildRebalanceContext(aiCtx, profile, rs.DecisionID, reason, rs.RecentDecisions)
+	req, err := r.ContextBuilder.BuildRebalanceContext(aiCtx, profile, rs.DecisionID, reason,
+		r.rebalanceFacts(aiCtx, profile, rs, result))
 	if err != nil {
 		metrics.RebalanceAIRequestsTotal.WithLabelValues(metrics.AIResultContextError).Inc()
-		r.failEvaluation(ctx, key, profile, fmt.Sprintf("building AI decision context: %v", err))
+		r.failEvaluation(ctx, key, profile, ReasonContextError, fmt.Sprintf("building AI decision context: %v", err))
 		return
 	}
 
 	resp, err := r.DecisionClient.RequestRebalanceDecision(aiCtx, req)
 	if err != nil {
 		metrics.RebalanceAIRequestsTotal.WithLabelValues(metrics.AIResultAIError).Inc()
-		r.failEvaluation(ctx, key, profile, fmt.Sprintf("AI unavailable: %v", err))
+		r.failEvaluation(ctx, key, profile, ReasonAIUnavailable, fmt.Sprintf("AI unavailable: %v", err))
 		return
 	}
 	metrics.RebalanceAIRequestsTotal.WithLabelValues(metrics.AIResultSuccess).Inc()
@@ -540,8 +543,15 @@ func (r *Reconciler) evaluateWithAI(
 			"targetNode", resp.TargetNode,
 			"improvement", resp.Improvement,
 			"reason", resp.Reason,
+			"decidedBy", resp.DecidedBy,
+			"confidence", resp.Confidence,
 		}, tracing.LogValues(aiCtx)...)...,
 	)
+
+	// Carried into status/Events/history with the outcome reason.
+	if resp.DecidedBy != "" {
+		resp.Reason = fmt.Sprintf("%s (decidedBy=%s)", resp.Reason, resp.DecidedBy)
+	}
 
 	r.dispatchDecision(ctx, key, profile, resp)
 }
@@ -559,12 +569,13 @@ func (r *Reconciler) failEvaluation(
 	ctx context.Context,
 	key types.NamespacedName,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
+	cause HistoryReason,
 	reason string,
 ) {
 	logger := logf.FromContext(ctx)
 	cooldown := time.Duration(profile.Spec.Rebalancing.CooldownSeconds) * time.Second
 	if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
-		TransitionOptions{Outcome: OutcomeFailed, Cooldown: cooldown}); err != nil {
+		TransitionOptions{Outcome: OutcomeFailed, Cooldown: cooldown, Reason: cause}); err != nil {
 		logger.Error(err, "rebalance: AI-path transition to Watching (Failed) failed", "profile", profile.Name)
 	}
 }

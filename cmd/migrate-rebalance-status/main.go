@@ -18,7 +18,7 @@ limitations under the License.
 // rewrites every OrchestrationProfile whose status.rebalancingStatus.state
 // still holds a legacy terminal value (Enacted, NoOp, Rejected, Deferred,
 // Failed — valid under the old 9-value state enum) into the current model:
-// state=Watching plus a RecentDecisions entry carrying that value as an
+// state=Watching plus a status.rebalancingStatus.history entry carrying that value as an
 // Outcome instead.
 //
 // Run order matters:
@@ -31,8 +31,14 @@ limitations under the License.
 //     step 1 so nothing else observes a profile still on the old model.
 //  3. Roll out the operator build with the 5-state reconciler/writer code.
 //
+// It first drops status.rebalancingStatus.history when it still has the old
+// object shape ({recent: [...]}) instead of a list. For that upgrade:
+//  1. Scale the operator to 0, so the old build can't write the old shape back.
+//  2. Run this command with -dry-run=false (works under the old or new CRD).
+//  3. Upgrade (helm upgrade / make deploy), which brings the operator back.
+//
 // Safe to re-run: profiles already on the new model (state != one of the
-// legacy values) are left untouched.
+// legacy values, history a list) are left untouched.
 package main
 
 import (
@@ -42,7 +48,9 @@ import (
 	"os"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/client-go/util/retry"
@@ -89,6 +97,18 @@ func main() {
 	}
 
 	ctx := context.Background()
+	// Runs first: the typed List below can't decode old-shape history.
+	dropped, err := dropObjectHistory(ctx, c, dryRun)
+	if err != nil {
+		log.Error(err, "Could not drop old-shape history")
+		os.Exit(1)
+	}
+	log.Info("Checked history shape", "dropped", dropped, "dryRun", dryRun)
+	if dryRun && dropped > 0 {
+		log.Info("Skipped legacy-state check: old-shape history is still present in dry-run")
+		return
+	}
+
 	list := &orchestrationv1alpha1.OrchestrationProfileList{}
 	if err := c.List(ctx, list); err != nil {
 		log.Error(err, "listing OrchestrationProfiles")
@@ -129,6 +149,34 @@ func main() {
 	}
 }
 
+// dropObjectHistory removes status.rebalancingStatus.history when it still has the old
+// object shape ({recent: [...]}); the new CRD expects a list. Unstructured so decoding can't fail.
+func dropObjectHistory(ctx context.Context, c client.Client, dryRun bool) (dropped int, err error) {
+	log := logf.Log.WithName("migrate-rebalance-status")
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(orchestrationv1alpha1.GroupVersion.WithKind("OrchestrationProfileList"))
+	if err := c.List(ctx, list); err != nil {
+		return 0, fmt.Errorf("listing OrchestrationProfiles: %w", err)
+	}
+	patch := client.RawPatch(types.JSONPatchType,
+		[]byte(`[{"op":"remove","path":"/status/rebalancingStatus/history"}]`))
+	for i := range list.Items {
+		p := &list.Items[i]
+		if _, isMap, _ := unstructured.NestedMap(p.Object, "status", "rebalancingStatus", "history"); !isMap {
+			continue
+		}
+		log.Info("Dropping old-shape history", "profile", p.GetName(), "dryRun", dryRun)
+		dropped++
+		if dryRun {
+			continue
+		}
+		if err := c.Status().Patch(ctx, p, patch); err != nil {
+			return dropped, fmt.Errorf("dropping history of profile %s: %w", p.GetName(), err)
+		}
+	}
+	return dropped, nil
+}
+
 // migrateProfile re-fetches the profile by name and retries on write
 // conflicts, mirroring internal/rebalance/writer.go's StateWriter — this
 // tool runs once, outside the reconciler, but the same retry discipline
@@ -150,15 +198,13 @@ func migrateProfile(
 			return nil // already migrated by a concurrent run, or by the new reconciler
 		}
 
-		rs.RecentDecisions = append([]orchestrationv1alpha1.RebalanceDecision{{
-			DecisionID:       rs.DecisionID,
-			Outcome:          outcome,
-			Action:           rs.Action,
-			Reason:           rs.Reason,
-			Details:          rs.Details,
-			StartedAt:        rs.StartedAt,
-			LastTransitionAt: rs.LastTransitionAt,
-		}}, rs.RecentDecisions...)
+		rs.History = append([]orchestrationv1alpha1.HistoryEntry{{
+			Action:  rs.Action,
+			Outcome: outcome,
+			Reason:  "Migrated",
+			Message: rs.Reason,
+			At:      rs.LastTransitionAt,
+		}}, rs.History...)
 		rs.State = orchestrationv1alpha1.RebalancingStateWatching
 		rs.LastTransitionAt = metav1.Now()
 

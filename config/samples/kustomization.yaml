@@ -1,4 +1,6 @@
 ## Append samples of your project ##
+# The profiles target apps in default; profiles are cluster-scoped, so this only moves the apps.
+namespace: default
 resources:
 - orchestration_v1alpha1_orchestrationprofile.yaml
 - nginx_deployment.yaml

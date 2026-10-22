@@ -15,11 +15,11 @@ limitations under the License.
 */
 
 // Package placement contains the wire-format types shared between the operator's
-// PlacementServer and the scheduler's PlacementClient.
+// PlacementServer, the scheduler's PlacementClient and the Decision Service.
 //
-// These types must live outside internal/ so the scheduler-plugin module
-// (scheduler-plugin/go.mod) can import them without violating Go's internal
-// package visibility rules.
+// These types must live outside internal/ so the scheduler-plugin and
+// ai-decision-service modules (each with its own go.mod) can import them
+// without violating Go's internal package visibility rules.
 package placement
 
 import (
@@ -49,7 +49,22 @@ type DecisionResponse struct {
 	// Reason is a human-readable explanation of the decision.
 	// Surfaced in profile status and operator logs.
 	Reason string `json:"reason,omitempty"`
+
+	// Confidence is the decider's confidence in this answer (0–1).
+	Confidence float64 `json:"confidence,omitempty"`
+
+	// DecidedBy names which part of the Decision Service produced the answer
+	// (one of the DecidedBy* constants). Empty from deciders that predate it.
+	DecidedBy string `json:"decidedBy,omitempty"`
 }
+
+// DecidedBy values reported by the Decision Service.
+const (
+	DecidedByScorer   = "scorer"
+	DecidedByRules    = "rules"
+	DecidedByModel    = "model"
+	DecidedByFallback = "fallback"
+)
 
 // NodeScore is the AI agent's score for a single candidate node.
 type NodeScore struct {

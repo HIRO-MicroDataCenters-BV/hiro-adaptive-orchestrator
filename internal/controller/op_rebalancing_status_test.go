@@ -17,7 +17,7 @@ limitations under the License.
 // Integration tests proving the CRD's OpenAPI schema enforces the
 // rebalancing decision-lifecycle enums: the active-state enum
 // (status.rebalancingStatus.state) and the separate terminal-outcome enum
-// (status.rebalancingStatus.recentDecisions[].outcome).
+// (status.rebalancingStatus.history.recent[].outcome).
 // Uses the same envtest apiserver as orchestrationprofile_controller_test.go.
 package controller
 
@@ -80,13 +80,13 @@ var _ = Describe("OrchestrationProfile rebalancingStatus.state CRD validation", 
 		Expect(err).To(HaveOccurred())
 	})
 
-	DescribeTable("accepts every valid recentDecisions outcome",
+	DescribeTable("accepts every valid history outcome",
 		func(outcome orchestrationv1alpha1.RebalanceOutcome) {
 			profile := newProfile("rebalance-outcome-valid-" + strings.ToLower(string(outcome)))
 			Expect(k8sClient.Create(testCtx, profile)).To(Succeed())
 
-			profile.Status.RebalancingStatus.RecentDecisions = []orchestrationv1alpha1.RebalanceDecision{
-				{DecisionID: "d1", Outcome: outcome},
+			profile.Status.RebalancingStatus.History = []orchestrationv1alpha1.HistoryEntry{
+				historyEntry(outcome),
 			}
 			Expect(k8sClient.Status().Update(testCtx, profile)).To(Succeed())
 		},
@@ -97,14 +97,20 @@ var _ = Describe("OrchestrationProfile rebalancingStatus.state CRD validation", 
 		Entry("Failed", orchestrationv1alpha1.RebalanceOutcomeFailed),
 	)
 
-	It("rejects an unrecognized outcome inside a recentDecisions entry", func() {
-		profile := newProfile("rebalance-outcome-invalid-history")
+	It("accepts a reason code the CRD has never seen", func() {
+		profile := newProfile("rebalance-history-new-reason")
 		Expect(k8sClient.Create(testCtx, profile)).To(Succeed())
 
-		profile.Status.RebalancingStatus.RecentDecisions = []orchestrationv1alpha1.RebalanceDecision{
-			{DecisionID: "d1", Outcome: "NotARealOutcome"},
-		}
-		err := k8sClient.Status().Update(testCtx, profile)
-		Expect(err).To(HaveOccurred())
+		entry := historyEntry(orchestrationv1alpha1.RebalanceOutcomeDeferred)
+		entry.Reason = "SomeFutureReason"
+		profile.Status.RebalancingStatus.History = []orchestrationv1alpha1.HistoryEntry{entry}
+		Expect(k8sClient.Status().Update(testCtx, profile)).To(Succeed())
 	})
 })
+
+func historyEntry(outcome orchestrationv1alpha1.RebalanceOutcome) orchestrationv1alpha1.HistoryEntry {
+	return orchestrationv1alpha1.HistoryEntry{
+		Action: orchestrationv1alpha1.RebalanceActionNoOp, Outcome: outcome,
+		Reason: "NoChange", At: metav1.Now(),
+	}
+}

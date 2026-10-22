@@ -363,11 +363,10 @@ helm-platform-template-check: ## Regression-check helm lint/template across repr
 	run "single key override" \
 		--set hiro-operator.config.REBALANCE_MIN_CPU=100m; \
 	run "mock agent" --set mockAgent.enable=true; \
-	run "samples" --set samples.enabled=true; \
 	run "all features on" \
 		--set webhook.enable=true --set scheduler.mode=plugin \
 		--set scheduler.plugin.image.tag=v0.1.0 \
-		--set mockAgent.enable=true --set samples.enabled=true \
+		--set mockAgent.enable=true \
 		--set prerequisites.metricsServer.enable=true \
 		--set prerequisites.prometheus.enable=true; \
 	if [ "$$fail" -ne 0 ]; then \

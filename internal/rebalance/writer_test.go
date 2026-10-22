@@ -46,7 +46,7 @@ func newTestWriter(t *testing.T, profile *orchestrationv1alpha1.OrchestrationPro
 	// draining the channel, and record.FakeRecorder.Eventf blocks (not
 	// drops) once the buffer fills.
 	recorder := record.NewFakeRecorder(256)
-	return NewStateWriter(c, c, recorder, 10), recorder
+	return NewStateWriter(c, c, recorder, HistoryConfig{}), recorder
 }
 
 func testProfile(name string) *orchestrationv1alpha1.OrchestrationProfile {
@@ -140,11 +140,11 @@ func TestStateWriter_Transition_TerminalRecordsHistoryAndCooldown(t *testing.T) 
 	if rs.CooldownUntil.IsZero() {
 		t.Error("cooldownUntil not set on terminal transition")
 	}
-	if len(rs.RecentDecisions) != 1 {
-		t.Fatalf("recentDecisions len = %d, want 1", len(rs.RecentDecisions))
+	if len(rs.History) != 1 {
+		t.Fatalf("history len = %d, want 1", len(rs.History))
 	}
-	if rs.RecentDecisions[0].Outcome != OutcomeNoOp || rs.RecentDecisions[0].DecisionID != rs.DecisionID {
-		t.Errorf("recentDecisions[0] = %+v, want matching NoOp record", rs.RecentDecisions[0])
+	if e := rs.History[0]; e.Outcome != OutcomeNoOp || e.Count != 0 || !e.FirstAt.IsZero() || e.Reason != string(ReasonOther) {
+		t.Errorf("history[0] = %+v, want one unmerged NoOp (no count/firstAt) with the Other reason", e)
 	}
 }
 
@@ -177,16 +177,16 @@ func TestStateWriter_Transition_EscalatesAfterConsecutiveFailures(t *testing.T) 
 	if rs.ConsecutiveFailures != 1 || rs.Escalated {
 		t.Fatalf("after 1st Failed: consecutiveFailures=%d escalated=%v, want 1/false", rs.ConsecutiveFailures, rs.Escalated)
 	}
-	if rs.RecentDecisions[0].Outcome != OutcomeFailed {
-		t.Errorf("recentDecisions[0].Outcome = %q, want Failed (not yet promoted)", rs.RecentDecisions[0].Outcome)
+	if rs.History[0].Outcome != OutcomeFailed {
+		t.Errorf("history[0].Outcome = %q, want Failed (not yet promoted)", rs.History[0].Outcome)
 	}
 
 	rs = runRebalanceCycle(t, writer, key, OutcomeDeferred)
 	if rs.ConsecutiveFailures != 2 || !rs.Escalated {
 		t.Fatalf("after 2nd Failed/Deferred: consecutiveFailures=%d escalated=%v, want 2/true", rs.ConsecutiveFailures, rs.Escalated)
 	}
-	if rs.RecentDecisions[0].Outcome != OutcomeEscalated {
-		t.Errorf("recentDecisions[0].Outcome = %q, want Escalated once the threshold is crossed", rs.RecentDecisions[0].Outcome)
+	if rs.History[0].Outcome != OutcomeEscalated {
+		t.Errorf("history[0].Outcome = %q, want Escalated once the threshold is crossed", rs.History[0].Outcome)
 	}
 	if rs.EscalatedReason == "" {
 		t.Error("escalatedReason not set")
@@ -253,8 +253,8 @@ func TestStateWriter_Transition_DirectEscalateBypassesThreshold(t *testing.T) {
 	if rs.ConsecutiveFailures != 0 {
 		t.Errorf("consecutiveFailures = %d, want 0 — a direct escalate isn't a failure streak", rs.ConsecutiveFailures)
 	}
-	if rs.RecentDecisions[0].Outcome != OutcomeEscalated {
-		t.Errorf("recentDecisions[0].Outcome = %q, want Escalated", rs.RecentDecisions[0].Outcome)
+	if rs.History[0].Outcome != OutcomeEscalated {
+		t.Errorf("history[0].Outcome = %q, want Escalated", rs.History[0].Outcome)
 	}
 }
 
@@ -276,30 +276,145 @@ func TestStateWriter_Transition_UnsetThresholdUsesDefault(t *testing.T) {
 	}
 }
 
-func TestStateWriter_Transition_RecentDecisionsTrimmed(t *testing.T) {
-	profile := testProfile("profile-d")
-	writer, _ := newTestWriter(t, profile)
+// endCycle runs one Triggered -> Evaluating -> Watching cycle with opts.
+func endCycle(t *testing.T, writer *StateWriter, key types.NamespacedName, reason string, opts TransitionOptions) {
+	t.Helper()
 	ctx := context.Background()
-	key := types.NamespacedName{Name: "profile-d"}
-
-	for i := 0; i < writer.maxRecentDecisions+3; i++ {
-		if _, err := writer.Transition(ctx, key, StateTriggered, "cycle", TransitionOptions{}); err != nil {
-			t.Fatalf("cycle %d Triggered: %v", i, err)
-		}
-		if _, err := writer.Transition(ctx, key, StateEvaluating, "cycle", TransitionOptions{}); err != nil {
-			t.Fatalf("cycle %d Evaluating: %v", i, err)
-		}
-		if _, err := writer.Transition(ctx, key, StateWatching, "cycle",
-			TransitionOptions{Outcome: OutcomeNoOp}); err != nil {
-			t.Fatalf("cycle %d Watching (NoOp): %v", i, err)
-		}
+	if _, err := writer.Transition(ctx, key, StateTriggered, "cycle", TransitionOptions{}); err != nil {
+		t.Fatalf("Triggered: %v", err)
 	}
+	if _, err := writer.Transition(ctx, key, StateEvaluating, "cycle", TransitionOptions{}); err != nil {
+		t.Fatalf("Evaluating: %v", err)
+	}
+	if _, err := writer.Transition(ctx, key, StateWatching, reason, opts); err != nil {
+		t.Fatalf("Watching: %v", err)
+	}
+}
 
+func historyOf(t *testing.T, writer *StateWriter, key types.NamespacedName) []orchestrationv1alpha1.HistoryEntry {
+	t.Helper()
 	got := &orchestrationv1alpha1.OrchestrationProfile{}
-	if err := writer.client.Get(ctx, key, got); err != nil {
+	if err := writer.client.Get(context.Background(), key, got); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if len(got.Status.RebalancingStatus.RecentDecisions) != writer.maxRecentDecisions {
-		t.Errorf("recentDecisions len = %d, want %d", len(got.Status.RebalancingStatus.RecentDecisions), writer.maxRecentDecisions)
+	return got.Status.RebalancingStatus.History
+}
+
+func TestStateWriter_History_MergesRepeats(t *testing.T) {
+	writer, _ := newTestWriter(t, testProfile("profile-d"))
+	key := types.NamespacedName{Name: "profile-d"}
+
+	for range 5 {
+		endCycle(t, writer, key, "nothing to do", TransitionOptions{Outcome: OutcomeNoOp, Reason: ReasonNoChange})
+	}
+	endCycle(t, writer, key, "below threshold", TransitionOptions{
+		Action: orchestrationv1alpha1.RebalanceActionMove, Outcome: OutcomeRejected, Reason: ReasonBelowThreshold,
+		Change: orchestrationv1alpha1.HistoryEntry{PodName: "p1", TargetNode: "n2"},
+	})
+
+	h := historyOf(t, writer, key)
+	if len(h) != 2 {
+		t.Fatalf("history = %+v, want 2 entries (5 NoOps merged + 1 Move)", h)
+	}
+	if h[0].Action != orchestrationv1alpha1.RebalanceActionMove || h[0].TargetNode != "n2" {
+		t.Errorf("history[0] = %+v, want the newest (Move) first with its facts", h[0])
+	}
+	if h[1].Count != 5 || h[1].FirstAt.After(h[1].At.Time) {
+		t.Errorf("history[1] = %+v, want 5 merged NoOps with firstAt <= at", h[1])
+	}
+}
+
+func TestStateWriter_History_DifferentFactsDoNotMerge(t *testing.T) {
+	writer, _ := newTestWriter(t, testProfile("profile-f"))
+	key := types.NamespacedName{Name: "profile-f"}
+
+	for _, node := range []string{"n1", "n2"} {
+		endCycle(t, writer, key, "blocked by PDB", TransitionOptions{
+			Action: orchestrationv1alpha1.RebalanceActionMove, Outcome: OutcomeDeferred, Reason: ReasonPDBBlocked,
+			Change: orchestrationv1alpha1.HistoryEntry{SourceNode: "n0", TargetNode: node},
+		})
+	}
+	if h := historyOf(t, writer, key); len(h) != 2 {
+		t.Errorf("history = %+v, want two separate Moves: different targets must not merge", h)
+	}
+}
+
+func TestStateWriter_History_EnactedNeverMerges(t *testing.T) {
+	writer, _ := newTestWriter(t, testProfile("profile-j"))
+	key := types.NamespacedName{Name: "profile-j"}
+
+	for range 2 {
+		endCycle(t, writer, key, "scaled", TransitionOptions{
+			Action: orchestrationv1alpha1.RebalanceActionAdjustReplicas, Outcome: OutcomeEnacted, Reason: ReasonScaled,
+			Change: orchestrationv1alpha1.HistoryEntry{FromReplicas: 1, ToReplicas: 2},
+		})
+	}
+	h := historyOf(t, writer, key)
+	if len(h) != 2 {
+		t.Fatalf("history = %+v, want two separate Enacted entries", h)
+	}
+	if h[0].Count != 0 || !h[0].FirstAt.IsZero() {
+		t.Errorf("history[0] = %+v, want no count/firstAt on an unmerged entry", h[0])
+	}
+}
+
+func TestStateWriter_History_OtherReasonNeverMerges(t *testing.T) {
+	writer, _ := newTestWriter(t, testProfile("profile-k"))
+	key := types.NamespacedName{Name: "profile-k"}
+
+	for _, msg := range []string{"first problem", "second problem"} {
+		endCycle(t, writer, key, msg, TransitionOptions{Outcome: OutcomeFailed}) // no code → Other
+	}
+	h := historyOf(t, writer, key)
+	if len(h) != 2 || h[1].Message != "first problem" {
+		t.Errorf("history = %+v, want two separate Other entries, keeping the first message", h)
+	}
+}
+
+func TestStateWriter_History_CappedAndTruncated(t *testing.T) {
+	profile := testProfile("profile-g")
+	writer, _ := newTestWriter(t, profile)
+	writer.history = HistoryConfig{MaxEntries: 3, MessageMax: 10}.WithDefaults()
+	key := types.NamespacedName{Name: "profile-g"}
+
+	for i := range 5 {
+		endCycle(t, writer, key, "a long reason that will be cut", TransitionOptions{
+			Action: orchestrationv1alpha1.RebalanceActionAdjustReplicas, Outcome: OutcomeEnacted, Reason: ReasonScaled,
+			Change: orchestrationv1alpha1.HistoryEntry{ToReplicas: int32(i + 1)},
+		})
+	}
+	h := historyOf(t, writer, key)
+	if len(h) != 3 || h[0].ToReplicas != 5 {
+		t.Fatalf("history = %+v, want the newest 3 entries", h)
+	}
+	if got := []rune(h[0].Message); len(got) != 10 {
+		t.Errorf("message = %q, want it truncated to 10 characters", h[0].Message)
+	}
+}
+
+func TestStateWriter_History_SkipHistory(t *testing.T) {
+	writer, _ := newTestWriter(t, testProfile("profile-h"))
+	key := types.NamespacedName{Name: "profile-h"}
+
+	endCycle(t, writer, key, "dry-run", TransitionOptions{Outcome: OutcomeEnacted, SkipHistory: true})
+	if h := historyOf(t, writer, key); len(h) != 0 {
+		t.Errorf("history = %+v, want none for a skipped (dry-run) cycle", h)
+	}
+}
+
+func TestStateWriter_Transition_ClearedEscalationDropsReason(t *testing.T) {
+	profile := testProfile("profile-i")
+	profile.Status.RebalancingStatus.EscalatedReason = "old: AI unavailable"
+	writer, _ := newTestWriter(t, profile)
+	key := types.NamespacedName{Name: "profile-i"}
+
+	endCycle(t, writer, key, "nothing to do", TransitionOptions{Outcome: OutcomeNoOp, Reason: ReasonNoChange})
+
+	got := &orchestrationv1alpha1.OrchestrationProfile{}
+	if err := writer.client.Get(context.Background(), key, got); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if r := got.Status.RebalancingStatus.EscalatedReason; r != "" {
+		t.Errorf("escalatedReason = %q, want it cleared when not escalated", r)
 	}
 }

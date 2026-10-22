@@ -314,7 +314,7 @@ kind: OrchestrationProfile
 metadata:
   name: my-app-profile
 spec:
-  applicationRef:
+  applicationRef:             # immutable after creation
     apiVersion: apps/v1
     kind: Deployment          # Deployment | StatefulSet | ReplicaSet | Job
     name: my-app
@@ -334,6 +334,8 @@ spec:
     triggerConditions:
       - "EnergyThreshold"     # EnergyThreshold | CPUThreshold | MemoryThreshold
                               # | NodeFailure | Scheduled
+    replicasExternallyManaged: false   # true: an HPA/KEDA/GitOps owns replicas — never changed
+    resourcesExternallyManaged: false  # true: a VPA or similar owns CPU/memory — never changed
 ```
 
 `kind`, `strategy`, and `triggerConditions` are CRD-enforced enums — an unsupported value is rejected by the API server at `kubectl apply`/`helm upgrade` time, not accepted and surfaced later as `status.Error`.

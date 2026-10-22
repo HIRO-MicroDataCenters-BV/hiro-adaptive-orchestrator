@@ -51,6 +51,9 @@ const moveActionPollInterval = 2 * time.Second
 type moveResult struct {
 	outcome orchestrationv1alpha1.RebalanceOutcome
 	reason  string
+	cause   HistoryReason
+	// change has the Move facts; NewPodName/NewPodNode are set once a replacement appeared.
+	change orchestrationv1alpha1.HistoryEntry
 }
 
 // Never Ever delete this comments as they are used by kubebuilder to generate RBAC permissions for the controller.
@@ -119,6 +122,7 @@ func moveEnactor(
 	for _, p := range before {
 		beforeNames[p.Name] = true
 	}
+	change := orchestrationv1alpha1.HistoryEntry{PodName: pod.Name, SourceNode: pod.Spec.NodeName, TargetNode: targetNode}
 
 	key := placementserver.WorkloadKey(profile.Namespace, profile.Name)
 	store.Put(key, podName, orchestrationv1alpha1.RebalanceActionMove, targetNode, reason, decisionID)
@@ -138,6 +142,8 @@ func moveEnactor(
 			return moveResult{
 				outcome: OutcomeDeferred,
 				reason:  fmt.Sprintf("eviction blocked by PodDisruptionBudget: %v", err),
+				cause:   ReasonPDBBlocked,
+				change:  change,
 			}, nil
 		}
 		metrics.RebalanceEnactmentFailuresTotal.WithLabelValues(
@@ -157,7 +163,11 @@ func moveEnactor(
 		logger.Info("rebalance: replacement pod did not schedule",
 			append([]any{"pod", podName, "outcome", outcome, "reason", reason},
 				tracing.LogValues(ctx)...)...)
-		return moveResult{outcome: outcome, reason: reason}, nil
+		cause := ReasonTimeout
+		if outcome == OutcomeDeferred {
+			cause = ReasonEnergyGateClosed
+		}
+		return moveResult{outcome: outcome, reason: reason, cause: cause, change: change}, nil
 	}
 
 	// No-op if PlacementServer.score already consumed the entry when it
@@ -168,14 +178,21 @@ func moveEnactor(
 	// through a path that didn't go through score at all).
 	store.Delete(key)
 
+	change.NewPodName = replacement.Name
+	change.NewPodNode = replacement.Spec.NodeName
 	if replacement.Spec.NodeName != targetNode {
 		return moveResult{
 			outcome: OutcomeFailed,
 			reason: fmt.Sprintf("intent not honoured: replacement %s landed on %s, wanted %s",
 				replacement.Name, replacement.Spec.NodeName, targetNode),
+			cause:  ReasonWrongNode,
+			change: change,
 		}, nil
 	}
-	return moveResult{outcome: OutcomeEnacted, reason: fmt.Sprintf("moved to %s: %s", targetNode, reason)}, nil
+	return moveResult{
+		outcome: OutcomeEnacted, reason: fmt.Sprintf("moved to %s: %s", targetNode, reason),
+		cause: ReasonMoved, change: change,
+	}, nil
 }
 
 func findPodByName(pods []corev1.Pod, name string) *corev1.Pod {

@@ -157,16 +157,18 @@ func (b *DecisionContextBuilder) Build(
 		}
 	}
 
+	nodeStats := b.buildNodeStats(ctx, nodes, profile.Spec.ApplicationRef, pod)
+
 	// -------------------------------------------------------------------------
 	// Step 4: Assemble the full DecisionRequest.
 	// -------------------------------------------------------------------------
 	req := &DecisionRequest{
-		RequestID:      requestID,
-		Timestamp:      metav1.Now(),
-		Pod:            pod,
-		CandidateNodes: nodes,
-		AOProfile:      aoProfile,
-		EAOProfile:     eaoProfile,
+		RequestID:  requestID,
+		Timestamp:  metav1.Now(),
+		Pod:        pod,
+		AOProfile:  aoProfile,
+		EAOProfile: eaoProfile,
+		NodeStats:  nodeStats,
 	}
 
 	logValues := []any{
@@ -180,6 +182,7 @@ func (b *DecisionContextBuilder) Build(
 		"currentPlacementNode", aoProfile.CurrentPlacement.NodeName,
 		"energyEnabled", profile.Spec.Placement.Awareness.Energy,
 		"eaoDataAttached", eaoProfile != nil,
+		"nodeStats", len(nodeStats),
 	}
 	// nil when energy awareness is off or no EAO object exists for the pod.
 	if eaoProfile != nil {
@@ -282,9 +285,11 @@ func buildAOProfileContext(
 		},
 		CurrentPlacement: buildCurrentPlacement(pod),
 		Rebalancing: RebalancingConfig{
-			Enabled:           profile.Spec.Rebalancing.Enabled,
-			CooldownSeconds:   profile.Spec.Rebalancing.CooldownSeconds,
-			TriggerConditions: triggerConditions,
+			Enabled:                    profile.Spec.Rebalancing.Enabled,
+			CooldownSeconds:            profile.Spec.Rebalancing.CooldownSeconds,
+			TriggerConditions:          triggerConditions,
+			ReplicasExternallyManaged:  profile.Spec.Rebalancing.ReplicasExternallyManaged,
+			ResourcesExternallyManaged: profile.Spec.Rebalancing.ResourcesExternallyManaged,
 		},
 	}
 }
@@ -408,25 +413,49 @@ func mapEAOToProfileContext(eao *unstructured.Unstructured) *EAOProfileContext {
 			Reason:             reason,
 			NextEvaluationTime: nextEval,
 		}
+		slotStart, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "scheduledSlot", "slotStart")
+		slotEnd, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "scheduledSlot", "slotEnd")
+		if slotStart != "" || slotEnd != "" {
+			ctx.Decision.ScheduledSlot = &EAOScheduledSlot{SlotStart: slotStart, SlotEnd: slotEnd}
+		}
 	}
 
+	ctx.LastUpdated, _, _ = unstructured.NestedString(eao.Object, "status", "lastUpdated")
+
 	// --- status.energyMetrics ---
-	requiredWatts, foundRequired, _ := unstructured.NestedFloat64(eao.Object, "status", "energyMetrics", "requiredWatts")
+	requiredWatts, foundRequired := nestedNumber(eao.Object, "status", "energyMetrics", "requiredWatts")
 	sufficient, foundSufficient, _ := unstructured.NestedBool(eao.Object, "status", "energyMetrics", "sufficient")
 	if foundRequired || foundSufficient {
 		ctx.EnergyMetrics = &EAOEnergyMetrics{
 			RequiredWatts: requiredWatts,
 			Sufficient:    sufficient,
 		}
-		ctx.EnergyMetrics.CurrentSlotAvailableWatts, _, _ = unstructured.NestedFloat64(
+		ctx.EnergyMetrics.MeasuredWatts, _ = nestedNumber(eao.Object, "status", "energyMetrics", "measuredWatts")
+		ctx.EnergyMetrics.CurrentSlotAvailableWatts, _ = nestedNumber(
 			eao.Object, "status", "energyMetrics", "currentSlotAvailableWatts",
 		)
-		ctx.EnergyMetrics.CurrentSlotConsumedWatts, _, _ = unstructured.NestedFloat64(
+		ctx.EnergyMetrics.CurrentSlotConsumedWatts, _ = nestedNumber(
 			eao.Object, "status", "energyMetrics", "currentSlotConsumedWatts",
 		)
 	}
 
 	return ctx
+}
+
+// nestedNumber reads a JSON number that unstructured may have decoded as
+// int64 (whole values) or float64; NestedFloat64 alone rejects the former.
+func nestedNumber(obj map[string]any, fields ...string) (float64, bool) {
+	v, found, err := unstructured.NestedFieldNoCopy(obj, fields...)
+	if !found || err != nil {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int64:
+		return float64(n), true
+	}
+	return 0, false
 }
 
 // =============================================================================
@@ -445,6 +474,15 @@ func mapEAOToProfileContext(eao *unstructured.Unstructured) *EAOProfileContext {
 // candidate (there's no scheduling cycle proposing a filtered subset).
 // =============================================================================
 
+// RebalanceFacts are rebalance inputs the engine already resolved (it owns
+// trigger evaluation and HPA/KEDA/PDB knowledge); each pointer may be nil.
+type RebalanceFacts struct {
+	Trigger  *RebalanceTrigger
+	Workload *RebalanceWorkload
+	PDB      *RebalancePDB
+	State    RebalanceState
+}
+
 // BuildRebalanceContext assembles a DecisionRequest for the rebalance
 // engine's Evaluating stage. Reuses the same AOProfileContext/EAOProfileContext
 // assembly as Build so the AI sees the same profile shape either way — only
@@ -454,7 +492,7 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 	profile *orchestrationv1alpha1.OrchestrationProfile,
 	decisionID string,
 	reason string,
-	recentDecisions []orchestrationv1alpha1.RebalanceDecision,
+	facts RebalanceFacts,
 ) (*DecisionRequest, error) {
 	logger := logf.FromContext(ctx)
 
@@ -467,6 +505,7 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 	if err != nil {
 		return nil, fmt.Errorf("listing candidate nodes for rebalance context: %w", err)
 	}
+	nodes = filterTolerated(ctx, nodes, pods)
 
 	aoProfile := buildAOProfileContext(profile, nil)
 
@@ -481,17 +520,22 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 		}
 	}
 
+	nodeStats := b.buildNodeStats(ctx, nodes, profile.Spec.ApplicationRef, nil)
+
 	req := &DecisionRequest{
-		RequestID:      decisionID,
-		Timestamp:      metav1.Now(),
-		CandidateNodes: nodes,
-		AOProfile:      aoProfile,
-		EAOProfile:     eaoProfile,
+		RequestID:  decisionID,
+		Timestamp:  metav1.Now(),
+		AOProfile:  aoProfile,
+		EAOProfile: eaoProfile,
+		NodeStats:  nodeStats,
 		RebalanceContext: &RebalanceContext{
 			Reason:            reason,
 			DecisionID:        decisionID,
 			CurrentPlacements: buildCurrentPlacements(pods),
-			RecentDecisions:   convertRecentDecisions(recentDecisions),
+			RebalanceState:    facts.State,
+			Trigger:           facts.Trigger,
+			Workload:          facts.Workload,
+			PDB:               facts.PDB,
 		},
 	}
 
@@ -501,7 +545,10 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 		"reason", reason,
 		"podCount", len(pods),
 		"candidateNodes", len(nodes),
+		"nodeStats", len(nodeStats),
 		"energyDataAttached", eaoProfile != nil,
+		"workloadAttached", facts.Workload != nil,
+		"pdbAttached", facts.PDB != nil,
 	)
 
 	return req, nil
@@ -527,6 +574,44 @@ func (b *DecisionContextBuilder) listReadyNodes(ctx context.Context) ([]*corev1.
 		}
 	}
 	return ready, nil
+}
+
+// filterTolerated drops nodes with a NoSchedule/NoExecute taint the app's pods don't tolerate,
+// mirroring the scheduler's TaintToleration filter that rebalance candidates otherwise skip.
+func filterTolerated(ctx context.Context, nodes []*corev1.Node, pods []corev1.Pod) []*corev1.Node {
+	var tolerations []corev1.Toleration
+	if len(pods) > 0 {
+		tolerations = pods[0].Spec.Tolerations
+	}
+	kept := make([]*corev1.Node, 0, len(nodes))
+	for _, node := range nodes {
+		if toleratesAll(ctx, node.Spec.Taints, tolerations) {
+			kept = append(kept, node)
+		}
+	}
+	return kept
+}
+
+func toleratesAll(ctx context.Context, taints []corev1.Taint, tolerations []corev1.Toleration) bool {
+	logger := logf.FromContext(ctx)
+	for i := range taints {
+		taint := &taints[i]
+		if taint.Effect == corev1.TaintEffectPreferNoSchedule {
+			continue
+		}
+		tolerated := false
+		for j := range tolerations {
+			// false: the Gt/Lt operators are behind an alpha gate that's off by default.
+			if tolerations[j].ToleratesTaint(logger, taint, false) {
+				tolerated = true
+				break
+			}
+		}
+		if !tolerated {
+			return false
+		}
+	}
+	return true
 }
 
 // fetchEAOProfileForApp is fetchEAOProfile's rebalance-side counterpart: the
@@ -591,24 +676,6 @@ func quantityString(list corev1.ResourceList, name corev1.ResourceName) string {
 		return ""
 	}
 	return q.String()
-}
-
-// convertRecentDecisions maps the profile's CRD-level decision history into
-// the wire-format shape sent to the AI agent.
-func convertRecentDecisions(decisions []orchestrationv1alpha1.RebalanceDecision) []RebalanceHistoryEntry {
-	if len(decisions) == 0 {
-		return nil
-	}
-	entries := make([]RebalanceHistoryEntry, 0, len(decisions))
-	for _, d := range decisions {
-		entries = append(entries, RebalanceHistoryEntry{
-			Outcome: string(d.Outcome),
-			Action:  string(d.Action),
-			Reason:  d.Reason,
-			When:    d.LastTransitionAt,
-		})
-	}
-	return entries
 }
 
 // =============================================================================
