@@ -32,16 +32,17 @@ env:
 jobs:
   auto-tag:
     name: Compute next version and tag (merge-to-main only)
-    if: github.ref_type == 'branch'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        if: github.ref_type == 'branch'
         with:
           fetch-depth: 0
 
       - name: Compute next version
+        if: github.ref_type == 'branch'
         id: version
         run: |
           chmod +x build/version.sh
@@ -49,6 +50,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create and push tag
+        if: github.ref_type == 'branch'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
