@@ -303,5 +303,25 @@ mockAgent:
       cpu: 200m
       memory: 128Mi
 
-## Sample profiles and nginx apps are not part of this chart: other repos create the
-## same objects. Apply them after install with `kubectl apply -k config/samples/`.
+## ╔═════════════════════════════════════════════════════════════════════╗
+## ║  AI DECISION SERVICE · actual decision agent                        ║
+## ╚═════════════════════════════════════════════════════════════════════╝
+## AI Decision Service — replaces the mock agent when enabled. Off by default.
+## To route the operator to it, also set
+## hiro-operator.config.DECISION_AGENT_URL=http://<serviceName>:<port>.
+aiDecisionService:
+  enable: false
+  serviceName: ai-decision-service
+  port: 8080
+  image:
+    repository: ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/ai-decision-service
+    tag: v0.1.0
+    pullPolicy: IfNotPresent
+  # Extra AI_DECISION_SERVICE_* settings; the port is set from `port` above.
+  config:
+    AI_DECISION_SERVICE_READ_TIMEOUT: 5s
+    AI_DECISION_SERVICE_MAX_BODY_BYTES: "5242880"
+  resources:
+    requests: { cpu: 50m, memory: 32Mi }
+    limits:   { cpu: 200m, memory: 128Mi }
+

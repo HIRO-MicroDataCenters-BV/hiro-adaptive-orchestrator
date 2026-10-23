@@ -1,0 +1,69 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-decision-service
+  namespace: hiro-adaptive-orchestrator-system
+  labels:
+    app: ai-decision-service
+    app.kubernetes.io/name: ai-decision-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-decision-service
+  template:
+    metadata:
+      labels:
+        app: ai-decision-service
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: ai-decision-service
+          image: "ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/ai-decision-service:v0.1.0"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: AI_DECISION_SERVICE_PORT
+              value: "8080"
+            - name: AI_DECISION_SERVICE_READ_TIMEOUT
+              value: "5s"
+            - name: AI_DECISION_SERVICE_MAX_BODY_BYTES
+              value: "5242880"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            limits:
+              cpu: 200m
+              memory: 128Mi
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-decision-service
+  namespace: hiro-adaptive-orchestrator-system
+  labels:
+    app: ai-decision-service
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: ai-decision-service
+spec:
+  selector:
+    app: ai-decision-service
+  ports:
+    - port: 8080
+      targetPort: http
+      name: http

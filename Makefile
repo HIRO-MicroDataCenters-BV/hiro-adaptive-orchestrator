@@ -363,10 +363,12 @@ helm-platform-template-check: ## Regression-check helm lint/template across repr
 	run "single key override" \
 		--set hiro-operator.config.REBALANCE_MIN_CPU=100m; \
 	run "mock agent" --set mockAgent.enable=true; \
+	run "ai decision service" --set aiDecisionService.enable=true; \
 	run "all features on" \
 		--set webhook.enable=true --set scheduler.mode=plugin \
 		--set scheduler.plugin.image.tag=v0.1.0 \
 		--set mockAgent.enable=true \
+		--set aiDecisionService.enable=true \
 		--set prerequisites.metricsServer.enable=true \
 		--set prerequisites.prometheus.enable=true; \
 	if [ "$$fail" -ne 0 ]; then \
@@ -418,6 +420,10 @@ build-scheduler: ## Build the HIRO scheduler binary into bin/hiro-scheduler.
 		-o ../bin/hiro-scheduler \
 		./cmd/
 
+.PHONY: test-scheduler
+test-scheduler: ## Run tests for the HIRO scheduler.
+	cd scheduler-plugin && go test ./... -cover
+
 .PHONY: docker-build-scheduler
 docker-build-scheduler: ## Build scheduler Docker image for SCHED_K8S_VERSION (tag: $(SCHED_IMG_TAG)).
 	$(CONTAINER_TOOL) build \
@@ -429,3 +435,35 @@ docker-build-scheduler: ## Build scheduler Docker image for SCHED_K8S_VERSION (t
 .PHONY: docker-push-scheduler
 docker-push-scheduler: ## Push scheduler image $(SCHED_IMG_TAG) to the registry.
 	$(CONTAINER_TOOL) push $(SCHED_IMG_TAG)
+
+##@ AI Decision Service Build
+
+## AI Decision Service image registry (without tag)
+AI_DS_IMG ?= ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/ai-decision-service
+## Project version embedded in the AI Decision Service image tag
+AI_DS_VERSION ?= v0.1.0
+
+# Full image tag — encodes both project version
+AI_DS_IMG_TAG = $(AI_DS_IMG):$(AI_DS_VERSION)
+
+.PHONY: build-ai-decision-service
+build-ai-decision-service: ## Build the AI Decision Service binary into bin/ai-decision-service.
+	cd ai-decision-service && go build \
+		-o ../bin/ai-decision-service \
+		./cmd/
+
+.PHONY: test-ai-decision-service
+test-ai-decision-service: ## Run tests for the AI Decision Service.
+	cd ai-decision-service && go test ./... -cover
+
+.PHONY: docker-build-ai-decision-service
+docker-build-ai-decision-service: ## Build AI Decision Service Docker image (tag: $(AI_DS_IMG_TAG)).
+	$(CONTAINER_TOOL) build \
+		-t $(AI_DS_IMG_TAG) \
+		-f ai-decision-service/Dockerfile \
+		.
+
+.PHONY: docker-push-ai-decision-service
+docker-push-ai-decision-service: ## Push AI Decision Service image $(AI_DS_IMG_TAG) to the registry.
+	$(CONTAINER_TOOL) push $(AI_DS_IMG_TAG)
+

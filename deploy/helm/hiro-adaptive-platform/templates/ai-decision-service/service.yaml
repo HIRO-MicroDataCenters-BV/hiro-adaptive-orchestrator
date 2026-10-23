@@ -1,0 +1,19 @@
+{{- if .Values.aiDecisionService.enable }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.aiDecisionService.serviceName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Values.aiDecisionService.serviceName }}
+    app.kubernetes.io/name: {{ .Values.aiDecisionService.serviceName }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  selector:
+    app: {{ .Values.aiDecisionService.serviceName }}
+  ports:
+    - port: {{ .Values.aiDecisionService.port }}
+      targetPort: http
+      name: http
+{{- end }}

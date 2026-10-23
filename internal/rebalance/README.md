@@ -1162,7 +1162,7 @@ Regenerate `config/rbac/role.yaml` with `make manifests` after changing these ma
 flowchart TD
     RS["RebalancingStatus"] --> Active["Active fields:<br/>state, reason, decisionId,<br/>action, details, startedAt,<br/>lastTransitionAt, cooldownUntil"]
     RS --> RD["history[]"]
-    RD --> RDF["HistoryEntry:<br/>action, outcome, reason, message,<br/>count, firstAt, at, change facts"]
+    RD --> RDF["HistoryEntry:<br/>action, outcome, reason, message,<br/>decidedBy, count, firstAt, at, change facts"]
 ```
 
 `RebalancingStatus` (in `api/v1alpha1/orchestrationprofile_types.go`) carries: `state`
