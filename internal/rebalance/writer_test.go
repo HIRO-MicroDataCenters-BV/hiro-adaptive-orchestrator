@@ -388,25 +388,19 @@ func TestStateWriter_History_DifferentDecidersDoNotMerge(t *testing.T) {
 	}
 }
 
-// A run that started 61m ago (window 1h) stops growing; one that started 59m ago keeps merging.
-func TestRecordHistory_NoMergeIntoRunStartedBeforeWindow(t *testing.T) {
+// A run is one entry for as long as it repeats, like a Kubernetes Event series.
+func TestRecordHistory_RunOlderThanWindowKeepsMerging(t *testing.T) {
 	cfg := HistoryConfig{Window: time.Hour}.WithDefaults()
 	now := time.Now()
-	noop := func(at time.Time) orchestrationv1alpha1.HistoryEntry {
-		return orchestrationv1alpha1.HistoryEntry{Outcome: OutcomeNoOp, Reason: string(ReasonNoChange), At: metav1.NewTime(at)}
+	run := orchestrationv1alpha1.HistoryEntry{
+		Outcome: OutcomeNoOp, Reason: string(ReasonNoChange), Count: 120,
+		FirstAt: metav1.NewTime(now.Add(-3 * time.Hour)), At: metav1.NewTime(now.Add(-time.Minute)),
 	}
-	old := noop(now.Add(-time.Minute))
-	old.Count, old.FirstAt = 120, metav1.NewTime(now.Add(-61*time.Minute))
+	next := orchestrationv1alpha1.HistoryEntry{Outcome: OutcomeNoOp, Reason: string(ReasonNoChange), At: metav1.NewTime(now)}
 
-	h := recordHistory([]orchestrationv1alpha1.HistoryEntry{old}, noop(now), cfg, now)
-	if len(h) != 2 || h[0].Count != 0 || h[1].Count != 120 {
-		t.Errorf("history = %+v, want a new entry and the old run left unchanged", h)
-	}
-
-	old.FirstAt = metav1.NewTime(now.Add(-59 * time.Minute))
-	h = recordHistory([]orchestrationv1alpha1.HistoryEntry{old}, noop(now), cfg, now)
-	if len(h) != 1 || h[0].Count != 121 {
-		t.Errorf("history = %+v, want a run inside the window to keep merging", h)
+	h := recordHistory([]orchestrationv1alpha1.HistoryEntry{run}, next, cfg, now)
+	if len(h) != 1 || h[0].Count != 121 || !h[0].FirstAt.Equal(&run.FirstAt) {
+		t.Errorf("history = %+v, want the run to keep merging with its firstAt", h)
 	}
 }
 

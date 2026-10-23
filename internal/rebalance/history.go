@@ -98,7 +98,7 @@ func recordHistory(
 	entry.Message = truncate(entry.Message, cfg.MessageMax)
 	entry.DecidedBy = truncate(entry.DecidedBy, cfg.MessageMax) // agent-supplied, so bounded too
 	mergeable := entry.Outcome != OutcomeEnacted && entry.Reason != string(ReasonOther)
-	if len(recent) > 0 && mergeable && startedInWindow(recent[0], cfg, now) && sameDecision(recent[0], entry) {
+	if len(recent) > 0 && mergeable && sameDecision(recent[0], entry) {
 		merged := recent[0]
 		if merged.Count == 0 {
 			merged.Count, merged.FirstAt = 1, merged.At // first repeat: start counting
@@ -131,15 +131,6 @@ func trimHistory(
 		}
 	}
 	return kept
-}
-
-// startedInWindow keeps count to "within the window": an older run starts a new entry instead.
-func startedInWindow(e orchestrationv1alpha1.HistoryEntry, cfg HistoryConfig, now time.Time) bool {
-	start := e.At
-	if e.Count > 0 {
-		start = e.FirstAt
-	}
-	return !start.Time.Before(now.Add(-cfg.Window))
 }
 
 // sameDecision is true when two entries differ only in timing and wording, so merging
