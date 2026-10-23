@@ -1,7 +1,7 @@
 name: Release
 #
 # Triggered by a push to main (auto-tag computes + pushes the next version)
-# or by a manually pushed vX.Y.Z tag (auto-tag is skipped). Either way,
+# or by a manually pushed vX.Y.Z tag (auto-tag runs as a no-op). Either way,
 # resolve-version settles on one version string and everything after it
 # builds images, packages the chart, and publishes a GitHub Release, which
 # triggers deploy.yml.
@@ -32,16 +32,17 @@ env:
 jobs:
   auto-tag:
     name: Compute next version and tag (merge-to-main only)
-    if: github.ref_type == 'branch'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        if: github.ref_type == 'branch'
         with:
           fetch-depth: 0
 
       - name: Compute next version
+        if: github.ref_type == 'branch'
         id: version
         run: |
           chmod +x build/version.sh
@@ -49,6 +50,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create and push tag
+        if: github.ref_type == 'branch'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
