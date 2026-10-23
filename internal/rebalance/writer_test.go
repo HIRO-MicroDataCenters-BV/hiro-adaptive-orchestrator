@@ -371,6 +371,45 @@ func TestStateWriter_History_OtherReasonNeverMerges(t *testing.T) {
 	}
 }
 
+func TestStateWriter_History_DifferentDecidersDoNotMerge(t *testing.T) {
+	writer, _ := newTestWriter(t, testProfile("profile-l"))
+	writer.history = HistoryConfig{MessageMax: 5}.WithDefaults()
+	key := types.NamespacedName{Name: "profile-l"}
+
+	for _, by := range []string{"mock", "rules", "rules-but-too-long"} {
+		endCycle(t, writer, key, "nothing to do", TransitionOptions{Outcome: OutcomeNoOp, Reason: ReasonNoChange, DecidedBy: by})
+	}
+	h := historyOf(t, writer, key)
+	if len(h) != 3 || h[2].DecidedBy != "mock" || h[1].DecidedBy != "rules" {
+		t.Fatalf("history = %+v, want one entry per decider, oldest from mock", h)
+	}
+	if got := []rune(h[0].DecidedBy); len(got) != 5 {
+		t.Errorf("decidedBy = %q, want it truncated to 5 characters", h[0].DecidedBy)
+	}
+}
+
+// A run that started 61m ago (window 1h) stops growing; one that started 59m ago keeps merging.
+func TestRecordHistory_NoMergeIntoRunStartedBeforeWindow(t *testing.T) {
+	cfg := HistoryConfig{Window: time.Hour}.WithDefaults()
+	now := time.Now()
+	noop := func(at time.Time) orchestrationv1alpha1.HistoryEntry {
+		return orchestrationv1alpha1.HistoryEntry{Outcome: OutcomeNoOp, Reason: string(ReasonNoChange), At: metav1.NewTime(at)}
+	}
+	old := noop(now.Add(-time.Minute))
+	old.Count, old.FirstAt = 120, metav1.NewTime(now.Add(-61*time.Minute))
+
+	h := recordHistory([]orchestrationv1alpha1.HistoryEntry{old}, noop(now), cfg, now)
+	if len(h) != 2 || h[0].Count != 0 || h[1].Count != 120 {
+		t.Errorf("history = %+v, want a new entry and the old run left unchanged", h)
+	}
+
+	old.FirstAt = metav1.NewTime(now.Add(-59 * time.Minute))
+	h = recordHistory([]orchestrationv1alpha1.HistoryEntry{old}, noop(now), cfg, now)
+	if len(h) != 1 || h[0].Count != 121 {
+		t.Errorf("history = %+v, want a run inside the window to keep merging", h)
+	}
+}
+
 func TestStateWriter_History_CappedAndTruncated(t *testing.T) {
 	profile := testProfile("profile-g")
 	writer, _ := newTestWriter(t, profile)

@@ -245,6 +245,10 @@ type HistoryEntry struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 
+	// decidedBy is who answered (e.g. mock, rules, model); empty when no agent was asked.
+	// +optional
+	DecidedBy string `json:"decidedBy,omitempty"`
+
 	// count is how many identical decisions in a row this entry stands for; unset means 1.
 	// +optional
 	Count int32 `json:"count,omitempty"`

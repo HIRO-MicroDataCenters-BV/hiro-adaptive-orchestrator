@@ -317,6 +317,10 @@ spec:
                             row this entry stands for; unset means 1.
                           format: int32
                           type: integer
+                        decidedBy:
+                          description: decidedBy is who answered (e.g. mock, rules,
+                            model); empty when no agent was asked.
+                          type: string
                         firstAt:
                           description: firstAt is when the first of the merged decisions
                             ended; at is the latest.

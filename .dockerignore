@@ -15,3 +15,9 @@
 !scheduler-plugin/go.mod
 !scheduler-plugin/go.sum
 !scheduler-plugin/pin_k8s_version.sh
+
+# Re-include ai-decision-service module files.
+# These are excluded by the ** rule above but required by ai-decision-service/Dockerfile.
+!ai-decision-service/go.mod
+!ai-decision-service/go.sum
+

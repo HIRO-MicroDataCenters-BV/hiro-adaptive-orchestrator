@@ -66,6 +66,9 @@ type TransitionOptions struct {
 	// Reason is the history code for a terminal transition; empty records ReasonOther.
 	Reason HistoryReason
 
+	// DecidedBy is who answered the decision request; empty when no agent was asked.
+	DecidedBy string
+
 	// Change carries the facts of what the cycle changed (Move/AdjustReplicas/AdjustResources
 	// fields); only those fields are read, the writer fills the rest of the history entry.
 	Change orchestrationv1alpha1.HistoryEntry
@@ -218,6 +221,7 @@ func (w *StateWriter) Transition(
 				entry.Outcome = effectiveOutcome
 				entry.Reason = string(historyReason)
 				entry.Message = reason
+				entry.DecidedBy = opts.DecidedBy
 				entry.At = now
 				rs.History = recordHistory(rs.History, entry, w.history, now.Time)
 			}
