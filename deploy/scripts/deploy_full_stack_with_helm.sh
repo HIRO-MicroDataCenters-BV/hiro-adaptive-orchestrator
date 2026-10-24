@@ -342,8 +342,7 @@ deploy_stack() {
   if [ "$USE_MOCK_AGENT" = "true" ]; then
     mock_agent_args="--set mockAgent.enable=true \
       --set mockAgent.serviceName=${MOCK_AGENT_SERVICE_NAME} \
-      --set mockAgent.port=${MOCK_AGENT_PORT} \
-      --set hiro-operator.config.DECISION_AGENT_URL=http://${MOCK_AGENT_SERVICE_NAME}:${MOCK_AGENT_PORT}"
+      --set mockAgent.port=${MOCK_AGENT_PORT}"
   else
     mock_agent_args="--set mockAgent.enable=false"
   fi
@@ -355,11 +354,10 @@ deploy_stack() {
       --set aiDecisionService.image.tag=${AI_DS_TAG} \
       --set aiDecisionService.image.pullPolicy=IfNotPresent \
       --set aiDecisionService.serviceName=${AI_DS_SERVICE_NAME} \
-      --set aiDecisionService.port=${AI_DS_PORT} \
-      --set hiro-operator.config.DECISION_AGENT_URL=http://${AI_DS_SERVICE_NAME}:${AI_DS_PORT}"
-    else
-      ai_ds_args="--set aiDecisionService.enable=false"
-    fi
+      --set aiDecisionService.port=${AI_DS_PORT}"
+  else
+    ai_ds_args="--set aiDecisionService.enable=false"
+  fi
 
   # {a,b} replaces the whole list, where [0]= would merge into index 0 and
   # leave any other entries behind. Quote-free on purpose: HELM_EXTRA_ARGS is

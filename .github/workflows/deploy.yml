@@ -23,6 +23,7 @@ name: Deploy to Target Cluster
 #   PREREQ_METRICS_SERVER_ENABLE  true | false                    (default: false)
 #   PREREQ_PROMETHEUS_ENABLE      true | false                    (default: false)
 #   MOCK_AGENT_ENABLE             true | false                    (default: false)
+#   AI_DECISION_SERVICE_ENABLE    true | false                    (default: false)
 #   HELM_EXTRA_VALUES             Catch-all extra --set/-f args, applied on every run
 #
 # ─── workflow_dispatch input ─────────────────────────────────────────────
@@ -131,6 +132,7 @@ jobs:
           export KUBECONFIG="$HOME/.kube/config"
           ORCHESTRATOR_IMAGE_REPO="ghcr.io/$GHCR_REPO_LC/hiro-adaptive-orchestrator-controller:${VERSION}"
           SCHED_IMAGE_REPO="ghcr.io/$GHCR_REPO_LC/hiro-scheduler:${VERSION}-k8s${SCHED_K8S_VERSION}"
+          AI_DECISION_SERVICE_IMAGE_REPO="ghcr.io/$GHCR_REPO_LC/ai-decision-service:${VERSION}"
           SCHED_MODE="${{ vars.SCHEDULER_MODE || 'none' }}"
           WEBHOOK_ENABLE="${{ vars.WEBHOOK_ENABLE || 'false' }}"
           # The webhook only exists in plugin mode.
@@ -150,6 +152,9 @@ jobs:
             --set prerequisites.metricsServer.enable=${{ vars.PREREQ_METRICS_SERVER_ENABLE || 'false' }} \
             --set prerequisites.prometheus.enable=${{ vars.PREREQ_PROMETHEUS_ENABLE || 'false' }} \
             --set mockAgent.enable=${{ vars.MOCK_AGENT_ENABLE || 'false' }} \
+            --set aiDecisionService.image.repository=${AI_DECISION_SERVICE_IMAGE_REPO%%:*} \
+            --set aiDecisionService.image.tag=${AI_DECISION_SERVICE_IMAGE_REPO##*:} \
+            --set aiDecisionService.enable=${{ vars.AI_DECISION_SERVICE_ENABLE || 'false' }} \
             ${{ vars.HELM_EXTRA_VALUES }}
 
       - name: Show release status

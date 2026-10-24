@@ -73,9 +73,10 @@ hiro-operator:
   ## ENABLE_WEBHOOKS and HIRO_SCHEDULER_NAME are not here: they are derived
   ## from webhook.enable and scheduler.plugin.schedulerName.
   config:
-    # Defaults to the bundled mock agent (mockAgent below). Not
-    # auto-derived from mockAgent.serviceName/.port — values.yaml can't
-    # template itself. Update this by hand if you change those.
+    # Used only when neither mockAgent nor aiDecisionService is enabled (an external agent);
+    # otherwise the chart sets it from the enabled one's serviceName/port.
+    ## Mock decision agent — opt-in demo/eval only. Off by default; when on,
+    ## the operator is pointed at it automatically.
     DECISION_AGENT_URL: http://mock-decision-agent:8080
     DECISION_AGENT_PATH: /api/v1/agent/placement/decision
     # PlacementServer — this operator's scoring endpoint, called by the
@@ -287,7 +288,8 @@ observability:
 ## ║  MOCK AGENT · demo decision agent                                   ║
 ## ╚═════════════════════════════════════════════════════════════════════╝
 ## Mock decision agent — opt-in demo/eval only. Off by default; when on,
-## hiro-operator's DECISION_AGENT_URL already points at it by default.
+## URL already points at it by default. 
+## The HIRO operator is pointed at it automatically.
 mockAgent:
   enable: false
   serviceName: mock-decision-agent
@@ -307,8 +309,8 @@ mockAgent:
 ## ║  AI DECISION SERVICE · actual decision agent                        ║
 ## ╚═════════════════════════════════════════════════════════════════════╝
 ## AI Decision Service — replaces the mock agent when enabled. Off by default.
-## To route the operator to it, also set
-## hiro-operator.config.DECISION_AGENT_URL=http://<serviceName>:<port>.
+## The operator is pointed at it automatically.
+
 aiDecisionService:
   enable: false
   serviceName: ai-decision-service

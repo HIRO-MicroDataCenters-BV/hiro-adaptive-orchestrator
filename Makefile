@@ -367,7 +367,6 @@ helm-platform-template-check: ## Regression-check helm lint/template across repr
 	run "all features on" \
 		--set webhook.enable=true --set scheduler.mode=plugin \
 		--set scheduler.plugin.image.tag=v0.1.0 \
-		--set mockAgent.enable=true \
 		--set aiDecisionService.enable=true \
 		--set prerequisites.metricsServer.enable=true \
 		--set prerequisites.prometheus.enable=true; \

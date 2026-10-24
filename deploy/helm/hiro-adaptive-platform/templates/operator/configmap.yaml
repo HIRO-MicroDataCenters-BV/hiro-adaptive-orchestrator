@@ -13,6 +13,15 @@
 {{- /* Derived from the features that need them, so one flag is enough. */}}
 {{- $_ := set $cfg "ENABLE_WEBHOOKS" (ternary "true" "false" (.Values.webhook.enable | default false)) }}
 {{- $_ := set $cfg "HIRO_SCHEDULER_NAME" .Values.scheduler.plugin.schedulerName }}
+{{- if and .Values.aiDecisionService.enable .Values.mockAgent.enable }}
+{{- fail "Enable only one of aiDecisionService and mockAgent: the operator calls a single decision agent." }}
+{{- end }}
+{{- if .Values.aiDecisionService.enable }}
+{{- $_ := set $cfg "DECISION_AGENT_URL" (printf "http://%s:%v" .Values.aiDecisionService.serviceName .Values.aiDecisionService.port) }}
+{{- else if .Values.mockAgent.enable }}
+{{- $_ := set $cfg "DECISION_AGENT_URL" (printf "http://%s:%v" .Values.mockAgent.serviceName .Values.mockAgent.port) }}
+{{- end }}
+
 # Name is fixed: config/manager/manager.yaml references it by name in envFrom.
 apiVersion: v1
 kind: ConfigMap
