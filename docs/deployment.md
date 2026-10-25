@@ -38,7 +38,7 @@ Prefer `clean` over `destroy` in extender mode: the chart's kube-scheduler resto
 `pre-delete` hook, so only a Helm uninstall reverts the patch. The `OrchestrationProfile` CRD is
 annotated `helm.sh/resource-policy: keep`, so it and any profiles you created survive a `clean`.
 
-Deploys everything — operator, webhook, scheduler (plugin or extender), mock agent, optional bundled prerequisites — as one Helm release via the umbrella chart at `deploy/helm/hiro-adaptive-platform`, against a local Kind cluster. Creates (or reuses) the Kind cluster, builds the operator + scheduler-plugin images, loads them straight into the cluster (no registry needed), deploys everything with one `helm upgrade --install`, health-checks the result, and finally applies the samples with `kubectl apply -k config/samples/` (outside Helm, since other repos create the same sample apps).
+Deploys everything — operator, webhook, scheduler (plugin or extender), AI Decision Service or mock agent, optional bundled prerequisites — as one Helm release via the umbrella chart at `deploy/helm/hiro-adaptive-platform`, against a local Kind cluster. Creates (or reuses) the Kind cluster, builds the operator, scheduler-plugin and AI Decision Service images, loads them straight into the cluster (no registry needed), deploys everything with one `helm upgrade --install`, health-checks the result, and finally applies the samples with `kubectl apply -k config/samples/` (outside Helm, since other repos create the same sample apps).
 
 **No `GITHUB_PAT_TOKEN` or registry needed** — images build locally and load directly into Kind. This is the one deploy path in this document that doesn't require a GHCR token.
 
@@ -56,7 +56,8 @@ always matches what was deployed:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SCHEDULER_MODE` | `plugin` | `plugin` (scheduler Deployment + webhook), `extender` (patches the cluster's own kube-scheduler), or `none` (operator only) |
-| `USE_MOCK_AGENT` | `true` | Deploy the bundled mock decision agent |
+| `USE_MOCK_AGENT` | `false` | Deploy the bundled mock decision agent (needed by `demo/demo_rebalance_with_mock_agent.sh`) |
+| `USE_AI_DECISION_SERVICE` | `true` | Deploy the bundled AI Decision Service. Set only one of the two agents to `true`; the chart points the operator at it. Both `false`: an external agent at `hiro-operator.config.DECISION_AGENT_URL` |
 | `DEPLOY_SAMPLES` | `true` | Apply the nginx + `OrchestrationProfile` samples from `config/samples/` with kubectl after Helm. `clean` deletes only the sample profiles, not the shared nginx apps |
 | `DEPLOY_PROMETHEUS` | `false` | Bundle kube-prometheus-stack and turn on both ServiceMonitors, so the `hiro_*` metrics are scraped rather than just exposed |
 | `OTLP_ENDPOINT` | *(empty)* | OTLP gRPC collector for traces, e.g. `alloy.observability.svc:4317`. Empty disables tracing entirely |
@@ -67,6 +68,9 @@ KIND_CLUSTER_NAME=hiro-platform-verify deploy/scripts/deploy_full_stack_with_hel
 # scrape the metrics with the bundled Prometheus, and export traces
 DEPLOY_PROMETHEUS=true OTLP_ENDPOINT=alloy.observability.svc:4317 \
   deploy/scripts/deploy_full_stack_with_helm.sh deploy
+
+# the mock agent instead of the AI Decision Service, for the rebalance demo
+USE_MOCK_AGENT=true USE_AI_DECISION_SERVICE=false deploy/scripts/deploy_full_stack_with_helm.sh deploy
 
 # extender instead of the scheduler plugin — no scheduler pod, no webhook
 SCHEDULER_MODE=extender deploy/scripts/deploy_full_stack_with_helm.sh deploy

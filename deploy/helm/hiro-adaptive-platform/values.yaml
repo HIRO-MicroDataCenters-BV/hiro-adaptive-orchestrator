@@ -75,8 +75,6 @@ hiro-operator:
   config:
     # Used only when neither mockAgent nor aiDecisionService is enabled (an external agent);
     # otherwise the chart sets it from the enabled one's serviceName/port.
-    ## Mock decision agent — opt-in demo/eval only. Off by default; when on,
-    ## the operator is pointed at it automatically.
     DECISION_AGENT_URL: http://mock-decision-agent:8080
     DECISION_AGENT_PATH: /api/v1/agent/placement/decision
     # PlacementServer — this operator's scoring endpoint, called by the
@@ -288,8 +286,7 @@ observability:
 ## ║  MOCK AGENT · demo decision agent                                   ║
 ## ╚═════════════════════════════════════════════════════════════════════╝
 ## Mock decision agent — opt-in demo/eval only. Off by default; when on,
-## URL already points at it by default. 
-## The HIRO operator is pointed at it automatically.
+## the operator is pointed at it automatically.
 mockAgent:
   enable: false
   serviceName: mock-decision-agent

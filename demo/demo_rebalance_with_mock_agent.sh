@@ -1,5 +1,5 @@
 #!/bin/bash
-# demo/demo_rebalance.sh
+# demo/demo_rebalance_with_mock_agent.sh
 #
 # Guided, narrated demo of the rebalance engine's decision lifecycle:
 #   Watching -> Triggered -> Evaluating -> Decided -> Enacting -> Watching
@@ -7,6 +7,9 @@
 # See internal/rebalance/README.md#demo-walkthrough for a small flow diagram
 # of what each beat below actually does mechanically (Mermaid doesn't render
 # in a .sh comment, so it lives there, not here).
+#
+# Needs the mock agent, which the beats steer through env vars. Deploy with
+#   USE_MOCK_AGENT=true USE_AI_DECISION_SERVICE=false deploy/scripts/deploy_full_stack_with_helm.sh
 #
 # Drives six beats against a live cluster (the full-stack deploy must
 # already be running — see deploy/scripts/deploy_full_stack.sh), all against the
@@ -86,15 +89,15 @@
 #     kubectl logs -f deployment/mock-decision-agent -n hiro-adaptive-orchestrator-system
 #
 # Usage:
-#   demo/demo_rebalance.sh              # numbered menu: pick one beat, all, or cleanup
-#   demo/demo_rebalance.sh all          # run all six beats, in order
-#   demo/demo_rebalance.sh noop         # run a single beat
-#   demo/demo_rebalance.sh retry
-#   demo/demo_rebalance.sh move
-#   demo/demo_rebalance.sh scale
-#   demo/demo_rebalance.sh resources
-#   demo/demo_rebalance.sh escalate
-#   demo/demo_rebalance.sh cleanup      # revert the mock agent + restore
+#   demo/demo_rebalance_with_mock_agent.sh              # numbered menu: pick one beat, all, or cleanup
+#   demo/demo_rebalance_with_mock_agent.sh all          # run all six beats, in order
+#   demo/demo_rebalance_with_mock_agent.sh noop         # run a single beat
+#   demo/demo_rebalance_with_mock_agent.sh retry
+#   demo/demo_rebalance_with_mock_agent.sh move
+#   demo/demo_rebalance_with_mock_agent.sh scale
+#   demo/demo_rebalance_with_mock_agent.sh resources
+#   demo/demo_rebalance_with_mock_agent.sh escalate
+#   demo/demo_rebalance_with_mock_agent.sh cleanup      # revert the mock agent + restore
 #                                       # replica count/resources/escalation,
 #                                       # without running anything else
 #
@@ -892,6 +895,14 @@ main() {
     fi
     beat=$(menu)
   fi
+
+  case "$beat" in quit|-h|--help) ;; *)
+    if ! kubectl get deployment mock-decision-agent -n "$NAMESPACE" >/dev/null 2>&1; then
+      echo "mock-decision-agent not found in $NAMESPACE. Deploy it first:" >&2
+      echo "  USE_MOCK_AGENT=true USE_AI_DECISION_SERVICE=false deploy/scripts/deploy_full_stack_with_helm.sh" >&2
+      trap - EXIT; exit 1
+    fi
+  esac
 
   case "$beat" in
     quit) trap - EXIT; exit 0 ;;

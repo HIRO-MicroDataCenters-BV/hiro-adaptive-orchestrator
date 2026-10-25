@@ -3,7 +3,7 @@
 #
 # Local verification for deploy/helm/hiro-adaptive-platform: regenerates
 # manifests/code (same as deploy/scripts/deploy_operator.sh), creates (or reuses) a
-# Kind cluster, builds the operator + scheduler-plugin images, loads them
+# Kind cluster, builds the operator, scheduler-plugin and AI Decision Service images, loads them
 # straight into the cluster (no registry needed — fine for local testing,
 # see deploy/helm/hiro-adaptive-platform/README.md), deploys the full stack, and
 # checks it came up healthy.
@@ -31,7 +31,11 @@
 #                                    scheduler pod and no webhook.
 #                         none     — operator only.
 #   USE_MOCK_AGENT        Bundled mock decision agent         (default: false)
-#   USE_AI_DECISION_SERVICE   Deploy the AI Decision Service      (default: true)
+#   USE_AI_DECISION_SERVICE
+#                         Bundled AI Decision Service         (default: true)
+#                         Set only one of the two to true; the chart points the
+#                         operator at it. Both false: an external agent at
+#                         hiro-operator.config.DECISION_AGENT_URL.
 #   DEPLOY_SAMPLES        nginx + OrchestrationProfile samples from config/samples/,
 #                         applied with kubectl after Helm, never Helm-owned (default: true)
 #   DEPLOY_PROMETHEUS     Bundle kube-prometheus-stack and turn on both
@@ -190,6 +194,11 @@ check_prerequisites() {
     command -v "$cmd" >/dev/null || { echo "ERROR: '$cmd' not found in PATH." >&2; exit 1; }
     echo "  [ok] $cmd -> $(command -v "$cmd")"
   done
+  # The chart fails on this too; checking here saves the image builds.
+  if [ "$USE_MOCK_AGENT" = "true" ] && [ "$USE_AI_DECISION_SERVICE" = "true" ]; then
+    echo "ERROR: set only one of USE_MOCK_AGENT and USE_AI_DECISION_SERVICE to true." >&2
+    exit 1
+  fi
 }
 
 # Same as deploy/scripts/deploy_operator.sh's generate_code_and_manifests(), minus
@@ -377,7 +386,7 @@ deploy_stack() {
 
 # Image tags are fixed and pullPolicy is IfNotPresent, so helm sees no spec change on a
 # rebuild and the old pods would keep running the old image. Restart to pick up the new build.
-restart_operator_scheduler_AIDecision() {
+restart_built_images() {
   step "Restarting operator, scheduler and AI Decision Service to run the images just built"
   local sel deploy
   for sel in "$OPERATOR_LABEL_SELECTOR" "$SCHEDULER_LABEL_SELECTOR" "$AI_DS_LABEL_SELECTOR"; do
@@ -507,12 +516,15 @@ print_summary() {
   if [ "$USE_MOCK_AGENT" = "true" ]; then
     echo -e "\033[32m    Mock agent        : deployed  (mock-decision-agent.$HELM_NAMESPACE)\033[0m"
   else
-    echo -e "\033[33m    Mock agent        : not deployed  (using real agent)\033[0m"
+    echo -e "\033[33m    Mock agent        : not deployed\033[0m"
   fi
   if [ "$USE_AI_DECISION_SERVICE" = "true" ]; then
     echo -e "\033[32m    AI Decision Service: deployed  (service/$AI_DS_SERVICE_NAME:$AI_DS_PORT)\033[0m"
   else
-    echo -e "\033[33m    AI Decision Service: not deployed  (using external service)\033[0m"
+    echo -e "\033[33m    AI Decision Service: not deployed\033[0m"
+  fi
+  if [ "$USE_MOCK_AGENT" != "true" ] && [ "$USE_AI_DECISION_SERVICE" != "true" ]; then
+    echo -e "\033[33m    Decision agent    : external  (hiro-operator.config.DECISION_AGENT_URL)\033[0m"
   fi
   if [ "$DEPLOY_SAMPLES" = "true" ]; then
     echo -e "\033[32m    Samples           : applied with kubectl  (config/samples/)\033[0m"
@@ -691,7 +703,7 @@ run_deploy() {
   load_images_into_kind
   resolve_metrics_reader
   deploy_stack
-  restart_operator_scheduler_AIDecision
+  restart_built_images
   resolve_placement_server_url
   if [ "$GRANT_OPERATOR_SA" = "true" ]; then
     METRICS_READER="${HELM_NAMESPACE}:$(operator_sa_name)"

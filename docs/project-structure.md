@@ -55,6 +55,15 @@ scheduler-plugin/                      # Separate Go module (own go.mod)
   Dockerfile                           # Build context: repo root
   go.mod                               # k8s.io/kubernetes v1.35.0 + staging replace block
   pin_k8s_version.sh                   # Pin go.mod to a specific K8s minor version
+ai-decision-service/                   # Separate Go module (own go.mod); decides placement and rebalance
+  cmd/
+    main.go                            # Reads AI_DECISION_SERVICE_* env, starts the HTTP server
+  server/
+    config.go                          # Defaults for every setting
+    server.go                          # /healthz + the decision endpoint (placement and rebalance)
+    server_test.go                     # httptest-based unit tests
+  Dockerfile                           # Build context: repo root
+  go.mod                               # Imports the root module's pkg/placement contract (replace => ../)
 config/
   crd/bases/                           # Generated CRDs — DO NOT EDIT
   rbac/                                # Generated RBAC — DO NOT EDIT
@@ -102,11 +111,14 @@ deploy/                                # Everything deployment — see deploy/RE
                                        # hiro.io/last-updated annotation (triggers kubelet restart)
   manifests/
     mock_decision_agent.yaml           # In-cluster mock AI agent (Deployment + Service + ConfigMap)
+    ai_decision_service.yaml           # In-cluster AI Decision Service (Deployment + Service)
   helm/
     hiro-adaptive-platform/            # Umbrella chart: operator (dist/chart subchart) + webhook +
-                                       # scheduler plugin/extender + mock agent + prerequisites
+                                       # scheduler plugin/extender + mock agent or AI Decision Service +
+                                       # prerequisites
 demo/
-  demo_rebalance.sh                    # Drives the six rebalance lifecycle beats against a running stack
+  demo_rebalance_with_mock_agent.sh    # Drives the six rebalance lifecycle beats against a running stack
+                                       # (needs the mock agent: USE_MOCK_AGENT=true USE_AI_DECISION_SERVICE=false)
 hack/
   boilerplate.go.txt                   # License header for controller-gen (make generate)
 dist/
