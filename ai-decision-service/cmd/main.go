@@ -45,6 +45,31 @@ func loadConfig() (server.Config, error) {
 	cfg.MaxBodyBytes = int64(maxBytes)
 	cfg.HealthPath = envString("AI_DECISION_SERVICE_HEALTH_PATH", cfg.HealthPath)
 	cfg.DecisionPath = envString("AI_DECISION_SERVICE_DECISION_PATH", cfg.DecisionPath)
+	cfg.ScorerConfig.PackedMaxUtil, err = envFloat("AI_DECISION_SERVICE_SCORER_PACKED_MAX_UTIL", cfg.ScorerConfig.PackedMaxUtil)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.ScorerConfig.ImbalancePenalty, err = envFloat("AI_DECISION_SERVICE_SCORER_IMBALANCE_PENALTY", cfg.ScorerConfig.ImbalancePenalty)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.ScorerConfig.SpreadZoneWeight, err = envFloat("AI_DECISION_SERVICE_SCORER_SPREAD_ZONE_WEIGHT", cfg.ScorerConfig.SpreadZoneWeight)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.ScorerConfig.SpreadNodeWeight, err = envFloat("AI_DECISION_SERVICE_SCORER_SPREAD_NODE_WEIGHT", cfg.ScorerConfig.SpreadNodeWeight)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.ScorerConfig.SpreadBalancedWeight, err = envFloat("AI_DECISION_SERVICE_SCORER_SPREAD_BALANCED_WEIGHT", cfg.ScorerConfig.SpreadBalancedWeight)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.ScorerConfig.ZoneLabel = envString("AI_DECISION_SERVICE_SCORER_ZONE_LABEL", cfg.ScorerConfig.ZoneLabel)
+	cfg.ScorerConfig.UnknownScore, err = envFloat("AI_DECISION_SERVICE_SCORER_UNKNOWN_SCORE", cfg.ScorerConfig.UnknownScore)
+	if err != nil {
+		return cfg, err
+	}
 	return cfg, validateConfig(cfg)
 }
 
@@ -63,6 +88,9 @@ func validateConfig(cfg server.Config) error {
 	}
 	if cfg.DecisionPath == "" {
 		return fmt.Errorf("decision path cannot be empty")
+	}
+	if err := cfg.ScorerConfig.Validate(); err != nil {
+		return fmt.Errorf("invalid scorer config: %w", err)
 	}
 	return nil
 }
@@ -101,4 +129,17 @@ func envString(name string, defaultValue string) string {
 		return defaultValue
 	}
 	return val
+}
+
+// envFloat returns defaultValue when name is unset, or an error when it isn't a valid float64.
+func envFloat(name string, defaultValue float64) (float64, error) {
+	valStr := os.Getenv(name)
+	if valStr == "" {
+		return defaultValue, nil
+	}
+	val, err := strconv.ParseFloat(valStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q is not a valid float64: %w", name, valStr, err)
+	}
+	return val, nil
 }

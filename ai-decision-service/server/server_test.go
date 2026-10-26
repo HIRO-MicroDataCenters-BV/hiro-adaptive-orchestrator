@@ -36,7 +36,7 @@ func TestHealth(t *testing.T) {
 	}
 }
 
-func TestPlacementGivesEqualScores(t *testing.T) {
+func TestPlacementUsesScorer(t *testing.T) {
 	rec := do(t, DefaultConfig(), http.MethodPost, DefaultDecisionPath, InitialPlacementBody)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
@@ -46,7 +46,10 @@ func TestPlacementGivesEqualScores(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
-	if resp.RequestID != "r0" || len(resp.NodeScores) != 2 || resp.DecidedBy != placement.DecidedByScorer {
+	if resp.RequestID != "r0" ||
+		len(resp.NodeScores) != 2 ||
+		resp.DecidedBy != placement.DecidedByScorer ||
+		!strings.HasPrefix(resp.Reason, "Balanced") {
 		t.Errorf("expected request ID 'r0', 2 node scores, and decided by scorer, got response: %+v", resp)
 	}
 }

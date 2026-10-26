@@ -1,6 +1,10 @@
 package server
 
-import "time"
+import (
+	"time"
+
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/scorer"
+)
 
 // Defaults; cmd/main.go overrides each from its env var.
 const (
@@ -18,6 +22,7 @@ type Config struct {
 	DecisionPath string
 	ReadTimeout  time.Duration
 	MaxBodyBytes int64
+	ScorerConfig scorer.Config
 }
 
 func DefaultConfig() Config {
@@ -27,5 +32,6 @@ func DefaultConfig() Config {
 		DecisionPath: DefaultDecisionPath,
 		ReadTimeout:  DefaultReadTimeout,
 		MaxBodyBytes: DefaultMaxBodyBytes,
+		ScorerConfig: scorer.DefaultConfig(),
 	}
 }

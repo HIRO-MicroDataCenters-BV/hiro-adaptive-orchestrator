@@ -12,12 +12,10 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/scorer"
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
-
-// equalScore is the skeleton's score for every node; the real scorer replaces it later.
-const equalScore = 50.0
 
 type AIDecisionService struct {
 	cfg Config
@@ -78,7 +76,7 @@ func (s *AIDecisionService) handleDecision(w http.ResponseWriter, r *http.Reques
 		ans := rebalanceAnswer(req)
 		resp, flow, decidedBy = ans, "rebalance", ans.DecidedBy
 	} else {
-		ans := placementAnswer(req)
+		ans := s.placementAnswer(req)
 		resp, flow, decidedBy = ans, "placement", ans.DecidedBy
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -97,18 +95,12 @@ func (s *AIDecisionService) handleDecision(w http.ResponseWriter, r *http.Reques
 	)
 }
 
-func placementAnswer(req placement.DecisionRequest) placement.DecisionResponse {
-	scores := make([]placement.NodeScore, 0, len(req.NodeStats))
-	for _, n := range req.NodeStats {
-		scores = append(scores, placement.NodeScore{
-			NodeName: n.Name,
-			Score:    equalScore,
-		})
-	}
+func (s *AIDecisionService) placementAnswer(req placement.DecisionRequest) placement.DecisionResponse {
+	scores, reason := scorer.Score(req, s.cfg.ScorerConfig)
 	return placement.DecisionResponse{
 		RequestID:  req.RequestID, // echo it back, so logs can join request and answer
 		NodeScores: scores,
-		Reason:     "skeleton: equal scores",
+		Reason:     reason,
 		DecidedBy:  placement.DecidedByScorer,
 	}
 }
