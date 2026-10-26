@@ -354,11 +354,13 @@ Pods without `schedulerName` (and not covered by a profile) use the default sche
 <a id="placement-strategies"></a>
 ### Placement Strategies
 
-| Strategy | Behaviour |
-|----------|-----------|
-| `Balanced` | Distributes pods evenly across nodes |
-| `Packed` | Concentrates pods on the fewest nodes (bin-packing) |
-| `Spread` | Maximises pod spread across failure domains |
+The AI Decision Service's code scorer turns the strategy into a 0–100 score per candidate node, using utilisation after placing the pod. See [`ai-decision-service/README.md`](../ai-decision-service/README.md) for the formulas and settings.
+
+| Strategy | Use when | Behaviour |
+|----------|----------|-----------|
+| `Balanced` (default) | General, latency-sensitive services | Prefers the least-full node, so no node gets hot; small penalty when CPU and memory use are uneven |
+| `Packed` | Saving energy and cost | Prefers fuller nodes so others stay empty, but never above the packed limit (default 85%) |
+| `Spread` | High availability | Prefers the zone, then the node, with the fewest of this app's pods; without zone labels, nodes only |
 
 <a id="profile-status"></a>
 ### Profile Status

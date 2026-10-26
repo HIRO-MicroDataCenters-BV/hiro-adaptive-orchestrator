@@ -62,6 +62,10 @@ ai-decision-service/                   # Separate Go module (own go.mod); decide
     config.go                          # Defaults for every setting
     server.go                          # /healthz + the decision endpoint (placement and rebalance)
     server_test.go                     # httptest-based unit tests
+  scorer/
+    config.go                          # Scorer defaults + Validate
+    scorer.go                          # Packed / Balanced / Spread node scoring (pure, deterministic)
+    scorer_test.go                     # Table tests + benchmark
   Dockerfile                           # Build context: repo root
   go.mod                               # Imports the root module's pkg/placement contract (replace => ../)
 config/
