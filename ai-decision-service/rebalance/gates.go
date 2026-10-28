@@ -17,7 +17,9 @@ type gate struct {
 
 // gateResult represents a collection of rebalance actions and their corresponding gate results.
 type gateResult struct {
-	gates []gate
+	gates   []gate
+	filled  map[string]bool // nodes a recent Move put a pod on
+	emptied map[string]bool // nodes a recent Move took a pod off
 }
 
 // block removes an action once, keeping the first reason; later gates don't repeat it.
@@ -79,19 +81,17 @@ func applyGates(req placement.DecisionRequest, now time.Time, cfg Config) gateRe
 			fmt.Sprintf("PDB %s does not allow disruptions", rc.PDB.Name))
 	}
 
-	// 4. Flip-flop: don't move off a node a recent move just put a pod on.
-	//    Skipped for NodeFailure: a dead node must be left even if we just moved there.
-	if rc.Trigger != nil && rc.Trigger.Node != "" &&
-		rc.Trigger.Type != string(orchestrationv1alpha1.TriggerConditionNodeFailure) {
-		for _, h := range rc.History {
-			if h.Action == orchestrationv1alpha1.RebalanceActionMove &&
-				h.Outcome == orchestrationv1alpha1.RebalanceOutcomeEnacted &&
-				h.NewPodNode == rc.Trigger.Node &&
-				h.At.Time.After(now.Add(-cfg.FlipMoveActionWindow)) {
-				g.block(orchestrationv1alpha1.RebalanceActionMove,
-					fmt.Sprintf("recent move placed pod %s on node %s", h.NewPodName, rc.Trigger.Node))
-				break
-			}
+	// 4. Recent relocations, for moveBlocked's churn and ping-pong guards. NewPodNode is set
+	//    only when a replacement pod really appeared, so a wrong-node Failed Move counts too.
+	g.filled, g.emptied = map[string]bool{}, map[string]bool{}
+	cutoff := now.Add(-cfg.FlipMoveActionWindow)
+	for _, h := range rc.History {
+		if h.Action != orchestrationv1alpha1.RebalanceActionMove || h.NewPodNode == "" || !h.At.After(cutoff) {
+			continue
+		}
+		g.filled[h.NewPodNode] = true
+		if h.SourceNode != "" {
+			g.emptied[h.SourceNode] = true
 		}
 	}
 
@@ -123,4 +123,34 @@ func (g *gateResult) blockedReasons() []string {
 		}
 	}
 	return reasons
+}
+
+// reasonFor returns why action a was blocked, or "" if it wasn't.
+func (g *gateResult) reasonFor(a orchestrationv1alpha1.RebalanceAction) string {
+	for _, gt := range g.gates {
+		if gt.action == a && !gt.allowed {
+			return gt.reason
+		}
+	}
+	return ""
+}
+
+// moveBlocked says why moving a pod from source to target isn't allowed, or "" when it is.
+// Leaving a dead node skips cooldown, the PDB pre-check and both guards; the eviction API still enforces the PDB.
+func (g *gateResult) moveBlocked(source, target string, classes map[string]nodeClass) string {
+	if classes[source] == classDown {
+		return ""
+	}
+	if why := g.reasonFor(orchestrationv1alpha1.RebalanceActionMove); why != "" {
+		return why
+	}
+	// Churn: don't take from a node we just filled, unless it's now at risk.
+	if g.filled[source] && classes[source] != classAtRisk {
+		return fmt.Sprintf("a recent move put a pod on %s", source)
+	}
+	// Ping-pong: don't send back to a node we just emptied.
+	if g.emptied[target] {
+		return fmt.Sprintf("a recent move took a pod off %s", target)
+	}
+	return ""
 }

@@ -68,7 +68,7 @@ func (s *AIDecisionService) handleDecision(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.log.Debug("Received decision request",
+	s.log.Info("Received decision request",
 		"requestId", req.RequestID,
 		"inputHash", inputHash(req),
 		"podName", req.Pod.Name,

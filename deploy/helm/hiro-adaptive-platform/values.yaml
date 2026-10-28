@@ -333,6 +333,9 @@ aiDecisionService:
     # Rebalance rules: EAO data older than this is ignored.
     AI_DECISION_SERVICE_REBALANCE_EAO_STALE_AFTER: 5m
     AI_DECISION_SERVICE_REBALANCE_FLIP_MOVE_ACTION_WINDOW: 30m
+    # Node conditions that mark a Ready node at risk (comma-separated).
+    AI_DECISION_SERVICE_REBALANCE_RISK_CONDITIONS: MemoryPressure,DiskPressure,PIDPressure,NetworkUnavailable
+
   resources:
     requests: { cpu: 50m, memory: 32Mi }
     limits:   { cpu: 200m, memory: 128Mi }

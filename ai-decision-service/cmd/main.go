@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/server"
@@ -78,6 +79,7 @@ func loadConfig() (server.Config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	cfg.RebalanceConfig.RiskConditions = envList("AI_DECISION_SERVICE_REBALANCE_RISK_CONDITIONS", cfg.RebalanceConfig.RiskConditions)
 	return cfg, validateConfig(cfg)
 }
 
@@ -153,4 +155,21 @@ func envFloat(name string, defaultValue float64) (float64, error) {
 		return 0, fmt.Errorf("%s=%q is not a valid float64: %w", name, valStr, err)
 	}
 	return val, nil
+}
+
+// envList returns defaultValue when name is unset, else its comma-separated items, trimmed, empties dropped.
+func envList(name string, defaultValue []string) []string {
+	valStr := os.Getenv(name)
+	if valStr == "" {
+		return defaultValue
+	}
+	items := strings.Split(valStr, ",")
+	var result []string
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
 }

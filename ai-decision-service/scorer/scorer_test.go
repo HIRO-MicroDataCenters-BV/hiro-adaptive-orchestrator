@@ -15,7 +15,7 @@ import (
 func near(a, b float64) bool { return math.Abs(a-b) < 0.001 }
 
 // node builds a candidate with cpu/memory allocatable and requested, and the app's pod count.
-func node(name, zone string, cpuAlloc, cpuReq, memAlloc, memReq int64, appPods int) placement.NodeStat {
+func node(name, zone string, cpuAlloc, cpuReq, memAlloc, memReq int64, appPods int, candidate bool) placement.NodeStat {
 	var labels map[string]string
 	if zone != "" {
 		labels = map[string]string{DefaultZoneLabel: zone}
@@ -35,7 +35,8 @@ func node(name, zone string, cpuAlloc, cpuReq, memAlloc, memReq int64, appPods i
 				Requested:   &memReq,
 			},
 		},
-		AppPods: &appPods,
+		AppPods:   &appPods,
+		Candidate: candidate,
 	}
 }
 
@@ -100,20 +101,20 @@ func TestScore(t *testing.T) {
 	cpuOnlyProfile.Awareness.CPU = true
 	// n1 is 20% full, n2 is 60% full (cpu and memory); the pod requests nothing.
 	lowHighNodeStats := []placement.NodeStat{
-		node("n1", "", 1000, 200, 1000, 200, 0),
-		node("n2", "", 1000, 600, 1000, 600, 0),
+		node("n1", "", 1000, 200, 1000, 200, 0, true),
+		node("n2", "", 1000, 600, 1000, 600, 0, true),
 	}
 	// The Spread example: zone A has 2 app pods, zone B has 1.
 	zonesNodeStats := []placement.NodeStat{
-		node("n1", "A", 1000, 0, 1000, 0, 2),
-		node("n2", "A", 1000, 0, 1000, 0, 0),
-		node("n3", "B", 1000, 0, 1000, 0, 1),
+		node("n1", "A", 1000, 0, 1000, 0, 2, true),
+		node("n2", "A", 1000, 0, 1000, 0, 0, true),
+		node("n3", "B", 1000, 0, 1000, 0, 1, true),
 	}
-	unknownNodeStats := node("n1", "", 1000, 0, 1000, 0, 0)
+	unknownNodeStats := node("n1", "", 1000, 0, 1000, 0, 0, true)
 	unknownNodeStats.Resources["cpu"] = placement.NodeResource{Allocatable: 1000} // Requested nil
 	podFitNodeStats := []placement.NodeStat{
-		node("n1", "", 1000, 800, 1000, 500, 0),
-		node("n2", "", 1000, 0, 1000, 500, 0),
+		node("n1", "", 1000, 800, 1000, 500, 0, true),
+		node("n2", "", 1000, 0, 1000, 500, 0, true),
 	}
 	podFitPod := corev1.Pod{}
 	podFitPod.Spec.Containers = []corev1.Container{
@@ -128,8 +129,13 @@ func TestScore(t *testing.T) {
 
 	// CPU-only: equal CPU, very different memory; memory is ignored, so both score the same.
 	cpuOnlyNodeStats := []placement.NodeStat{
-		node("n1", "", 1000, 200, 1000, 900, 0),
-		node("n2", "", 1000, 200, 1000, 100, 0),
+		node("n1", "", 1000, 200, 1000, 900, 0, true),
+		node("n2", "", 1000, 200, 1000, 100, 0, true),
+	}
+
+	candidateNodeStats := []placement.NodeStat{
+		node("n1", "", 1000, 600, 1000, 600, 0, false),
+		node("n2", "", 1000, 200, 1000, 100, 0, true),
 	}
 
 	cases := []struct {
@@ -179,6 +185,11 @@ func TestScore(t *testing.T) {
 			req:        placement.DecisionRequest{AOProfile: cpuOnlyProfile, NodeStats: cpuOnlyNodeStats},
 			wantScores: map[string]float64{"n1": 80, "n2": 80},
 		},
+		{
+			name:       "non-candidate node is ignored",
+			req:        placement.DecisionRequest{AOProfile: profile("Packed"), NodeStats: candidateNodeStats},
+			wantReason: "Packed: n2 best",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -198,7 +209,7 @@ func TestScore(t *testing.T) {
 func BenchmarkScore(b *testing.B) {
 	nodes := make([]placement.NodeStat, 0, 500)
 	for i := range 500 {
-		nodes = append(nodes, node(fmt.Sprintf("n%d", i), fmt.Sprintf("z%d", i%3), 4000, 1000, 8000, 2000, i%5))
+		nodes = append(nodes, node(fmt.Sprintf("n%d", i), fmt.Sprintf("z%d", i%3), 4000, 1000, 8000, 2000, i%5, true))
 	}
 	req := placement.DecisionRequest{AOProfile: &placement.AOProfileContext{Strategy: "Spread"}, NodeStats: nodes}
 	cfg := DefaultConfig()

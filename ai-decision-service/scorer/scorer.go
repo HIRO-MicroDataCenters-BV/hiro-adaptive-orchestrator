@@ -178,6 +178,9 @@ func Score(req placement.DecisionRequest, cfg Config) ([]placement.NodeScore, st
 	var bestNodeScore float64
 	var bestNodeName string
 	for _, nodeStat := range req.NodeStats {
+		if !nodeStat.Candidate {
+			continue // not a target; rebalance requests list it only so the decider sees every pod's node
+		}
 		var score float64
 		util, ok := utilAfter(nodeStat, pod, resources)
 		if !ok {
