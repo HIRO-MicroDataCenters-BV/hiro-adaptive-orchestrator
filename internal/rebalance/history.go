@@ -43,6 +43,7 @@ const (
 	ReasonContextError      HistoryReason = "ContextError"
 	ReasonBelowThreshold    HistoryReason = "BelowThreshold"
 	ReasonOutOfBounds       HistoryReason = "OutOfBounds"
+	ReasonUnusableTarget    HistoryReason = "UnusableTarget"
 	ReasonExternallyManaged HistoryReason = "ExternallyManaged"
 	ReasonRateLimited       HistoryReason = "RateLimited"
 	ReasonPDBBlocked        HistoryReason = "PDBBlocked"

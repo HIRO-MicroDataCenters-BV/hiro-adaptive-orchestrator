@@ -52,6 +52,16 @@ import (
 // imported directly).
 const testProfileIndexField = ".spec.applicationRef.namespacedName"
 
+// readyTargetNode is node-b, schedulable and Ready: a valid Move target.
+func readyTargetNode() *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-b"},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{
+			{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+		}},
+	}
+}
+
 // newTestReconciler builds a Reconciler wired to a fake client seeded with
 // the given objects, registering testProfileIndexField so profilesByIndexKey
 // works the same way it does against the real manager cache. Its AI agent
@@ -653,7 +663,7 @@ func TestReconciler_MoveAboveThresholdReachesEnacting(t *testing.T) {
 
 	profile := testProfileWithConditions(TriggerScheduled)
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
-	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, readyTargetNode())
 	// Short-circuit awaitReplacement's poll loop — no replacement pod will
 	// ever appear against a fake client, and this test only cares that
 	// dispatchMove reaches the enactor, not the eviction outcome itself.
@@ -676,6 +686,51 @@ func TestReconciler_MoveAboveThresholdReachesEnacting(t *testing.T) {
 	}
 }
 
+// TestReconciler_MoveToUnusableTargetRejected: a Move onto a missing, NotReady
+// or cordoned node is rejected before anything is evicted.
+func TestReconciler_MoveToUnusableTargetRejected(t *testing.T) {
+	notReady := readyTargetNode()
+	notReady.Status.Conditions[0].Status = corev1.ConditionFalse
+	cordoned := readyTargetNode()
+	cordoned.Spec.Unschedulable = true
+
+	cases := []struct {
+		name  string
+		nodes []client.Object
+		want  string
+	}{
+		{"missing", nil, "does not exist"},
+		{"not ready", []client.Object{notReady}, "is not Ready"},
+		{"cordoned", []client.Object{cordoned}, "is cordoned"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+					RequestID: "test", Action: orchestrationv1alpha1.RebalanceActionMove,
+					PodName: "app-a-1", TargetNode: "node-b", Improvement: 50, Reason: "better spread",
+				})
+			}))
+			defer server.Close()
+
+			profile := testProfileWithConditions(TriggerScheduled)
+			pod := testPod("app-a-1", "node-a", corev1.PodRunning)
+			objs := append([]client.Object{testDeployment(), pod, profile}, tc.nodes...)
+			r, c := newTestReconcilerWithAgent(t, server.URL, objs...)
+
+			if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			h := getProfile(t, c, profile.Name).Status.RebalancingStatus.History
+			if len(h) != 1 || h[0].Outcome != OutcomeRejected || h[0].Reason != string(ReasonUnusableTarget) ||
+				!strings.Contains(h[0].Message, tc.want) {
+				t.Errorf("history = %+v, want one Rejected UnusableTarget entry mentioning %q", h, tc.want)
+			}
+		})
+	}
+}
+
 // TestReconciler_MoveTimeoutWithClosedEnergyGateIsDeferred: awaitReplacement
 // times out (no replacement pod will ever appear against a fake client)
 // against an energy-aware workload whose EAO reports insufficient energy
@@ -694,7 +749,7 @@ func TestReconciler_MoveTimeoutWithClosedEnergyGateIsDeferred(t *testing.T) {
 	profile := testEnergyAwareProfile()
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
 	eao := testEAO("Waiting", "demo: energy window closed", new(false))
-	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao, readyTargetNode())
 	r.MoveActionTimeout = 50 * time.Millisecond
 
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
@@ -728,7 +783,7 @@ func TestReconciler_MoveTimeoutWithoutEnergyAwarenessStaysFailed(t *testing.T) {
 	profile := testProfileWithConditions(TriggerScheduled) // Awareness.Energy: false
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
 	eao := testEAO("Waiting", "demo: energy window closed", new(false))
-	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao, readyTargetNode())
 	r.MoveActionTimeout = 50 * time.Millisecond
 
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
@@ -759,7 +814,7 @@ func TestReconciler_MoveTimeoutWithOpenEnergyGateStaysFailed(t *testing.T) {
 	profile := testEnergyAwareProfile()
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
 	eao := testEAO("DeployImmediately", "window open", new(true))
-	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao, readyTargetNode())
 	r.MoveActionTimeout = 50 * time.Millisecond
 
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
@@ -795,7 +850,7 @@ func TestReconciler_MoveWrongNodeStaysFailedEvenWithClosedEnergyGate(t *testing.
 	profile := testEnergyAwareProfile()
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
 	eao := testEAO("Waiting", "demo: energy window closed", new(false))
-	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao, readyTargetNode())
 	r.MoveActionTimeout = 5 * time.Second
 
 	go func() {
@@ -840,7 +895,7 @@ func TestReconciler_MoveRateLimitedFailsCleanly(t *testing.T) {
 
 	profile := testProfileWithConditions(TriggerScheduled)
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
-	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, readyTargetNode())
 	r.MoveRateLimiter = rate.NewLimiter(rate.Limit(0), 0) // burst 0: every Wait fails instantly
 
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
@@ -883,7 +938,7 @@ func TestReconciler_MoveDryRunSkipsSideEffectsAndRateLimit(t *testing.T) {
 	profile := testProfileWithConditions(TriggerScheduled)
 	profile.Spec.Rebalancing.DryRun = true
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
-	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile)
+	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, readyTargetNode())
 	r.MoveRateLimiter = rate.NewLimiter(rate.Limit(0), 0) // burst 0: a real Wait would fail instantly
 
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {

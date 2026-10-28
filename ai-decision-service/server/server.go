@@ -68,6 +68,12 @@ func (s *AIDecisionService) handleDecision(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.log.Debug("Received decision request",
+		"requestId", req.RequestID,
+		"inputHash", inputHash(req),
+		"podName", req.Pod.Name,
+		"request", req,
+	)
 
 	// 2. Pick the flow: rebalance requests carry rebalanceContext, placement ones don't.
 	var resp any

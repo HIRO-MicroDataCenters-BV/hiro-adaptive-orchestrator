@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -64,6 +65,7 @@ func (b *DecisionContextBuilder) buildNodeStats(
 	nodes []*corev1.Node,
 	appRef orchestrationv1alpha1.ApplicationReference,
 	pod *corev1.Pod,
+	candidate bool,
 ) []NodeStat {
 	logger := logf.FromContext(ctx)
 
@@ -77,6 +79,7 @@ func (b *DecisionContextBuilder) buildNodeStats(
 	stats := make([]NodeStat, 0, len(nodes))
 	for _, node := range nodes {
 		stat := describeNode(node, now)
+		stat.Candidate = candidate
 		stat.ImagesPresent = imagesPresent(node, podImages)
 
 		podList := &corev1.PodList{}
@@ -88,6 +91,44 @@ func (b *DecisionContextBuilder) buildNodeStats(
 		stats = append(stats, stat)
 	}
 	return stats
+}
+
+// nonCandidateNodeStats lists, with candidate=false, the nodes hosting the app's pods that
+// aren't candidates (NotReady, untolerated taint); a node that no longer exists is sent by name only.
+func (b *DecisionContextBuilder) nonCandidateNodeStats(
+	ctx context.Context,
+	pods []corev1.Pod,
+	candidates []*corev1.Node,
+	appRef orchestrationv1alpha1.ApplicationReference,
+) []NodeStat {
+	logger := logf.FromContext(ctx)
+	seen := make(map[string]bool, len(candidates))
+	for _, n := range candidates {
+		seen[n.Name] = true
+	}
+
+	var nodes []*corev1.Node
+	var gone []NodeStat
+	for i := range pods {
+		name := pods[i].Spec.NodeName
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		node := &corev1.Node{}
+		if err := b.client.Get(ctx, types.NamespacedName{Name: name}, node); err != nil {
+			if !apierrors.IsNotFound(err) {
+				logger.Info("builder: node unavailable, sent by name only", "node", name, "err", err)
+			}
+			gone = append(gone, NodeStat{Name: name, ObservedAt: metav1.Now()})
+			continue
+		}
+		nodes = append(nodes, node)
+	}
+	if len(nodes) == 0 {
+		return gone
+	}
+	return append(b.buildNodeStats(ctx, nodes, appRef, nil, false), gone...)
 }
 
 func (b *DecisionContextBuilder) appPodUIDs(

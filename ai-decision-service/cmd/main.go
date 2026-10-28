@@ -70,6 +70,14 @@ func loadConfig() (server.Config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	cfg.RebalanceConfig.EAOStaleAfter, err = envDuration("AI_DECISION_SERVICE_REBALANCE_EAO_STALE_AFTER", cfg.RebalanceConfig.EAOStaleAfter)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.RebalanceConfig.FlipMoveActionWindow, err = envDuration("AI_DECISION_SERVICE_REBALANCE_FLIP_MOVE_ACTION_WINDOW", cfg.RebalanceConfig.FlipMoveActionWindow)
+	if err != nil {
+		return cfg, err
+	}
 	return cfg, validateConfig(cfg)
 }
 
@@ -91,6 +99,9 @@ func validateConfig(cfg server.Config) error {
 	}
 	if err := cfg.ScorerConfig.Validate(); err != nil {
 		return fmt.Errorf("invalid scorer config: %w", err)
+	}
+	if err := cfg.RebalanceConfig.Validate(); err != nil {
+		return fmt.Errorf("invalid rebalance config: %w", err)
 	}
 	return nil
 }

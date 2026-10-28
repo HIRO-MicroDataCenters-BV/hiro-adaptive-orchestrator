@@ -60,8 +60,8 @@ type DecisionRequest struct {
 	// nil when energy awareness is disabled or E.A.O data is unavailable.
 	EAOProfile *EAOProfileContext `json:"eaoProfile,omitempty"`
 
-	// NodeStats is the candidate list: one entry per node the decider may pick
-	// (scheduler-filtered for placement, Ready and tolerated for rebalance).
+	// NodeStats lists every candidate node; rebalance also adds the app's other nodes
+	// (e.g. NotReady) with candidate=false. Only candidates may be picked.
 	NodeStats []NodeStat `json:"nodeStats"`
 
 	// RebalanceContext is populated only for rebalance evaluations (the
@@ -160,10 +160,14 @@ type RebalancePDB struct {
 	AllowedDisruptions int32  `json:"allowedDisruptions"`
 }
 
-// NodeStat is a compact, decision-relevant view of one candidate node.
+// NodeStat is a compact, decision-relevant view of one node.
 // Null pointer fields mean unknown, never zero.
 type NodeStat struct {
-	Name   string            `json:"name"`
+	Name string `json:"name"`
+
+	// Candidate means the node may be picked; its health is in Conditions.
+	Candidate bool `json:"candidate"`
+
 	Labels map[string]string `json:"labels,omitempty"`
 
 	Taints        []corev1.Taint    `json:"taints,omitempty"`

@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -201,6 +203,18 @@ func dispatchMove(
 		return
 	}
 
+	// Last safety net: never pin a replacement pod to a node it can't run on.
+	if why := r.unusableTarget(ctx, resp.TargetNode); why != "" {
+		reason := fmt.Sprintf("target node %s %s: %s", resp.TargetNode, why, resp.Reason)
+		metrics.RebalanceGuardrailRejectionsTotal.WithLabelValues(string(resp.Action), metrics.GuardrailTarget).Inc()
+		if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
+			TransitionOptions{DecidedBy: resp.DecidedBy, Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown,
+				Reason: ReasonUnusableTarget, Change: proposedMove(resp)}); err != nil {
+			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected, unusable target) failed", "profile", profile.Name)
+		}
+		return
+	}
+
 	details := fmt.Sprintf("podName=%s targetNode=%s improvement=%.2f", resp.PodName, resp.TargetNode, resp.Improvement)
 	decided, err := r.Writer.Transition(ctx, key, StateDecided, resp.Reason,
 		TransitionOptions{DecidedBy: resp.DecidedBy, Action: resp.Action, Details: details})
@@ -292,6 +306,26 @@ func rolloutCause(outcome orchestrationv1alpha1.RebalanceOutcome, done HistoryRe
 // proposedMove is the Move the AI proposed, for history entries of Moves that never ran.
 func proposedMove(resp *placementserver.RebalanceDecisionResponse) orchestrationv1alpha1.HistoryEntry {
 	return orchestrationv1alpha1.HistoryEntry{PodName: resp.PodName, TargetNode: resp.TargetNode}
+}
+
+// unusableTarget says why a Move can't land on nodeName (missing, NotReady, cordoned), or "" if it can.
+func (r *Reconciler) unusableTarget(ctx context.Context, nodeName string) string {
+	node := &corev1.Node{}
+	if err := r.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "does not exist"
+		}
+		return fmt.Sprintf("could not be read (%v)", err)
+	}
+	if node.Spec.Unschedulable {
+		return "is cordoned"
+	}
+	for _, c := range node.Status.Conditions {
+		if c.Type == corev1.NodeReady && c.Status == corev1.ConditionTrue {
+			return ""
+		}
+	}
+	return "is not Ready"
 }
 
 // dispatchMoveDryRun completes a Move that already cleared every guardrail

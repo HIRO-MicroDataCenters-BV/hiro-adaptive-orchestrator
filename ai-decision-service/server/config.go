@@ -3,6 +3,7 @@ package server
 import (
 	"time"
 
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/rebalance"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/scorer"
 )
 
@@ -17,21 +18,23 @@ const (
 
 // Config holds every tunable of the service.
 type Config struct {
-	Port         int
-	HealthPath   string
-	DecisionPath string
-	ReadTimeout  time.Duration
-	MaxBodyBytes int64
-	ScorerConfig scorer.Config
+	Port            int
+	HealthPath      string
+	DecisionPath    string
+	ReadTimeout     time.Duration
+	MaxBodyBytes    int64
+	ScorerConfig    scorer.Config
+	RebalanceConfig rebalance.Config
 }
 
 func DefaultConfig() Config {
 	return Config{
-		Port:         DefaultPort,
-		HealthPath:   DefaultHealthPath,
-		DecisionPath: DefaultDecisionPath,
-		ReadTimeout:  DefaultReadTimeout,
-		MaxBodyBytes: DefaultMaxBodyBytes,
-		ScorerConfig: scorer.DefaultConfig(),
+		Port:            DefaultPort,
+		HealthPath:      DefaultHealthPath,
+		DecisionPath:    DefaultDecisionPath,
+		ReadTimeout:     DefaultReadTimeout,
+		MaxBodyBytes:    DefaultMaxBodyBytes,
+		ScorerConfig:    scorer.DefaultConfig(),
+		RebalanceConfig: rebalance.DefaultConfig(),
 	}
 }

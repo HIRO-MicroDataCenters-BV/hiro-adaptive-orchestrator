@@ -157,7 +157,7 @@ func (b *DecisionContextBuilder) Build(
 		}
 	}
 
-	nodeStats := b.buildNodeStats(ctx, nodes, profile.Spec.ApplicationRef, pod)
+	nodeStats := b.buildNodeStats(ctx, nodes, profile.Spec.ApplicationRef, pod, true)
 
 	// -------------------------------------------------------------------------
 	// Step 4: Assemble the full DecisionRequest.
@@ -520,7 +520,8 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 		}
 	}
 
-	nodeStats := b.buildNodeStats(ctx, nodes, profile.Spec.ApplicationRef, nil)
+	nodeStats := b.buildNodeStats(ctx, nodes, profile.Spec.ApplicationRef, nil, true)
+	nodeStats = append(nodeStats, b.nonCandidateNodeStats(ctx, pods, nodes, profile.Spec.ApplicationRef)...)
 
 	req := &DecisionRequest{
 		RequestID:  decisionID,

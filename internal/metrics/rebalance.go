@@ -31,6 +31,7 @@ import (
 const (
 	GuardrailThreshold = "threshold"
 	GuardrailBounds    = "bounds"
+	GuardrailTarget    = "target"
 )
 
 // Result label values for RebalanceAIRequestsTotal.
