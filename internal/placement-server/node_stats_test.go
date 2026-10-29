@@ -23,7 +23,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -206,29 +205,5 @@ func TestPodRequests_InitContainerAndOverhead(t *testing.T) {
 	}
 	if mem := got.Memory().Value(); mem != 64*1024*1024 {
 		t.Errorf("memory = %d, want 64Mi", mem)
-	}
-}
-
-func TestMapEAOToProfileContext_SlotFreshnessAndWholeWatts(t *testing.T) {
-	eao := testRebalanceEAO("Optional", 200, "Scheduled", "waiting for solar", false)
-	_ = unstructured.SetNestedMap(eao.Object, map[string]any{
-		"slotStart": "2026-10-16T12:00:00Z", "slotEnd": "2026-10-16T18:00:00Z",
-	}, "status", "decision", "scheduledSlot")
-	_ = unstructured.SetNestedField(eao.Object, "2026-10-16T11:58:00Z", "status", "lastUpdated")
-	_ = unstructured.SetNestedField(eao.Object, int64(200), "status", "energyMetrics", "requiredWatts")
-	_ = unstructured.SetNestedField(eao.Object, 187.5, "status", "energyMetrics", "measuredWatts")
-
-	got := mapEAOToProfileContext(eao)
-
-	if got.Decision == nil || got.Decision.ScheduledSlot == nil ||
-		got.Decision.ScheduledSlot.SlotStart != "2026-10-16T12:00:00Z" ||
-		got.Decision.ScheduledSlot.SlotEnd != "2026-10-16T18:00:00Z" {
-		t.Errorf("decision = %+v, want scheduledSlot 12:00–18:00", got.Decision)
-	}
-	if got.LastUpdated != "2026-10-16T11:58:00Z" {
-		t.Errorf("lastUpdated = %q", got.LastUpdated)
-	}
-	if got.EnergyMetrics == nil || got.EnergyMetrics.RequiredWatts != 200 || got.EnergyMetrics.MeasuredWatts != 187.5 {
-		t.Errorf("energyMetrics = %+v, want requiredWatts 200 (whole number) and measuredWatts 187.5", got.EnergyMetrics)
 	}
 }

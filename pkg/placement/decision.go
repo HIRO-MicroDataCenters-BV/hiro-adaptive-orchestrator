@@ -390,7 +390,22 @@ type EAOProfileContext struct {
 	// LastUpdated is the EAO's last reconcile time (RFC 3339) — the field to
 	// judge freshness by, not Decision.NextEvaluationTime.
 	LastUpdated string `json:"lastUpdated,omitempty"`
+
+	// Verdict is Decision.Action in this repo's terms.
+	Verdict EAOVerdict `json:"verdict"`
+
+	// HoldUntil is when a Hold ends (the slot start); nil when unknown.
+	HoldUntil *metav1.Time `json:"holdUntil,omitempty"`
 }
+
+// EAOVerdict is what the EAO's decision means for running the workload now.
+type EAOVerdict string
+
+const (
+	EAOVerdictRunNow  EAOVerdict = "RunNow"  // may run now
+	EAOVerdictHold    EAOVerdict = "Hold"    // no energy now; wait until HoldUntil
+	EAOVerdictUnknown EAOVerdict = "Unknown" // no usable decision: missing, an EAO failure, or an unmapped value
+)
 
 // EAODecision is the scheduling decision from the EnergyAwareOrchestrator.
 type EAODecision struct {

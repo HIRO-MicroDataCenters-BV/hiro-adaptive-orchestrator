@@ -96,6 +96,10 @@ hiro-operator:
     EAO_GROUP: eas.hiro.io
     EAO_VERSION: v1
     EAO_KIND: EnergyAwareOrchestration
+    # Which EAO decision.action values mean run now / hold (comma-separated);
+    # anything else (e.g. Waiting, an EAO failure) is an Unknown verdict.
+    EAO_RUN_NOW_ACTIONS: DeployImmediately
+    EAO_HOLD_ACTIONS: Scheduled,Delayed
     # Scheduler extender HTTP paths.
     EXTENDER_FILTER_PATH: /extender/filter
     EXTENDER_PRIORITIZE_PATH: /extender/prioritize

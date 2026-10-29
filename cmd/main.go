@@ -130,6 +130,18 @@ func parseQuantityEnv(name string) resource.Quantity {
 	return q
 }
 
+// parseListEnv returns nil (letting the caller apply its own default) when name is
+// unset, or its comma-separated items, trimmed, with empty ones dropped.
+func parseListEnv(name string) []string {
+	var items []string
+	for item := range strings.SplitSeq(os.Getenv(name), ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
@@ -398,11 +410,26 @@ func main() {
 		"schedulerName", hiroSchedulerName,
 	)
 
+	// Which EAO decision.action values mean run now and which mean hold.
+	eaoVerdict := placementserver.DefaultEAOVerdictConfig()
+	if v := parseListEnv("EAO_RUN_NOW_ACTIONS"); v != nil {
+		eaoVerdict.RunNowActions = v
+	}
+	if v := parseListEnv("EAO_HOLD_ACTIONS"); v != nil {
+		eaoVerdict.HoldActions = v
+	}
+	if err := eaoVerdict.Validate(); err != nil {
+		setupLog.Error(err, "invalid EAO action mapping")
+		os.Exit(1)
+	}
+	setupLog.Info("EAO action mapping configured",
+		"runNow", eaoVerdict.RunNowActions, "hold", eaoVerdict.HoldActions)
+
 	contextBuilder := placementserver.NewDecisionContextBuilder(
 		mgr.GetClient(),
 		controller.ProfileByAppRefIndex,
 		eaoGVK,
-	)
+	).WithEAOVerdict(eaoVerdict)
 
 	// Register the pod scheduler MutatingAdmissionWebhook.
 	// Sets spec.schedulerName automatically on pods governed by an OrchestrationProfile,

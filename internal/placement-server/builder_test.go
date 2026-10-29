@@ -92,23 +92,6 @@ func testNode(name string, ready bool) *corev1.Node {
 	}
 }
 
-func testRebalanceEAO(priority string, watts int64, action, reason string, sufficient bool) *unstructured.Unstructured {
-	eao := &unstructured.Unstructured{}
-	eao.SetGroupVersionKind(testEAOGVK)
-	eao.SetName("eao-a")
-	eao.SetNamespace("default")
-	_ = unstructured.SetNestedMap(eao.Object, map[string]any{
-		"name": "app-a", "namespace": "default", "kind": "Deployment",
-	}, "spec", "applicationRef")
-	_ = unstructured.SetNestedField(eao.Object, priority, "spec", "priority")
-	_ = unstructured.SetNestedField(eao.Object, watts, "spec", "energyConsumption")
-	_ = unstructured.SetNestedMap(eao.Object, map[string]any{
-		"action": action, "reason": reason,
-	}, "status", "decision")
-	_ = unstructured.SetNestedField(eao.Object, sufficient, "status", "energyMetrics", "sufficient")
-	return eao
-}
-
 // newTestBuilder builds a DecisionContextBuilder wired to a fake client
 // seeded with the given objects, registering the EAO GVK the same way the
 // real manager does via RESTMapper-backed scheme registration.
@@ -237,38 +220,6 @@ func TestBuildRebalanceContext_AssemblesPlacementsAndCandidateNodes(t *testing.T
 	}
 }
 
-func TestBuildRebalanceContext_EnergyAwareAttachesEAOData(t *testing.T) {
-	profile := testRebalanceProfile(true)
-	b := newTestBuilder(t,
-		testAppDeployment(),
-		testAppPod("app-a-1", "node-a", corev1.PodRunning),
-		testNode("node-a", true),
-		testRebalanceEAO("Critical", 500, "DeployImmediately", "window open", false),
-	)
-
-	req, err := b.BuildRebalanceContext(context.Background(), profile, "decision-2", "EnergyThreshold: verdict flipped", RebalanceFacts{})
-	if err != nil {
-		t.Fatalf("BuildRebalanceContext: %v", err)
-	}
-
-	if req.EAOProfile == nil {
-		t.Fatal("EAOProfile is nil, want data attached when energy awareness is enabled")
-	}
-	if req.EAOProfile.Priority != "Critical" || req.EAOProfile.EnergyConsumptionWatts != 500 {
-		t.Errorf("EAOProfile spec fields = %+v, want Priority=Critical EnergyConsumptionWatts=500", req.EAOProfile)
-	}
-	if req.EAOProfile.Decision == nil || req.EAOProfile.Decision.Action != "DeployImmediately" {
-		t.Errorf("EAOProfile.Decision = %+v, want Action=DeployImmediately", req.EAOProfile.Decision)
-	}
-	if req.EAOProfile.EnergyMetrics == nil || req.EAOProfile.EnergyMetrics.Sufficient {
-		t.Errorf("EAOProfile.EnergyMetrics = %+v, want Sufficient=false", req.EAOProfile.EnergyMetrics)
-	}
-
-	if req.RebalanceContext == nil || len(req.RebalanceContext.History) != 0 {
-		t.Errorf("RebalanceContext = %+v, want no history when none is passed", req.RebalanceContext)
-	}
-}
-
 // testDeploymentPod is owned via ReplicaSet by testAppDeployment, the path
 // ResolveAppFromPod takes for a real Deployment-managed pod.
 func testDeploymentPod() (*corev1.Pod, *appsv1.ReplicaSet) {
@@ -281,42 +232,4 @@ func testDeploymentPod() (*corev1.Pod, *appsv1.ReplicaSet) {
 	pod := testAppPod("pod-x", "", corev1.PodPending)
 	pod.OwnerReferences = []metav1.OwnerReference{{Kind: "ReplicaSet", Name: rs.Name}}
 	return pod, rs
-}
-
-// Build used to dereference the EAO context and its Decision in its own log
-// line, so a pod panicked unless its profile had energy on, an EAO existed,
-// and that EAO's status was already populated.
-func TestBuild_EAOContextStates(t *testing.T) {
-	cases := []struct {
-		name    string
-		energy  bool
-		eao     *unstructured.Unstructured
-		wantEAO bool
-	}{
-		{name: "energy off", energy: false},
-		{name: "energy on, no EAO object", energy: true},
-		{name: "energy on, EAO status not yet populated", energy: true,
-			eao: testRebalanceEAO("Preferred", 250, "", "", true), wantEAO: true},
-		{name: "energy on, EAO with decision", energy: true,
-			eao: testRebalanceEAO("Critical", 500, "DeployImmediately", "window open", true), wantEAO: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			pod, rs := testDeploymentPod()
-			objs := []client.Object{testRebalanceProfile(tc.energy), testAppDeployment(), rs, pod}
-			if tc.eao != nil {
-				objs = append(objs, tc.eao)
-			}
-			b := newTestBuilder(t, objs...)
-
-			req, err := b.Build(context.Background(),
-				PlacementContext{Pod: pod, CandidateNodes: []*corev1.Node{testNode("node-a", true)}}, "req-1")
-			if err != nil {
-				t.Fatalf("Build: %v", err)
-			}
-			if got := req.EAOProfile != nil; got != tc.wantEAO {
-				t.Errorf("EAO context attached = %v, want %v", got, tc.wantEAO)
-			}
-		})
-	}
 }

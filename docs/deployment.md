@@ -295,6 +295,8 @@ Every parameter can be set as an environment variable before calling any deploy 
 | `EAO_GROUP` | `eas.hiro.io` | API group of the `EnergyAwareOrchestration` CRD |
 | `EAO_VERSION` | `v1` | API version |
 | `EAO_KIND` | `EnergyAwareOrchestration` | Kind name |
+| `EAO_RUN_NOW_ACTIONS` | `DeployImmediately` | EAO `decision.action` values that mean the workload may run now (verdict `RunNow`) |
+| `EAO_HOLD_ACTIONS` | `Scheduled,Delayed` | Values that mean no energy now (verdict `Hold`, until the slot start). Anything in neither list is `Unknown` and logged. A value in both lists stops the operator at startup |
 
 #### Operator — Rebalance Engine
 

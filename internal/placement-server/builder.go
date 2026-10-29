@@ -22,7 +22,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -63,6 +62,15 @@ type DecisionContextBuilder struct {
 	// eaoGVK is the GroupVersionKind used to list EnergyAwareOrchestration resources.
 	// Configurable via EAO_GROUP / EAO_VERSION / EAO_KIND environment variables.
 	eaoGVK schema.GroupVersionKind
+
+	// eaoVerdict maps the EAO's decision.action values onto EAOVerdict.
+	eaoVerdict EAOVerdictConfig
+}
+
+// WithEAOVerdict replaces the default EAO action mapping.
+func (b *DecisionContextBuilder) WithEAOVerdict(cfg EAOVerdictConfig) *DecisionContextBuilder {
+	b.eaoVerdict = cfg
+	return b
 }
 
 // NewDecisionContextBuilder creates a new builder.
@@ -79,6 +87,7 @@ func NewDecisionContextBuilder(
 		client:            c,
 		profileIndexField: profileIndexField,
 		eaoGVK:            eaoGVK,
+		eaoVerdict:        DefaultEAOVerdictConfig(),
 	}
 }
 
@@ -204,18 +213,6 @@ func (b *DecisionContextBuilder) Build(
 	return req, nil
 }
 
-// observeEAOFetch records one EAO lookup; nil with no error means none exists.
-func observeEAOFetch(caller string, eao *EAOProfileContext, err error) {
-	result := metrics.EAOResultFound
-	switch {
-	case err != nil:
-		result = metrics.EAOResultError
-	case eao == nil:
-		result = metrics.EAOResultNotFound
-	}
-	metrics.PlacementEAOFetchTotal.WithLabelValues(caller, result).Inc()
-}
-
 // =============================================================================
 // Profile lookup
 // =============================================================================
@@ -314,148 +311,6 @@ func buildCurrentPlacement(
 		NodeName: pod.Spec.NodeName, // empty if unscheduled
 		Phase:    string(pod.Status.Phase),
 	}
-}
-
-// =============================================================================
-// EAOProfileContext fetcher
-// =============================================================================
-
-// fetchEAOProfile finds the EnergyAwareOrchestration CRD that governs the
-// pod's application and maps its spec/status into an EAOProfileContext.
-//
-// Only called when profile.Awareness.Energy == true.
-// Returns nil (no error) when no matching EAO is found.
-func (b *DecisionContextBuilder) fetchEAOProfile(
-	ctx context.Context,
-	pod *corev1.Pod,
-) (*EAOProfileContext, error) {
-	logger := logf.FromContext(ctx)
-
-	logger.Info("builder: fetching EAO profile",
-		"pod", pod.Name,
-		"namespace", pod.Namespace,
-	)
-
-	eao, err := b.fetchEAOForPod(ctx, pod)
-	if err != nil {
-		return nil, err
-	}
-	if eao == nil {
-		return nil, nil
-	}
-
-	return mapEAOToProfileContext(eao), nil
-}
-
-// fetchEAOForPod resolves the pod's root application via ResolveAppFromPod,
-// then finds the EnergyAwareOrchestration CRD whose spec.applicationRef
-// matches that application (utils.FindEAOForApp — shared with the rebalance
-// engine's trigger evaluator and rebalance context builder, which already
-// know their ApplicationReference directly and don't need this pod-based
-// resolution step).
-//
-// Returns nil (no error) when no matching EAO exists.
-func (b *DecisionContextBuilder) fetchEAOForPod(
-	ctx context.Context,
-	pod *corev1.Pod,
-) (*unstructured.Unstructured, error) {
-	logger := logf.FromContext(ctx)
-
-	appName, appNamespace, appKind := utils.ResolveAppFromPod(ctx, b.client, pod)
-	if appName == "" {
-		logger.V(1).Info("builder: no workload owner, skipping EAO lookup",
-			"pod", pod.Name,
-			"namespace", pod.Namespace,
-		)
-		return nil, nil
-	}
-
-	appRef := orchestrationv1alpha1.ApplicationReference{
-		Name: appName, Namespace: appNamespace, Kind: orchestrationv1alpha1.ApplicationKind(appKind),
-	}
-	eao, err := utils.FindEAOForApp(ctx, b.client, b.eaoGVK, appRef)
-	if err != nil {
-		return nil, err
-	}
-	if eao == nil {
-		logger.V(1).Info("builder: no EAO found for application",
-			"pod", pod.Name, "appName", appName, "appNamespace", appNamespace, "appKind", appKind,
-		)
-		return nil, nil
-	}
-
-	logger.V(1).Info("builder: EAO found for pod",
-		"eao", eao.GetName(), "eaoNamespace", eao.GetNamespace(),
-		"appName", appName, "appNamespace", appNamespace, "appKind", appKind,
-	)
-	return eao, nil
-}
-
-// mapEAOToProfileContext maps the relevant spec and status fields of an
-// EnergyAwareOrchestration resource into an EAOProfileContext.
-func mapEAOToProfileContext(eao *unstructured.Unstructured) *EAOProfileContext {
-	ctx := &EAOProfileContext{}
-
-	// --- spec fields ---
-	ctx.Priority, _, _ = unstructured.NestedString(eao.Object, "spec", "priority")
-
-	if watts, found, _ := unstructured.NestedInt64(eao.Object, "spec", "energyConsumption"); found {
-		ctx.EnergyConsumptionWatts = watts
-	}
-
-	// --- status.decision ---
-	action, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "action")
-	reason, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "reason")
-	nextEval, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "nextEvaluationTime")
-	if action != "" {
-		ctx.Decision = &EAODecision{
-			Action:             action,
-			Reason:             reason,
-			NextEvaluationTime: nextEval,
-		}
-		slotStart, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "scheduledSlot", "slotStart")
-		slotEnd, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "scheduledSlot", "slotEnd")
-		if slotStart != "" || slotEnd != "" {
-			ctx.Decision.ScheduledSlot = &EAOScheduledSlot{SlotStart: slotStart, SlotEnd: slotEnd}
-		}
-	}
-
-	ctx.LastUpdated, _, _ = unstructured.NestedString(eao.Object, "status", "lastUpdated")
-
-	// --- status.energyMetrics ---
-	requiredWatts, foundRequired := nestedNumber(eao.Object, "status", "energyMetrics", "requiredWatts")
-	sufficient, foundSufficient, _ := unstructured.NestedBool(eao.Object, "status", "energyMetrics", "sufficient")
-	if foundRequired || foundSufficient {
-		ctx.EnergyMetrics = &EAOEnergyMetrics{
-			RequiredWatts: requiredWatts,
-			Sufficient:    sufficient,
-		}
-		ctx.EnergyMetrics.MeasuredWatts, _ = nestedNumber(eao.Object, "status", "energyMetrics", "measuredWatts")
-		ctx.EnergyMetrics.CurrentSlotAvailableWatts, _ = nestedNumber(
-			eao.Object, "status", "energyMetrics", "currentSlotAvailableWatts",
-		)
-		ctx.EnergyMetrics.CurrentSlotConsumedWatts, _ = nestedNumber(
-			eao.Object, "status", "energyMetrics", "currentSlotConsumedWatts",
-		)
-	}
-
-	return ctx
-}
-
-// nestedNumber reads a JSON number that unstructured may have decoded as
-// int64 (whole values) or float64; NestedFloat64 alone rejects the former.
-func nestedNumber(obj map[string]any, fields ...string) (float64, bool) {
-	v, found, err := unstructured.NestedFieldNoCopy(obj, fields...)
-	if !found || err != nil {
-		return 0, false
-	}
-	switch n := v.(type) {
-	case float64:
-		return n, true
-	case int64:
-		return float64(n), true
-	}
-	return 0, false
 }
 
 // =============================================================================
@@ -615,23 +470,6 @@ func toleratesAll(ctx context.Context, taints []corev1.Taint, tolerations []core
 	return true
 }
 
-// fetchEAOProfileForApp is fetchEAOProfile's rebalance-side counterpart: the
-// caller already knows the ApplicationReference directly (from the profile
-// being rebalanced), so no pod-based resolution is needed.
-func (b *DecisionContextBuilder) fetchEAOProfileForApp(
-	ctx context.Context,
-	appRef orchestrationv1alpha1.ApplicationReference,
-) (*EAOProfileContext, error) {
-	eao, err := utils.FindEAOForApp(ctx, b.client, b.eaoGVK, appRef)
-	if err != nil {
-		return nil, err
-	}
-	if eao == nil {
-		return nil, nil
-	}
-	return mapEAOToProfileContext(eao), nil
-}
-
 // buildCurrentPlacements converts every pod of the application into a
 // PodPlacement — the full layout snapshot a rebalance decision needs,
 // unlike buildCurrentPlacement's single-pod use for initial placement.
@@ -677,51 +515,6 @@ func quantityString(list corev1.ResourceList, name corev1.ResourceName) string {
 		return ""
 	}
 	return q.String()
-}
-
-// =============================================================================
-// Energy gate check
-// =============================================================================
-
-// CheckEnergyGate checks whether the pod's governing OrchestrationProfile has
-// energy awareness enabled and, if so, whether the EAO reports sufficient
-// energy for scheduling.
-//
-// Called by the scheduler extender /filter handler once per pod scheduling event.
-// Returns Allowed=true when:
-//   - no profile governs the pod (unmanaged pods are never gated)
-//   - energy awareness is disabled in the profile
-//   - EAO data is unavailable (best-effort; scheduling is not blocked)
-//   - EAO energy metrics indicate sufficient energy
-func (b *DecisionContextBuilder) CheckEnergyGate(
-	ctx context.Context,
-	pod *corev1.Pod,
-) (EnergyGateResponse, error) {
-	profile, err := b.FindProfileForPod(ctx, pod)
-	if err != nil {
-		// Allow on lookup error -- do not block scheduling
-		return EnergyGateResponse{Allowed: true}, err
-	}
-	if profile == nil || !profile.Spec.Placement.Awareness.Energy {
-		return EnergyGateResponse{Allowed: true}, nil
-	}
-
-	eaoProfile, err := b.fetchEAOProfile(ctx, pod)
-	observeEAOFetch(metrics.EAOCallerFilter, eaoProfile, err)
-	if err != nil || eaoProfile == nil {
-		// EAO data unavailable -- allow scheduling (best-effort energy gating)
-		return EnergyGateResponse{Allowed: true}, nil
-	}
-
-	if eaoProfile.EnergyMetrics != nil && !eaoProfile.EnergyMetrics.Sufficient {
-		reason := "insufficient energy available"
-		if eaoProfile.Decision != nil && eaoProfile.Decision.Reason != "" {
-			reason = eaoProfile.Decision.Reason
-		}
-		return EnergyGateResponse{Allowed: false, Reason: reason}, nil
-	}
-
-	return EnergyGateResponse{Allowed: true}, nil
 }
 
 // =============================================================================
