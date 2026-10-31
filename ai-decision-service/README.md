@@ -14,7 +14,7 @@ It is a separate Go module (own `go.mod`), like `scheduler-plugin/`. It imports 
 | Flow | Answer | `decidedBy` |
 |------|--------|-------------|
 | Placement | Scores each node 0–100 with the profile's strategy (below) | `scorer` |
-| Rebalance | `NoOp` (rules not written yet) | `rules` |
+| Rebalance | Moves a pod off a down node to the best healthy node; otherwise `NoOp`, listing what is blocked | `rules` (`fallback` if the answer fails validation) |
 
 ### Placement scorer (`scorer/`)
 
@@ -30,6 +30,20 @@ Utilisation is worked out per resource **after** placing the pod: `(requested + 
 - A node with unknown usage gets the neutral unknown score, and is never dropped.
 - The awareness flags pick the resources (CPU, memory). None set means both.
 - The reason names the best node, e.g. `Balanced: node-2 best (score 74)`.
+
+### Rebalance (`rebalance/`)
+
+It decides from facts in the request (node conditions, history, PDB, EAO), not from the trigger.
+
+1. **Gates** block what isn't safe now:
+   - Cooldown blocks every change.
+   - Externally managed replicas or resources block that action.
+   - A PDB with no disruptions left, or a fresh EAO `Hold`, blocks Move.
+   - A recent Move blocks taking a pod off the node it filled (unless that node is now at risk), and blocks moving one back to the node it emptied.
+2. **Rule:** a pod on a down node (`Ready` not `True`) moves to the best healthy candidate. Leaving a down node skips the gates; the eviction API still enforces the PDB.
+3. **Validate** checks the answer against the request and the gates. A failed check sends `NoOp` with `decidedBy: fallback`.
+
+A node is at risk when it is cordoned or has a risk condition (below); it is never a Move target.
 
 Each answer writes one JSON log line: `requestId`, `flow`, `decidedBy`, `latencyMilliSec`, `inputHash` (same input, same hash), `nodes` and the response.
 
@@ -60,6 +74,10 @@ Every setting has a default (`server/config.go`) and an env var:
 | `AI_DECISION_SERVICE_SCORER_SPREAD_BALANCED_WEIGHT` | `0.1` | Spread: weight of the Balanced tie-break |
 | `AI_DECISION_SERVICE_SCORER_ZONE_LABEL` | `topology.kubernetes.io/zone` | Node label that names its zone |
 | `AI_DECISION_SERVICE_SCORER_UNKNOWN_SCORE` | `50` | Score for a node whose usage is unknown |
+| `AI_DECISION_SERVICE_REBALANCE_EAO_STALE_AFTER` | `5m` | EAO data older than this is ignored |
+| `AI_DECISION_SERVICE_REBALANCE_FLIP_MOVE_ACTION_WINDOW` | `30m` | How long a Move blocks churn and ping-pong moves |
+| `AI_DECISION_SERVICE_REBALANCE_RISK_CONDITIONS` | `MemoryPressure,DiskPressure,PIDPressure,NetworkUnavailable` | Node conditions that mark a node at risk when `True` |
+| `AI_DECISION_SERVICE_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`; `debug` adds the full request body |
 
 An invalid value stops the service at startup with a clear error.
 

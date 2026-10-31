@@ -322,6 +322,9 @@ aiDecisionService:
     pullPolicy: IfNotPresent
   # Extra AI_DECISION_SERVICE_* settings; the port is set from `port` above.
   config:
+    # Log level: debug, info, warn or error. debug adds the full request body.
+    AI_DECISION_SERVICE_LOG_LEVEL: debug
+
     AI_DECISION_SERVICE_READ_TIMEOUT: 5s
     AI_DECISION_SERVICE_MAX_BODY_BYTES: "5242880"
 

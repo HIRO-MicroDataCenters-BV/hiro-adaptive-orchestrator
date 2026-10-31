@@ -520,6 +520,7 @@ print_summary() {
   fi
   if [ "$USE_AI_DECISION_SERVICE" = "true" ]; then
     echo -e "\033[32m    AI Decision Service: deployed  (service/$AI_DS_SERVICE_NAME:$AI_DS_PORT)\033[0m"
+    echo -e "\033[32m      └─ decision log: kubectl logs -n $HELM_NAMESPACE deploy/$AI_DS_SERVICE_NAME -f\033[0m"
   else
     echo -e "\033[33m    AI Decision Service: not deployed\033[0m"
   fi
@@ -568,12 +569,15 @@ print_port_forward_guide() {
   [ -n "$operator_metrics_svc" ] && echo "  pkill -f 'port-forward.*svc/$operator_metrics_svc' || true"
   [ -n "$scheduler_metrics_svc" ] && echo "  pkill -f 'port-forward.*svc/$scheduler_metrics_svc' || true"
   [ "$USE_MOCK_AGENT" = "true" ] && echo "  pkill -f 'port-forward.*svc/mock-decision-agent' || true"
+  [ "$USE_AI_DECISION_SERVICE" = "true" ] && echo "  pkill -f 'port-forward.*svc/$AI_DS_SERVICE_NAME' || true"
   echo ""
   echo "  # 2. Start the port-forwards:"
   [ -n "$placement_svc" ] && echo "  kubectl port-forward -n $HELM_NAMESPACE svc/$placement_svc 18090:8090 &"
   [ -n "$operator_metrics_svc" ] && echo "  kubectl port-forward -n $HELM_NAMESPACE svc/$operator_metrics_svc 18443:${OPERATOR_METRICS_PORT} &"
   [ -n "$scheduler_metrics_svc" ] && echo "  kubectl port-forward -n $HELM_NAMESPACE svc/$scheduler_metrics_svc 20259:${SCHEDULER_METRICS_PORT} &"
   [ "$USE_MOCK_AGENT" = "true" ] && echo "  kubectl port-forward -n $HELM_NAMESPACE svc/mock-decision-agent 18080:8080 &"
+  [ "$USE_AI_DECISION_SERVICE" = "true" ] && \
+    echo "  kubectl port-forward -n $HELM_NAMESPACE svc/$AI_DS_SERVICE_NAME 18080:${AI_DS_PORT} &"
   echo ""
 }
 
@@ -589,6 +593,9 @@ print_access_urls() {
   printf "      %-24s %s\n" "PlacementServer health" "http://localhost:18090/healthz"
   if [ "$USE_MOCK_AGENT" = "true" ]; then
     printf "      %-24s %s\n" "Mock decision agent" "http://localhost:18080"
+  fi
+  if [ "$USE_AI_DECISION_SERVICE" = "true" ]; then
+    printf "      %-24s %s\n" "AI Decision Service" "http://localhost:18080/healthz"
   fi
 
   print_subhead "Metrics — HTTPS, bearer token required"

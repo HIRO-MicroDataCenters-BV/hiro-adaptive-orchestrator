@@ -12,8 +12,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/rebalance"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/scorer"
-	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
 
@@ -71,15 +71,17 @@ func (s *AIDecisionService) handleDecision(w http.ResponseWriter, r *http.Reques
 	s.log.Info("Received decision request",
 		"requestId", req.RequestID,
 		"inputHash", inputHash(req),
-		"podName", req.Pod.Name,
-		"request", req,
+	)
+	s.log.Debug("Full request received",
+		"requestId", req.RequestID,
+		"body", string(body),
 	)
 
 	// 2. Pick the flow: rebalance requests carry rebalanceContext, placement ones don't.
 	var resp any
 	var flow, decidedBy string
 	if req.RebalanceContext != nil {
-		ans := rebalanceAnswer(req)
+		ans := s.rebalanceAnswer(req)
 		resp, flow, decidedBy = ans, "rebalance", ans.DecidedBy
 	} else {
 		ans := s.placementAnswer(req)
@@ -111,13 +113,8 @@ func (s *AIDecisionService) placementAnswer(req placement.DecisionRequest) place
 	}
 }
 
-func rebalanceAnswer(req placement.DecisionRequest) placement.RebalanceDecisionResponse {
-	return placement.RebalanceDecisionResponse{
-		RequestID: req.RequestID,
-		Action:    orchestrationv1alpha1.RebalanceActionNoOp,
-		Reason:    "skeleton: no rules yet",
-		DecidedBy: placement.DecidedByRules,
-	}
+func (s *AIDecisionService) rebalanceAnswer(req placement.DecisionRequest) placement.RebalanceDecisionResponse {
+	return rebalance.Decide(req, time.Now(), s.cfg.RebalanceConfig, s.cfg.ScorerConfig)
 }
 
 // inputHash fingerprints what was asked, ignoring the IDs and time that change on every call.

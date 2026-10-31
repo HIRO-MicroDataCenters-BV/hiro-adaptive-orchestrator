@@ -8,7 +8,7 @@ import (
 // Defaults; cmd/main.go overrides each from its env var.
 const (
 	DefaultPackedMaxUtil        = 0.85                          // under Packed, a node above this utilisation scores 0
-	DefaultImbalancePenalty     = 0.2                           // under Balanced, how much a CPU/memory gap lowers the score
+	DefaultImbalancePenalty     = 0.2                           // under Balanced, how much a CPU/memory gap costs
 	DefaultSpreadZoneWeight     = 0.6                           // under Spread, weight of "fewer app pods in the zone"
 	DefaultSpreadNodeWeight     = 0.3                           // under Spread, weight of "fewer app pods on the node"
 	DefaultSpreadBalancedWeight = 0.1                           // under Spread, weight of the Balanced score as tie-break

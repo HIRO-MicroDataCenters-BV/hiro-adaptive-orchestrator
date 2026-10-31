@@ -12,8 +12,9 @@ import (
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := loadConfig()
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
+
 	if err != nil {
 		log.Error("Failed to load configuration", slog.Any("error", err))
 		os.Exit(1)
@@ -46,40 +47,53 @@ func loadConfig() (server.Config, error) {
 	cfg.MaxBodyBytes = int64(maxBytes)
 	cfg.HealthPath = envString("AI_DECISION_SERVICE_HEALTH_PATH", cfg.HealthPath)
 	cfg.DecisionPath = envString("AI_DECISION_SERVICE_DECISION_PATH", cfg.DecisionPath)
-	cfg.ScorerConfig.PackedMaxUtil, err = envFloat("AI_DECISION_SERVICE_SCORER_PACKED_MAX_UTIL", cfg.ScorerConfig.PackedMaxUtil)
+	cfg.ScorerConfig.PackedMaxUtil, err = envFloat("AI_DECISION_SERVICE_SCORER_PACKED_MAX_UTIL",
+		cfg.ScorerConfig.PackedMaxUtil)
 	if err != nil {
 		return cfg, err
 	}
-	cfg.ScorerConfig.ImbalancePenalty, err = envFloat("AI_DECISION_SERVICE_SCORER_IMBALANCE_PENALTY", cfg.ScorerConfig.ImbalancePenalty)
+	cfg.ScorerConfig.ImbalancePenalty, err = envFloat("AI_DECISION_SERVICE_SCORER_IMBALANCE_PENALTY",
+		cfg.ScorerConfig.ImbalancePenalty)
 	if err != nil {
 		return cfg, err
 	}
-	cfg.ScorerConfig.SpreadZoneWeight, err = envFloat("AI_DECISION_SERVICE_SCORER_SPREAD_ZONE_WEIGHT", cfg.ScorerConfig.SpreadZoneWeight)
+	cfg.ScorerConfig.SpreadZoneWeight, err = envFloat("AI_DECISION_SERVICE_SCORER_SPREAD_ZONE_WEIGHT",
+		cfg.ScorerConfig.SpreadZoneWeight)
 	if err != nil {
 		return cfg, err
 	}
-	cfg.ScorerConfig.SpreadNodeWeight, err = envFloat("AI_DECISION_SERVICE_SCORER_SPREAD_NODE_WEIGHT", cfg.ScorerConfig.SpreadNodeWeight)
+	cfg.ScorerConfig.SpreadNodeWeight, err = envFloat("AI_DECISION_SERVICE_SCORER_SPREAD_NODE_WEIGHT",
+		cfg.ScorerConfig.SpreadNodeWeight)
 	if err != nil {
 		return cfg, err
 	}
-	cfg.ScorerConfig.SpreadBalancedWeight, err = envFloat("AI_DECISION_SERVICE_SCORER_SPREAD_BALANCED_WEIGHT", cfg.ScorerConfig.SpreadBalancedWeight)
+	cfg.ScorerConfig.SpreadBalancedWeight, err = envFloat("AI_DECISION_SERVICE_SCORER_SPREAD_BALANCED_WEIGHT",
+		cfg.ScorerConfig.SpreadBalancedWeight)
 	if err != nil {
 		return cfg, err
 	}
 	cfg.ScorerConfig.ZoneLabel = envString("AI_DECISION_SERVICE_SCORER_ZONE_LABEL", cfg.ScorerConfig.ZoneLabel)
-	cfg.ScorerConfig.UnknownScore, err = envFloat("AI_DECISION_SERVICE_SCORER_UNKNOWN_SCORE", cfg.ScorerConfig.UnknownScore)
+	cfg.ScorerConfig.UnknownScore, err = envFloat("AI_DECISION_SERVICE_SCORER_UNKNOWN_SCORE",
+		cfg.ScorerConfig.UnknownScore)
 	if err != nil {
 		return cfg, err
 	}
-	cfg.RebalanceConfig.EAOStaleAfter, err = envDuration("AI_DECISION_SERVICE_REBALANCE_EAO_STALE_AFTER", cfg.RebalanceConfig.EAOStaleAfter)
+	cfg.RebalanceConfig.EAOStaleAfter, err = envDuration("AI_DECISION_SERVICE_REBALANCE_EAO_STALE_AFTER",
+		cfg.RebalanceConfig.EAOStaleAfter)
 	if err != nil {
 		return cfg, err
 	}
-	cfg.RebalanceConfig.FlipMoveActionWindow, err = envDuration("AI_DECISION_SERVICE_REBALANCE_FLIP_MOVE_ACTION_WINDOW", cfg.RebalanceConfig.FlipMoveActionWindow)
+	cfg.RebalanceConfig.FlipMoveActionWindow, err = envDuration("AI_DECISION_SERVICE_REBALANCE_FLIP_MOVE_ACTION_WINDOW",
+		cfg.RebalanceConfig.FlipMoveActionWindow)
 	if err != nil {
 		return cfg, err
 	}
-	cfg.RebalanceConfig.RiskConditions = envList("AI_DECISION_SERVICE_REBALANCE_RISK_CONDITIONS", cfg.RebalanceConfig.RiskConditions)
+	cfg.RebalanceConfig.RiskConditions = envList("AI_DECISION_SERVICE_REBALANCE_RISK_CONDITIONS",
+		cfg.RebalanceConfig.RiskConditions)
+	cfg.LogLevel, err = envLogLevel("AI_DECISION_SERVICE_LOG_LEVEL", cfg.LogLevel)
+	if err != nil {
+		return cfg, err
+	}
 	return cfg, validateConfig(cfg)
 }
 
@@ -172,4 +186,17 @@ func envList(name string, defaultValue []string) []string {
 		}
 	}
 	return result
+}
+
+// envLogLevel is envInt for log levels: debug, info, warn or error (any case).
+func envLogLevel(name string, defaultValue slog.Level) (slog.Level, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return defaultValue, nil
+	}
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(v)); err != nil {
+		return defaultValue, fmt.Errorf("%s=%q is not a log level (debug, info, warn, error): %w", name, v, err)
+	}
+	return level, nil
 }

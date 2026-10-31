@@ -11,20 +11,26 @@ import (
 )
 
 const (
-	// evacuationImprovement clears the engine's improvement threshold: leaving a dead node is the strongest reason to move.
+	// evacuationImprovement clears the engine's improvement threshold: leaving a dead node matters most.
 	evacuationImprovement = 100
 )
 
-// Decide answers one rebalance request: gates first, then the first rule that matches.
+// Decide answers one rebalance request: gates, then the first rule that matches, checked by validate.
 func Decide(req placement.DecisionRequest,
 	now time.Time, rebalanceCfg Config,
 	scoreConfig scorer.Config) placement.RebalanceDecisionResponse {
 	g := applyGates(req, now, rebalanceCfg)
 	classes := classifyNodes(req, rebalanceCfg)
-	if resp, ok := evacuateDownNode(req, classes, scoreConfig); ok {
-		return resp
+
+	answer, matched := evacuateDownNode(req, classes, scoreConfig)
+	if !matched {
+		answer = noOp(req, g)
 	}
-	return noOp(req, g)
+	// Later the model answers first; validate checks it the same way, and this answer is its fallback.
+	if why := validate(answer, req, g, classes); why != "" {
+		return rejectedAnswer(req, why)
+	}
+	return answer
 }
 
 // evacuateDownNode moves one pod off a dead node to the scorer's best healthy candidate.
@@ -67,7 +73,8 @@ func evacuateDownNode(req placement.DecisionRequest, classes map[string]nodeClas
 	resp.PodName = pod.PodName
 	resp.TargetNode = best.NodeName
 	resp.Improvement = evacuationImprovement
-	resp.Reason = fmt.Sprintf("node %s is down: move %s to %s (score %.0f)", pod.NodeName, pod.PodName, best.NodeName, best.Score)
+	resp.Reason = fmt.Sprintf("node %s is down: move %s to %s (score %.0f)",
+		pod.NodeName, pod.PodName, best.NodeName, best.Score)
 	return resp, true
 }
 
@@ -83,5 +90,15 @@ func noOp(req placement.DecisionRequest, g gateResult) placement.RebalanceDecisi
 		Action:    orchestrationv1alpha1.RebalanceActionNoOp,
 		Reason:    reason,
 		DecidedBy: placement.DecidedByRules,
+	}
+}
+
+// rejectedAnswer is the NoOp sent when an answer fails validate.
+func rejectedAnswer(req placement.DecisionRequest, why string) placement.RebalanceDecisionResponse {
+	return placement.RebalanceDecisionResponse{
+		RequestID: req.RequestID,
+		Action:    orchestrationv1alpha1.RebalanceActionNoOp,
+		Reason:    "answer rejected: " + why,
+		DecidedBy: placement.DecidedByFallback,
 	}
 }

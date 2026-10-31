@@ -1,6 +1,11 @@
 package rebalance
 
-import "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
+import (
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
+	corev1 "k8s.io/api/core/v1"
+)
+
+const conditionTrue = string(corev1.ConditionTrue)
 
 // nodeClass is how healthy a node is, judged only from facts in the request.
 type nodeClass int
@@ -18,14 +23,14 @@ func classifyNode(n placement.NodeStat, cfg Config) nodeClass {
 	if !ok {
 		return classUnknown
 	}
-	if ready != "True" {
+	if ready != conditionTrue {
 		return classDown
 	}
 	if n.Unschedulable {
 		return classAtRisk
 	}
 	for _, c := range cfg.RiskConditions {
-		if n.Conditions[c] == "True" {
+		if n.Conditions[c] == conditionTrue {
 			return classAtRisk
 		}
 	}

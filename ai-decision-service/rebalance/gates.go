@@ -56,10 +56,9 @@ func applyGates(req placement.DecisionRequest, now time.Time, cfg Config) gateRe
 
 	// 1. Cooldown: nothing may change until it ends.
 	if rc.CooldownUntil != nil && now.Before(rc.CooldownUntil.Time) {
+		why := "cooldown until " + rc.CooldownUntil.UTC().Format(time.RFC3339)
 		for _, gt := range g.gates {
-			if gt.allowed {
-				g.block(gt.action, fmt.Sprintf("cooldown in effect until %v", rc.CooldownUntil.Time))
-			}
+			g.block(gt.action, why)
 		}
 	}
 
@@ -81,7 +80,12 @@ func applyGates(req placement.DecisionRequest, now time.Time, cfg Config) gateRe
 			fmt.Sprintf("PDB %s does not allow disruptions", rc.PDB.Name))
 	}
 
-	// 4. Recent relocations, for moveBlocked's churn and ping-pong guards. NewPodNode is set
+	// 4. EAO: no energy now, so a Move's replacement pod would sit Pending.
+	if why := eaoBlocksMove(req.EAOProfile, now, cfg); why != "" {
+		g.block(orchestrationv1alpha1.RebalanceActionMove, why)
+	}
+
+	// 5. Recent relocations, for moveBlocked's churn and ping-pong guards. NewPodNode is set
 	//    only when a replacement pod really appeared, so a wrong-node Failed Move counts too.
 	g.filled, g.emptied = map[string]bool{}, map[string]bool{}
 	cutoff := now.Add(-cfg.FlipMoveActionWindow)
@@ -153,4 +157,19 @@ func (g *gateResult) moveBlocked(source, target string, classes map[string]nodeC
 		return fmt.Sprintf("a recent move took a pod off %s", target)
 	}
 	return ""
+}
+
+// eaoBlocksMove says why the EAO's fresh verdict rules out a Move now, or "" when it doesn't.
+func eaoBlocksMove(eao *placement.EAOProfileContext, now time.Time, cfg Config) string {
+	if eao == nil || eao.Verdict != placement.EAOVerdictHold {
+		return ""
+	}
+	lastUpdated, err := time.Parse(time.RFC3339, eao.LastUpdated)
+	if err != nil || now.Sub(lastUpdated) > cfg.EAOStaleAfter {
+		return ""
+	}
+	if eao.HoldUntil != nil {
+		return "EAO holds until " + eao.HoldUntil.UTC().Format(time.RFC3339)
+	}
+	return "EAO holds the workload for lack of energy"
 }

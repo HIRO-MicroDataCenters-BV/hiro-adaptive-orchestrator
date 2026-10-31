@@ -291,6 +291,30 @@ func TestTriggerEvaluator_NodeFailure(t *testing.T) {
 	}
 }
 
+func TestTriggerEvaluator_NodeFailureIgnoresTerminatingPod(t *testing.T) {
+	profile := testProfileWithConditions(TriggerNodeFailure)
+	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
+	pod.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	pod.Finalizers = []string{"test/keep"} // the fake client needs one to hold a deleting object
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeReady, Status: corev1.ConditionUnknown},
+			},
+		},
+	}
+	evaluator := newTestTriggerEvaluator(t, testDeployment(), pod, node)
+
+	matched, _, err := evaluator.Evaluate(context.Background(), profile)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if matched {
+		t.Error("matched = true, want false: the only pod on the dead node is already being deleted")
+	}
+}
+
 func TestTriggerEvaluator_NodeHealthyNoMatch(t *testing.T) {
 	profile := testProfileWithConditions(TriggerNodeFailure)
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)

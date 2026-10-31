@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/rebalance"
@@ -14,6 +15,7 @@ const (
 	DefaultDecisionPath = "/api/v1/agent/placement/decision"
 	DefaultReadTimeout  = 5 * time.Second
 	DefaultMaxBodyBytes = 5 * 1024 * 1024 // 5 MiB
+	DefaultLogLevel     = slog.LevelInfo
 )
 
 // Config holds every tunable of the service.
@@ -25,6 +27,7 @@ type Config struct {
 	MaxBodyBytes    int64
 	ScorerConfig    scorer.Config
 	RebalanceConfig rebalance.Config
+	LogLevel        slog.Level
 }
 
 func DefaultConfig() Config {
@@ -36,5 +39,6 @@ func DefaultConfig() Config {
 		MaxBodyBytes:    DefaultMaxBodyBytes,
 		ScorerConfig:    scorer.DefaultConfig(),
 		RebalanceConfig: rebalance.DefaultConfig(),
+		LogLevel:        DefaultLogLevel,
 	}
 }

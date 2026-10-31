@@ -151,7 +151,7 @@ func ResolveLabelSelector(
 }
 
 // FindPodsForApplication resolves the workload's pod label selector and lists
-// all pods that match it in the application's namespace.
+// the pods that match it in the application's namespace, skipping pods being deleted.
 //
 // If the selector cannot be resolved (e.g. unknown kind), it falls back to the
 // conventional {"app": appRef.Name} label to avoid returning zero pods silently.
@@ -186,13 +186,22 @@ func FindPodsForApplication(
 			appRef.Namespace, appRef.Name, labelSelector, err)
 	}
 
+	// A pod being deleted is gone for the app, as the ReplicaSet controller sees it; on a dead
+	// node it can stay Terminating for good and would look like a pod still to move.
+	pods := make([]corev1.Pod, 0, len(podList.Items))
+	for _, p := range podList.Items {
+		if p.DeletionTimestamp == nil {
+			pods = append(pods, p)
+		}
+	}
+
 	logger.Info("utils: pods resolved",
 		"app", appRef.Name,
 		"namespace", appRef.Namespace,
-		"podCount", len(podList.Items),
+		"podCount", len(pods),
 	)
 
-	return podList.Items, nil
+	return pods, nil
 }
 
 // FindEAOForApp finds the EnergyAwareOrchestration resource (returned as

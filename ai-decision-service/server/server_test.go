@@ -16,8 +16,13 @@ import (
 )
 
 const (
-	InitialPlacementBody = `{"requestId":"r0", "nodeStats": [{"name":"node1"}, {"name":"node2"}]}`
-	InitialRebalanceBody = `{"requestId":"r2", "nodeStats": [{"name":"node1"}, {"name":"node2"}], "rebalanceContext":{"reason":"test"}}`
+	InitialPlacementBody = `{"requestId":"r0",
+		"nodeStats": [{"name":"node1", "candidate": true}, {"name":"node2", "candidate": true}]}`
+	InitialRebalanceBody = `{"requestId":"r2",
+		"nodeStats": [{"name":"node1", "candidate": false, "conditions": {"Ready":"False"}},
+			{"name":"node2", "candidate": true, "conditions": {"Ready":"True"}}],
+		"rebalanceContext": {"reason":"test",
+			"currentPlacements": [{"podName":"p1", "nodeName":"node1", "phase":"Running"}]}}`
 )
 
 // do sends one request through the service's routes and returns the recorded response.
@@ -54,7 +59,7 @@ func TestPlacementUsesScorer(t *testing.T) {
 	}
 }
 
-func TestRebalanceAnswersNoOp(t *testing.T) {
+func TestRebalanceUsesRules(t *testing.T) {
 	rec := do(t, DefaultConfig(), http.MethodPost, DefaultDecisionPath, InitialRebalanceBody)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
@@ -64,8 +69,9 @@ func TestRebalanceAnswersNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
-	if resp.RequestID != "r2" || resp.Action != orchestrationv1alpha1.RebalanceActionNoOp || resp.DecidedBy != placement.DecidedByRules {
-		t.Errorf("expected request ID 'r2', action 'NoOp', and decided by rules, got response: %+v", resp)
+	if resp.RequestID != "r2" || resp.Action != orchestrationv1alpha1.RebalanceActionMove ||
+		resp.PodName != "p1" || resp.TargetNode != "node2" || resp.DecidedBy != placement.DecidedByRules {
+		t.Errorf("expected r2 to move p1 off down node1 to node2, decided by rules, got response: %+v", resp)
 	}
 }
 
