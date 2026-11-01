@@ -18,6 +18,7 @@ package rebalance
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 )
 
 var testEAOGVK = schema.GroupVersionKind{Group: "eas.hiro.io", Version: "v1", Kind: "EnergyAwareOrchestration"}
@@ -95,6 +97,14 @@ func testEAO(action, reason string, sufficient *bool) *unstructured.Unstructured
 	return eao
 }
 
+// heldEAO is a Scheduled EAO with no energy now whose slot starts at slotStart: a Hold while it's ahead.
+func heldEAO(reason string, slotStart time.Time) *unstructured.Unstructured {
+	eao := testEAO("Scheduled", reason, new(false))
+	_ = unstructured.SetNestedField(eao.Object, slotStart.UTC().Format(time.RFC3339),
+		"status", "decision", "scheduledSlot", "slotStart")
+	return eao
+}
+
 // newTestTriggerEvaluator builds a TriggerEvaluator wired to a fake client
 // seeded with the given objects and a fake metrics clientset with no
 // NodeMetrics registered (CPU/Memory checks soft-fail to "no match" unless
@@ -128,12 +138,12 @@ func newTestTriggerEvaluator(t *testing.T, objs ...client.Object) *TriggerEvalua
 
 	metricsClient := metricsfake.NewSimpleClientset() //nolint:staticcheck // see pressure_test.go
 	pressure := NewNodePressureEvaluator(c, metricsClient, 0.90)
-	return NewTriggerEvaluator(c, testEAOGVK, pressure)
+	return NewTriggerEvaluator(c, placementserver.NewEAOSettings(testEAOGVK), pressure)
 }
 
-func TestTriggerEvaluator_EnergyInsufficient(t *testing.T) {
+func TestTriggerEvaluator_EnergyHold(t *testing.T) {
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
-	eao := testEAO("DeployImmediately", "", new(false))
+	eao := heldEAO("optional: scheduled for a later slot", time.Now().Add(time.Hour))
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao)
 
 	matched, result, err := evaluator.Evaluate(context.Background(), profile)
@@ -143,11 +153,11 @@ func TestTriggerEvaluator_EnergyInsufficient(t *testing.T) {
 	if !matched || result.Condition != TriggerEnergyThreshold {
 		t.Fatalf("matched=%v condition=%q, want true/%q", matched, result.Condition, TriggerEnergyThreshold)
 	}
-	if result.Reason == "" {
-		t.Error("expected non-empty reason")
+	if !strings.Contains(result.Reason, "optional: scheduled for a later slot; held until ") {
+		t.Errorf("reason = %q, want the EAO's reason and when the hold ends", result.Reason)
 	}
 	if result.BypassAction != "" {
-		t.Errorf("BypassAction = %q, want empty — insufficient energy is a genuine problem signal, needs AI", result.BypassAction)
+		t.Errorf("BypassAction = %q, want empty — a hold is a genuine problem signal, needs AI", result.BypassAction)
 	}
 }
 
@@ -165,6 +175,43 @@ func TestTriggerEvaluator_EnergyDelayed(t *testing.T) {
 	}
 	if result.BypassAction != "" {
 		t.Errorf("BypassAction = %q, want empty — Delayed is a genuine problem signal, needs AI", result.BypassAction)
+	}
+}
+
+func TestTriggerEvaluator_EnergyVerdicts(t *testing.T) {
+	pending := func() *corev1.Pod { return testPod("app-a-pending", "", corev1.PodPending) }
+	cases := []struct {
+		name        string
+		eao         *unstructured.Unstructured
+		holdActions []string // nil keeps the default mapping
+		wantMatch   bool
+		wantBypass  string
+	}{
+		{name: "slot ahead: the pending pod is not retried early",
+			eao: heldEAO("", time.Now().Add(time.Hour)), wantMatch: true},
+		{name: "slot started: the pending pod is retried",
+			eao: heldEAO("", time.Now().Add(-time.Minute)), wantMatch: true, wantBypass: ActionRetryPendingSchedule},
+		{name: "Waiting is an EAO failure, not an energy signal",
+			eao: testEAO("Waiting", "eao failed", new(false))},
+		{name: "DeployImmediately runs even when sufficient is false",
+			eao: testEAO("DeployImmediately", "", new(false)), wantMatch: true, wantBypass: ActionRetryPendingSchedule},
+		{name: "a renamed hold action is a setting change",
+			eao: testEAO("Paused", "", nil), holdActions: []string{"Paused"}, wantMatch: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			evaluator := newTestTriggerEvaluator(t, testDeployment(), tc.eao, pending())
+			if tc.holdActions != nil {
+				evaluator.eaoSettings.VerdictConfig.HoldActions = tc.holdActions
+			}
+			matched, result, err := evaluator.Evaluate(context.Background(), testProfileWithConditions(TriggerEnergyThreshold))
+			if err != nil {
+				t.Fatalf("Evaluate: %v", err)
+			}
+			if matched != tc.wantMatch || result.BypassAction != tc.wantBypass {
+				t.Errorf("matched=%v bypass=%q, want %v/%q", matched, result.BypassAction, tc.wantMatch, tc.wantBypass)
+			}
+		})
 	}
 }
 

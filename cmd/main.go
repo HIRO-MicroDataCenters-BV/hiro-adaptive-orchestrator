@@ -410,26 +410,26 @@ func main() {
 		"schedulerName", hiroSchedulerName,
 	)
 
-	// Which EAO decision.action values mean run now and which mean hold.
-	eaoVerdict := placementserver.DefaultEAOVerdictConfig()
+	// How to find an app's EAO, and which decision.action values mean run now and which mean hold.
+	eaoSettings := placementserver.NewEAOSettings(eaoGVK)
 	if v := parseListEnv("EAO_RUN_NOW_ACTIONS"); v != nil {
-		eaoVerdict.RunNowActions = v
+		eaoSettings.VerdictConfig.RunNowActions = v
 	}
 	if v := parseListEnv("EAO_HOLD_ACTIONS"); v != nil {
-		eaoVerdict.HoldActions = v
+		eaoSettings.VerdictConfig.HoldActions = v
 	}
-	if err := eaoVerdict.Validate(); err != nil {
+	if err := eaoSettings.VerdictConfig.Validate(); err != nil {
 		setupLog.Error(err, "invalid EAO action mapping")
 		os.Exit(1)
 	}
 	setupLog.Info("EAO action mapping configured",
-		"runNow", eaoVerdict.RunNowActions, "hold", eaoVerdict.HoldActions)
+		"runNow", eaoSettings.VerdictConfig.RunNowActions, "hold", eaoSettings.VerdictConfig.HoldActions)
 
 	contextBuilder := placementserver.NewDecisionContextBuilder(
 		mgr.GetClient(),
 		controller.ProfileByAppRefIndex,
-		eaoGVK,
-	).WithEAOVerdict(eaoVerdict)
+		eaoSettings,
+	)
 
 	// Register the pod scheduler MutatingAdmissionWebhook.
 	// Sets spec.schedulerName automatically on pods governed by an OrchestrationProfile,
@@ -606,7 +606,7 @@ func main() {
 		os.Exit(1)
 	}
 	pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, rebalanceNodePressureThreshold)
-	triggerEvaluator := rebalance.NewTriggerEvaluator(mgr.GetClient(), eaoGVK, pressureEvaluator)
+	triggerEvaluator := rebalance.NewTriggerEvaluator(mgr.GetClient(), eaoSettings, pressureEvaluator)
 
 	rebalanceDetector := rebalance.NewReconciler(
 		mgr.GetClient(),

@@ -22,7 +22,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -59,35 +58,25 @@ type DecisionContextBuilder struct {
 	// Passed in so the builder does not depend on the controller package directly.
 	profileIndexField string
 
-	// eaoGVK is the GroupVersionKind used to list EnergyAwareOrchestration resources.
-	// Configurable via EAO_GROUP / EAO_VERSION / EAO_KIND environment variables.
-	eaoGVK schema.GroupVersionKind
-
-	// eaoVerdict maps the EAO's decision.action values onto EAOVerdict.
-	eaoVerdict EAOVerdictConfig
-}
-
-// WithEAOVerdict replaces the default EAO action mapping.
-func (b *DecisionContextBuilder) WithEAOVerdict(cfg EAOVerdictConfig) *DecisionContextBuilder {
-	b.eaoVerdict = cfg
-	return b
+	// eaoSettings finds the EnergyAwareOrchestration (EAO_GROUP / EAO_VERSION / EAO_KIND)
+	// and reads its decision (EAO_RUN_NOW_ACTIONS / EAO_HOLD_ACTIONS).
+	eaoSettings EAOSettings
 }
 
 // NewDecisionContextBuilder creates a new builder.
 //
 // client:             the same client.Client the reconciler uses (informer cache)
 // profileIndexField:  the ProfileByAppRefIndex constant from op_index.go
-// eaoGVK:             GVK for EnergyAwareOrchestration list queries
+// eaoSettings:        how to find an app's EAO and read its decision
 func NewDecisionContextBuilder(
 	c client.Client,
 	profileIndexField string,
-	eaoGVK schema.GroupVersionKind,
+	eaoSettings EAOSettings,
 ) *DecisionContextBuilder {
 	return &DecisionContextBuilder{
 		client:            c,
 		profileIndexField: profileIndexField,
-		eaoGVK:            eaoGVK,
-		eaoVerdict:        DefaultEAOVerdictConfig(),
+		eaoSettings:       eaoSettings,
 	}
 }
 

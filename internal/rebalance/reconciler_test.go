@@ -120,9 +120,10 @@ func newTestReconcilerWithAgent(t *testing.T, agentURL string, objs ...client.Ob
 	writer := NewStateWriter(c, c, record.NewFakeRecorder(256), HistoryConfig{})
 	metricsClient := metricsfake.NewSimpleClientset() //nolint:staticcheck // see pressure_test.go
 	pressure := NewNodePressureEvaluator(c, metricsClient, 0.90)
-	evaluator := NewTriggerEvaluator(c, testEAOGVK, pressure)
+	eaoSettings := placementserver.NewEAOSettings(testEAOGVK)
+	evaluator := NewTriggerEvaluator(c, eaoSettings, pressure)
 
-	contextBuilder := placementserver.NewDecisionContextBuilder(c, testProfileIndexField, testEAOGVK)
+	contextBuilder := placementserver.NewDecisionContextBuilder(c, testProfileIndexField, eaoSettings)
 	decisionClient := placementserver.NewDecisionClient(agentURL, "", 200*time.Millisecond)
 
 	decisionStore := placementserver.NewDecisionStore(0)
@@ -318,15 +319,14 @@ func TestReconciler_ScheduledTriggerReachesFailedWhenAIUnreachable(t *testing.T)
 
 // TestReconciler_EnergyVerdictFlipTriggersWorkload is the acceptance-criteria
 // integration test for trigger detection: a synthetic energy-verdict flip
-// (EAO now reports insufficient energy) causes Reconcile to enter the
+// (EAO now holds the workload until a later slot) causes Reconcile to enter the
 // profile's decision lifecycle end to end through TriggerEvaluator and
 // StateWriter — not just at the evaluator-unit level (see triggers_test.go).
 // The AI agent is unreachable in this fake-client setup, so the cycle ends
 // back at Watching with Outcome Failed rather than stopping at Triggered.
 func TestReconciler_EnergyVerdictFlipTriggersWorkload(t *testing.T) {
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
-	insufficient := false
-	eao := testEAO("DeployImmediately", "", &insufficient)
+	eao := heldEAO("", time.Now().Add(time.Hour))
 	r, c := newTestReconciler(t, testDeployment(), eao, profile)
 
 	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}})
@@ -733,7 +733,7 @@ func TestReconciler_MoveToUnusableTargetRejected(t *testing.T) {
 
 // TestReconciler_MoveTimeoutWithClosedEnergyGateIsDeferred: awaitReplacement
 // times out (no replacement pod will ever appear against a fake client)
-// against an energy-aware workload whose EAO reports insufficient energy
+// against an energy-aware workload whose EAO holds it until a later slot
 // right now — classifyScheduleTimeout should reclassify the timeout
 // Deferred instead of Failed.
 func TestReconciler_MoveTimeoutWithClosedEnergyGateIsDeferred(t *testing.T) {
@@ -748,7 +748,7 @@ func TestReconciler_MoveTimeoutWithClosedEnergyGateIsDeferred(t *testing.T) {
 
 	profile := testEnergyAwareProfile()
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
-	eao := testEAO("Waiting", "demo: energy window closed", new(false))
+	eao := heldEAO("demo: energy window closed", time.Now().Add(time.Hour))
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao, readyTargetNode())
 	r.MoveActionTimeout = 50 * time.Millisecond
 
@@ -782,7 +782,7 @@ func TestReconciler_MoveTimeoutWithoutEnergyAwarenessStaysFailed(t *testing.T) {
 
 	profile := testProfileWithConditions(TriggerScheduled) // Awareness.Energy: false
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
-	eao := testEAO("Waiting", "demo: energy window closed", new(false))
+	eao := heldEAO("demo: energy window closed", time.Now().Add(time.Hour))
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao, readyTargetNode())
 	r.MoveActionTimeout = 50 * time.Millisecond
 
@@ -849,7 +849,7 @@ func TestReconciler_MoveWrongNodeStaysFailedEvenWithClosedEnergyGate(t *testing.
 
 	profile := testEnergyAwareProfile()
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
-	eao := testEAO("Waiting", "demo: energy window closed", new(false))
+	eao := heldEAO("demo: energy window closed", time.Now().Add(time.Hour))
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao, readyTargetNode())
 	r.MoveActionTimeout = 5 * time.Second
 

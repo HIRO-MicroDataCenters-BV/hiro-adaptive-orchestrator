@@ -272,7 +272,7 @@ func dispatchMove(
 		return
 	}
 
-	result, err := moveEnactor(ctx, r.Client, r.DecisionStore, r.Evaluator.eaoGVK, profile,
+	result, err := moveEnactor(ctx, r.Client, r.DecisionStore, r.Evaluator.eaoSettings, profile,
 		resp.PodName, resp.TargetNode, resp.Reason, decided.DecisionID, r.MoveActionTimeout)
 	if err != nil {
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, err.Error(),
@@ -469,7 +469,8 @@ func dispatchScale(
 		return
 	}
 
-	result, err := scaleEnactor(ctx, r.Client, r.Evaluator.eaoGVK, profile, resp.TargetReplicas, resp.Reason, r.ScaleActionTimeout)
+	result, err := scaleEnactor(ctx, r.Client, r.Evaluator.eaoSettings, profile,
+		resp.TargetReplicas, resp.Reason, r.ScaleActionTimeout)
 	if err != nil {
 		if _, tErr := r.Writer.Transition(ctx, key, StateWatching, err.Error(),
 			TransitionOptions{DecidedBy: resp.DecidedBy, Action: resp.Action, Outcome: OutcomeFailed, Cooldown: cooldown,

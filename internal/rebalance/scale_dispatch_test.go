@@ -143,7 +143,7 @@ func TestReconciler_ScaleTimeoutWithClosedEnergyGateIsDeferred(t *testing.T) {
 
 	profile := testEnergyAwareProfile()
 	deploy := testScalableDeployment(0) // never reaches 3 ready — fake client, no real rollout
-	eao := testEAO("Waiting", "demo: energy window closed", new(false))
+	eao := heldEAO("demo: energy window closed", time.Now().Add(time.Hour))
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile, eao)
 	r.ScaleActionTimeout = 50 * time.Millisecond
 
@@ -174,7 +174,7 @@ func TestReconciler_ScaleTimeoutWithoutEnergyAwarenessStaysFailed(t *testing.T) 
 
 	profile := testProfileWithConditions(TriggerScheduled) // Awareness.Energy: false
 	deploy := testScalableDeployment(0)
-	eao := testEAO("Waiting", "demo: energy window closed", new(false))
+	eao := heldEAO("demo: energy window closed", time.Now().Add(time.Hour))
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile, eao)
 	r.ScaleActionTimeout = 50 * time.Millisecond
 

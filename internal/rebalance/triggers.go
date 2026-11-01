@@ -23,15 +23,15 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
+	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
 
 // Trigger condition names, aliased from the canonical api/v1alpha1 enum.
@@ -100,14 +100,16 @@ type TriggerDetail struct {
 // Evaluate the same way — the watches only decide *when* to check, this
 // decides *what* currently holds.
 type TriggerEvaluator struct {
-	client   client.Client
-	eaoGVK   schema.GroupVersionKind
-	pressure *NodePressureEvaluator
+	client      client.Client
+	eaoSettings placementserver.EAOSettings
+	pressure    *NodePressureEvaluator
 }
 
 // NewTriggerEvaluator creates a TriggerEvaluator.
-func NewTriggerEvaluator(c client.Client, eaoGVK schema.GroupVersionKind, pressure *NodePressureEvaluator) *TriggerEvaluator {
-	return &TriggerEvaluator{client: c, eaoGVK: eaoGVK, pressure: pressure}
+func NewTriggerEvaluator(
+	c client.Client, eaoSettings placementserver.EAOSettings, pressure *NodePressureEvaluator,
+) *TriggerEvaluator {
+	return &TriggerEvaluator{client: c, eaoSettings: eaoSettings, pressure: pressure}
 }
 
 // Evaluate checks every trigger condition declared on the profile, in
@@ -230,22 +232,18 @@ func (e *TriggerEvaluator) evaluateNodeFailure(
 // evaluateEnergyThreshold finds the EnergyAwareOrchestration resource
 // governing the profile's application (matched directly by ApplicationRef,
 // no pod resolution needed — unlike internal/placement-server's
-// pod-triggered EAO lookup) and checks three cases, in order:
+// pod-triggered EAO lookup) and acts on its verdict, the same one the energy gate uses:
 //
-//  1. Energy currently reported insufficient — a problem signal.
-//  2. Decision explicitly Delayed/Waiting — also a problem signal.
-//  3. The opposite signal: the decision now says DeployImmediately/Scheduled
-//     (i.e. the EAO's own re-evaluation window has arrived and it already
-//     refreshed its status to reflect that) AND a pod for this app is still
-//     sitting Pending — meaning it was likely blocked by the energy gate
-//     earlier and is worth retrying now. We deliberately don't parse
-//     nextEvaluationTime ourselves; by the time we look, the EAO's own
-//     status already reflects the new window.
+//  1. Hold (no energy until the slot) — a problem signal for the decider.
+//  2. RunNow (DeployImmediately, or a hold whose slot has started) AND a pod
+//     for this app is still sitting Pending — it was likely held by the energy
+//     gate earlier and is worth retrying now.
+//  3. Unknown (no decision, an EAO failure such as Waiting, an unmapped
+//     action) — not an energy signal; the gate lets pods through.
 //
 // Returns (matched, reason, bypassAction). bypassAction is
-// ActionRetryPendingSchedule for case 3 (no AI consultation needed) and
-// empty for cases 1/2 (genuine problem signals — the normal Evaluating flow,
-// once built, decides what to do about them).
+// ActionRetryPendingSchedule for case 2 (no AI consultation needed) and
+// empty for case 1 (the normal Evaluating flow decides what to do about it).
 func (e *TriggerEvaluator) evaluateEnergyThreshold(
 	ctx context.Context,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
@@ -253,7 +251,7 @@ func (e *TriggerEvaluator) evaluateEnergyThreshold(
 ) (bool, string, string) {
 	logger := logf.FromContext(ctx)
 
-	eao, err := utils.FindEAOForApp(ctx, e.client, e.eaoGVK, profile.Spec.ApplicationRef)
+	eao, err := utils.FindEAOForApp(ctx, e.client, e.eaoSettings.GVK, profile.Spec.ApplicationRef)
 	if err != nil {
 		// EnergyAwareOrchestration is an optional component — soft-fail like
 		// internal/placement-server's DecisionContextBuilder.fetchEAOProfile.
@@ -265,25 +263,17 @@ func (e *TriggerEvaluator) evaluateEnergyThreshold(
 		return false, "", ""
 	}
 
-	if sufficient, found, _ := unstructured.NestedBool(eao.Object, "status", "energyMetrics", "sufficient"); found && !sufficient {
-		reason, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "reason")
-		if reason == "" {
-			reason = "energy supply reported insufficient"
-		}
-		return true, reason, ""
+	eaoCtx := placementserver.NewEAOContext(eao, e.eaoSettings.VerdictConfig, time.Now())
+	switch eaoCtx.Verdict {
+	case placement.EAOVerdictHold:
+		return true, placementserver.HoldReason(eaoCtx), ""
+	case placement.EAOVerdictUnknown:
+		logger.V(1).Info("rebalance: EAO verdict unknown, skipping EnergyThreshold check", "eao", eao.GetName())
+		return false, "", ""
 	}
 
-	action, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "action")
-
-	if action == "Delayed" || action == "Waiting" {
-		reason, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "reason")
-		if reason == "" {
-			reason = fmt.Sprintf("energy decision action=%s", action)
-		}
-		return true, reason, ""
-	}
-
-	if (action == "DeployImmediately" || action == "Scheduled") && hasPendingPod(pods) {
+	// RunNow; retry only now, so a pod held before the slot isn't retried early.
+	if hasPendingPod(pods) {
 		return true, "energy window reached — retrying previously deferred pod", ActionRetryPendingSchedule
 	}
 

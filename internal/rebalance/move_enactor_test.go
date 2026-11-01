@@ -68,7 +68,8 @@ func TestMoveEnactor_RecordsReplacementFacts(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newMoveClient(t, tc.landOn, testDeployment(), testPod("app-a-1", "node-a", corev1.PodRunning))
-			res, err := moveEnactor(context.Background(), c, placementserver.NewDecisionStore(0), testEAOGVK,
+			res, err := moveEnactor(context.Background(), c, placementserver.NewDecisionStore(0),
+				placementserver.NewEAOSettings(testEAOGVK),
 				testProfileWithConditions(TriggerScheduled), "app-a-1", "node-b", "better spread", "d-1", time.Second)
 			if err != nil {
 				t.Fatalf("moveEnactor: %v", err)

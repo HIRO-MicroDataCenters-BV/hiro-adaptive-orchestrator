@@ -34,7 +34,7 @@
 #                   the "Escalation" section of internal/rebalance/README.md.
 #
 # Beats 3 and 4 both need the energy window CLOSED to fire the trigger
-# (EnergyThreshold only matches on insufficient/Delayed/Waiting) but OPEN for
+# (EnergyThreshold only matches on an EAO hold: a slot still ahead) but OPEN for
 # the new/replacement pod to actually pass CheckEnergyGate and schedule — see
 # the energy-gate interaction documented in internal/rebalance/README.md
 # (originally found for Move, confirmed to affect AdjustReplicas the same
@@ -161,6 +161,7 @@ EAO_TOUCHED=false
 EAO_ORIG_ACTION=""
 EAO_ORIG_REASON=""
 EAO_ORIG_SUFFICIENT=""
+EAO_ORIG_SLOT=""
 RESOURCES_TOUCHED=false
 APP_CONTAINER_NAME=""
 APP_ORIGINAL_CPU_REQUEST=""
@@ -291,29 +292,37 @@ capture_eao_original() {
     -o jsonpath='{.status.decision.reason}' 2>/dev/null)
   EAO_ORIG_SUFFICIENT=$(kubectl get energyawareorchestration "$EAO" -n "$APP_NAMESPACE" \
     -o jsonpath='{.status.energyMetrics.sufficient}' 2>/dev/null)
+  # jsonpath prints the slot object as JSON, or nothing when it's unset.
+  EAO_ORIG_SLOT=$(kubectl get energyawareorchestration "$EAO" -n "$APP_NAMESPACE" \
+    -o jsonpath='{.status.decision.scheduledSlot}' 2>/dev/null)
   EAO_TOUCHED=true
 }
 
 revert_eao_window() {
   echo "  Restoring $EAO's energy window status to its pre-demo values (not waiting on its own controller)"
-  local action_json reason_json sufficient_json
+  local action_json reason_json sufficient_json slot_json
   action_json=$([ -n "$EAO_ORIG_ACTION" ] && printf '"%s"' "$EAO_ORIG_ACTION" || echo null)
   reason_json=$([ -n "$EAO_ORIG_REASON" ] && printf '"%s"' "$EAO_ORIG_REASON" || echo null)
   sufficient_json=$([ -n "$EAO_ORIG_SUFFICIENT" ] && echo "$EAO_ORIG_SUFFICIENT" || echo null)
+  slot_json=${EAO_ORIG_SLOT:-null}
   run kubectl patch energyawareorchestration "$EAO" -n "$APP_NAMESPACE" --type=merge --subresource=status \
-    -p "{\"status\":{\"decision\":{\"action\":${action_json},\"reason\":${reason_json}},\"energyMetrics\":{\"sufficient\":${sufficient_json}}}}" >/dev/null
+    -p "{\"status\":{\"decision\":{\"action\":${action_json},\"reason\":${reason_json},\"scheduledSlot\":${slot_json}},\"energyMetrics\":{\"sufficient\":${sufficient_json}}}}" >/dev/null
 }
 
+# A slot an hour ahead is a Hold: the gate keeps new pods Pending and EnergyThreshold fires.
 close_energy_window() {
   capture_eao_original
+  local slot_start slot_end
+  slot_start=$(date -u -v+1H +%FT%TZ 2>/dev/null || date -u -d '+1 hour' +%FT%TZ)
+  slot_end=$(date -u -v+2H +%FT%TZ 2>/dev/null || date -u -d '+2 hours' +%FT%TZ)
   run kubectl patch energyawareorchestration "$EAO" -n "$APP_NAMESPACE" --type=merge --subresource=status \
-    -p '{"status":{"decision":{"action":"Waiting","reason":"demo: energy window closed"},"energyMetrics":{"sufficient":false}}}' >/dev/null
+    -p "{\"status\":{\"decision\":{\"action\":\"Scheduled\",\"reason\":\"demo: energy window closed\",\"scheduledSlot\":{\"slotStart\":\"${slot_start}\",\"slotEnd\":\"${slot_end}\"}},\"energyMetrics\":{\"sufficient\":false}}}" >/dev/null
 }
 
 open_energy_window() {
   capture_eao_original
   run kubectl patch energyawareorchestration "$EAO" -n "$APP_NAMESPACE" --type=merge --subresource=status \
-    -p '{"status":{"decision":{"action":"DeployImmediately","reason":"demo: energy window open"},"energyMetrics":{"sufficient":true}}}' >/dev/null
+    -p '{"status":{"decision":{"action":"DeployImmediately","reason":"demo: energy window open","scheduledSlot":null},"energyMetrics":{"sufficient":true}}}' >/dev/null
 }
 
 # Shared by revert_replicas/revert_resources below: both can create a

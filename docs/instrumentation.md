@@ -116,7 +116,7 @@ and none of them report an error:
 | `caller` | What happens without the EAO |
 |---|---|
 | `score` | Energy data is dropped from the AI request |
-| `filter` | The gate allows the pod — and `filter_requests_total` counts it as `allowed="true"`, identical to "energy checked and sufficient" |
+| `filter` | The gate allows the pod — and `filter_requests_total` counts it as `allowed="true"`, identical to "energy checked and the EAO lets it run" |
 | `rebalance` | Energy data is dropped from the rebalance AI request |
 
 `hiro_placement_eao_fetch_total{result="not_found"|"error"}` is the only signal that energy-aware

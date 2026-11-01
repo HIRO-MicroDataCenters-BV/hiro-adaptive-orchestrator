@@ -204,9 +204,9 @@ checked, just only on the periodic tick instead of instantly.
 ```mermaid
 flowchart TD
     Start(["Evaluate(profile)"]) --> C1{"EnergyThreshold<br/>declared?"}
-    C1 -- yes --> E1{"insufficient energy OR<br/>Delayed / Waiting?"}
+    C1 -- yes --> E1{"EAO verdict Hold?<br/>(slot still ahead)"}
     E1 -- yes --> Match(["matched — needs AI<br/>(no bypass)"])
-    E1 -- no --> E2{"DeployImmediately / Scheduled<br/>AND a pod is Pending?"}
+    E1 -- no --> E2{"verdict RunNow<br/>AND a pod is Pending?"}
     E2 -- yes --> Bypass(["matched — BypassAction set<br/>(no AI needed)"])
     E2 -- no --> C2
     C1 -- no --> C2{"CPU/MemoryThreshold<br/>declared?"}
@@ -229,7 +229,7 @@ nothing to do this cycle.
 
 | Condition | How it's checked |
 |---|---|
-| `EnergyThreshold` | Finds the `EnergyAwareOrchestration` matching the profile's `ApplicationRef` directly (no pod resolution needed, unlike the placement-server's pod-triggered EAO lookup). Three cases, in order: (1) energy reported insufficient, (2) decision is `Delayed`/`Waiting`, (3) decision says `DeployImmediately`/`Scheduled` **and** a pod for this app is still `Pending` — meaning it was likely blocked by the energy gate earlier and the window has since reopened. Case 3 deliberately reads the EAO's *current* status rather than parsing `nextEvaluationTime` itself — by the time this runs, the EAO's own status already reflects the new window. Case 3 also sets `TriggerResult.BypassAction` — see below. |
+| `EnergyThreshold` | Finds the `EnergyAwareOrchestration` matching the profile's `ApplicationRef` directly (no pod resolution needed, unlike the placement-server's pod-triggered EAO lookup), and reads its verdict — the same one the energy gate uses (`EAO_RUN_NOW_ACTIONS` / `EAO_HOLD_ACTIONS`; `energyMetrics.sufficient` is ignored). (1) `Hold` (e.g. `Scheduled` with the slot still ahead) matches and asks the AI. (2) `RunNow` (`DeployImmediately`, or a hold whose `slotStart` has passed, even if the EAO hasn't re-evaluated yet) **and** a pod for this app is still `Pending` — it was likely held by the energy gate and the window has since opened; this case sets `TriggerResult.BypassAction` — see below. (3) `Unknown` (no decision, an EAO failure such as `Waiting`, an unmapped action) never matches. A pod held before its slot is never retried early. |
 | `CPUThreshold` / `MemoryThreshold` | Delegates to `NodePressureEvaluator` for every distinct node the profile's pods are currently on. |
 | `NodeFailure` | `NotReady` condition on any node hosting one of the profile's pods. |
 | `Scheduled` | Always matches — the periodic tick itself *is* the schedule. |
@@ -528,10 +528,9 @@ flowchart TD
     Aware -- no --> Failed(["Failed<br/>(unchanged)"])
     Aware -- yes --> Lookup["FindEAOForApp<br/>(fresh read, not the<br/>Evaluating-stage snapshot)"]
     Lookup -- "not found / lookup error" --> Failed
-    Lookup -- found --> Sufficient{"status.energyMetrics<br/>.sufficient?"}
-    Sufficient -- "field absent" --> Failed
-    Sufficient -- "true" --> Failed
-    Sufficient -- "false" --> Deferred(["Deferred<br/>(energy gate closed: reason)"])
+    Lookup -- found --> Verdict{"EAO verdict?"}
+    Verdict -- "RunNow / Unknown" --> Failed
+    Verdict -- "Hold" --> Deferred(["Deferred<br/>(energy gate closed: reason; held until)"])
 ```
 
 Two things worth calling out:
@@ -541,11 +540,12 @@ Two things worth calling out:
   the gate can flip open or closed well within an enactor's own timeout window (default 60s), so
   only a read taken right here is trustworthy.
 - **It mirrors `CheckEnergyGate`'s own gating precisely** (`internal/placement-server/
-  builder.go`): `Awareness.Energy` is checked first, exactly like the gate itself does, so a
-  workload the gate would never have blocked in the first place isn't misclassified just
-  because some unrelated `EnergyAwareOrchestration` happens to exist and happens to report
-  insufficient energy. Every "can't confirm" case falls back to the original `Failed` — this
-  only ever reclassifies toward `Deferred` on a positive, direct signal, never guesses.
+  eao.go`): `Awareness.Energy` is checked first, exactly like the gate itself does, and both
+  read the same EAO verdict, so a workload the gate would never have blocked in the first
+  place isn't misclassified just because some unrelated `EnergyAwareOrchestration` happens to
+  exist and happens to hold. Every "can't confirm" case (`RunNow`, `Unknown`) falls back to the
+  original `Failed` — this only ever reclassifies toward `Deferred` on a positive, direct
+  signal (a `Hold`), never guesses.
 
 Out of scope: `resourceEnactor`'s best-effort in-place resize never goes through the
 scheduler at all (it's a direct kubelet-level operation on an already-running pod), so the
@@ -995,7 +995,9 @@ decisionStore := placementserver.NewDecisionStore(rebalanceDecisionStoreTTL)
 
 metricsClient, _ := metricsclientset.NewForConfig(restConfig)
 pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, rebalanceNodePressureThreshold)
-triggerEvaluator := rebalance.NewTriggerEvaluator(mgr.GetClient(), eaoGVK, pressureEvaluator)
+// eaoSettings (placementserver.EAOSettings) is the same value the contextBuilder gets: how to find an
+// app's EAO and read its decision, so the energy gate, this trigger and the timeout label agree.
+triggerEvaluator := rebalance.NewTriggerEvaluator(mgr.GetClient(), eaoSettings, pressureEvaluator)
 
 // contextBuilder and decisionClient are the same instances the placement server
 // uses for initial-placement scoring — the rebalance engine's AI consultation is

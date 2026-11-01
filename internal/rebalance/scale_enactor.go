@@ -23,13 +23,13 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
+	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 )
 
 // Never Ever delete this comments as they are used by kubebuilder to generate RBAC permissions for the controller.
@@ -132,7 +132,7 @@ func resolveReplicaBounds(
 func scaleEnactor(
 	ctx context.Context,
 	c client.Client,
-	eaoGVK schema.GroupVersionKind,
+	eaoSettings placementserver.EAOSettings,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
 	targetReplicas int32,
 	reason string,
@@ -184,7 +184,7 @@ func scaleEnactor(
 	}
 
 	if waitErr := awaitReadyReplicas(ctx, c, string(ref.Kind), key, targetReplicas, timeout); waitErr != nil {
-		outcome, reason := classifyScheduleTimeout(ctx, c, eaoGVK, profile, waitErr.Error())
+		outcome, reason := classifyScheduleTimeout(ctx, c, eaoSettings, profile, waitErr.Error())
 		if outcome == OutcomeFailed {
 			metrics.RebalanceEnactmentFailuresTotal.
 				WithLabelValues(action, metrics.EnactStageWaitReplacement).Inc()

@@ -296,7 +296,7 @@ Every parameter can be set as an environment variable before calling any deploy 
 | `EAO_VERSION` | `v1` | API version |
 | `EAO_KIND` | `EnergyAwareOrchestration` | Kind name |
 | `EAO_RUN_NOW_ACTIONS` | `DeployImmediately` | EAO `decision.action` values that mean the workload may run now (verdict `RunNow`) |
-| `EAO_HOLD_ACTIONS` | `Scheduled,Delayed` | Values that mean no energy now (verdict `Hold`, until the slot start). Anything in neither list is `Unknown` and logged. A value in both lists stops the operator at startup |
+| `EAO_HOLD_ACTIONS` | `Scheduled,Delayed` | Values that mean no energy now (verdict `Hold`, until the slot start). Anything in neither list is `Unknown` and logged. A value in both lists stops the operator at startup. The verdict drives the energy gate (only `Hold` keeps new pods Pending), the EnergyThreshold trigger, the Move/Scale timeout label and the AI request; `energyMetrics.sufficient` is informational only |
 
 #### Operator — Rebalance Engine
 

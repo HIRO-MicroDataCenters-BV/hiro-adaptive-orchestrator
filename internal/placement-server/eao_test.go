@@ -205,6 +205,51 @@ func TestCheckEnergyGate_MissingEAOIsDistinguishableFromAllow(t *testing.T) {
 	}
 }
 
+// The gate follows the EAO's verdict, never energyMetrics.sufficient.
+func TestCheckEnergyGate_FollowsTheVerdict(t *testing.T) {
+	withSlot := func(eao *unstructured.Unstructured, start time.Time) *unstructured.Unstructured {
+		_ = unstructured.SetNestedField(eao.Object, start.UTC().Format(time.RFC3339),
+			"status", "decision", "scheduledSlot", "slotStart")
+		return eao
+	}
+	ahead := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	started := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name        string
+		eao         *unstructured.Unstructured
+		holdActions []string // nil keeps the default mapping
+		wantAllowed bool
+		wantReason  string
+	}{
+		{name: "slot ahead holds the pod",
+			eao:        withSlot(testRebalanceEAO("Optional", 200, "Scheduled", "optional: later slot", false), ahead),
+			wantReason: "optional: later slot; held until 2099-01-01T00:00:00Z"},
+		{name: "slot started lets it run even if the EAO lags",
+			eao: withSlot(testRebalanceEAO("Optional", 200, "Scheduled", "", false), started), wantAllowed: true},
+		{name: "Waiting is an EAO failure, not a hold",
+			eao: testRebalanceEAO("Optional", 200, "Waiting", "", false), wantAllowed: true},
+		{name: "DeployImmediately runs even when sufficient is false",
+			eao: testRebalanceEAO("Critical", 500, "DeployImmediately", "", false), wantAllowed: true},
+		{name: "a renamed hold action holds even when sufficient is true",
+			eao: testRebalanceEAO("Optional", 200, "Paused", "", true), holdActions: []string{"Paused"},
+			wantReason: "EAO holds the workload"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pod, rs := testDeploymentPod()
+			b := newTestBuilder(t, testRebalanceProfile(true), testAppDeployment(), rs, pod, tc.eao)
+			if tc.holdActions != nil {
+				b.eaoSettings.VerdictConfig.HoldActions = tc.holdActions
+			}
+			resp, err := b.CheckEnergyGate(context.Background(), pod)
+			if err != nil || resp.Allowed != tc.wantAllowed || resp.Reason != tc.wantReason {
+				t.Errorf("CheckEnergyGate = (%+v, %v), want allowed=%v reason=%q", resp, err, tc.wantAllowed, tc.wantReason)
+			}
+		})
+	}
+}
+
 // Energy awareness off means no EAO is consulted at all, so nothing is counted.
 func TestBuild_EAOFetchSkippedWhenEnergyOff(t *testing.T) {
 	pod, rs := testDeploymentPod()

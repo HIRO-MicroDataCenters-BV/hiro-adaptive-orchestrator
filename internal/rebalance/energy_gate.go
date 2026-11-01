@@ -18,13 +18,14 @@ package rebalance
 
 import (
 	"context"
+	"time"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
 
 // classifyScheduleTimeout decides how an enactor should report a timeout
@@ -43,18 +44,18 @@ import (
 // only a read taken at the moment of timeout is trustworthy.
 //
 // Mirrors CheckEnergyGate's own gating precisely (internal/placement-server/
-// builder.go): checks profile.Spec.Placement.Awareness.Energy first, same as
+// eao.go): checks profile.Spec.Placement.Awareness.Energy first, same as
 // the gate itself does, so a workload the gate would never have blocked in
 // the first place isn't misclassified just because some unrelated EAO
-// happens to exist and happens to be insufficient. Every "can't confirm"
-// case (awareness off, no matching EAO, lookup error, sufficient field not
-// yet populated) falls back to the original Failed classification — this
-// only ever reclassifies toward Deferred on a positive, direct signal, never
-// guesses.
+// happens to exist and happens to hold. Every "can't confirm" case
+// (awareness off, no matching EAO, lookup error, a RunNow or Unknown
+// verdict) falls back to the original Failed classification — this only
+// ever reclassifies toward Deferred on a positive, direct signal (a Hold),
+// never guesses.
 func classifyScheduleTimeout(
 	ctx context.Context,
 	c client.Client,
-	eaoGVK schema.GroupVersionKind,
+	eaoSettings placementserver.EAOSettings,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
 	timeoutReason string,
 ) (orchestrationv1alpha1.RebalanceOutcome, string) {
@@ -62,19 +63,14 @@ func classifyScheduleTimeout(
 		return OutcomeFailed, timeoutReason
 	}
 
-	eao, err := utils.FindEAOForApp(ctx, c, eaoGVK, profile.Spec.ApplicationRef)
+	eao, err := utils.FindEAOForApp(ctx, c, eaoSettings.GVK, profile.Spec.ApplicationRef)
 	if err != nil || eao == nil {
 		return OutcomeFailed, timeoutReason
 	}
 
-	sufficient, found, _ := unstructured.NestedBool(eao.Object, "status", "energyMetrics", "sufficient")
-	if !found || sufficient {
+	eaoCtx := placementserver.NewEAOContext(eao, eaoSettings.VerdictConfig, time.Now())
+	if eaoCtx.Verdict != placement.EAOVerdictHold {
 		return OutcomeFailed, timeoutReason
 	}
-
-	reason, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "reason")
-	if reason == "" {
-		reason = "energy supply reported insufficient"
-	}
-	return OutcomeDeferred, timeoutReason + " (energy gate closed: " + reason + ")"
+	return OutcomeDeferred, timeoutReason + " (energy gate closed: " + placementserver.HoldReason(eaoCtx) + ")"
 }

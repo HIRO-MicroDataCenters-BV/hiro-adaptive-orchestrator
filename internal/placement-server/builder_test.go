@@ -129,7 +129,7 @@ func newTestBuilder(t *testing.T, objs ...client.Object) *DecisionContextBuilder
 		WithIndex(&corev1.Pod{}, PodNodeNameIndex, PodNodeNameIndexFunc).
 		Build()
 
-	return NewDecisionContextBuilder(c, testProfileIndexField, testEAOGVK)
+	return NewDecisionContextBuilder(c, testProfileIndexField, NewEAOSettings(testEAOGVK))
 }
 
 func TestBuildRebalanceContext_AssemblesPlacementsAndCandidateNodes(t *testing.T) {

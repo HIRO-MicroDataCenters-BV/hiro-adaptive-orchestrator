@@ -25,7 +25,6 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -90,7 +89,7 @@ func moveEnactor(
 	ctx context.Context,
 	c client.Client,
 	store *placementserver.DecisionStore,
-	eaoGVK schema.GroupVersionKind,
+	eaoSettings placementserver.EAOSettings,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
 	podName, targetNode, reason, decisionID string,
 	replacementTimeout time.Duration,
@@ -154,7 +153,7 @@ func moveEnactor(
 	replacement, err := awaitReplacement(ctx, c, profile, beforeNames, replacementTimeout)
 	if err != nil {
 		store.Delete(key)
-		outcome, reason := classifyScheduleTimeout(ctx, c, eaoGVK, profile, err.Error())
+		outcome, reason := classifyScheduleTimeout(ctx, c, eaoSettings, profile, err.Error())
 		if outcome == OutcomeFailed {
 			metrics.RebalanceEnactmentFailuresTotal.WithLabelValues(
 				string(orchestrationv1alpha1.RebalanceActionMove),

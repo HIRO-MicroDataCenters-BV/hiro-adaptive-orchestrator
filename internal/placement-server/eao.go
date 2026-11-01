@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
@@ -46,6 +47,12 @@ type EAOVerdictConfig struct {
 	HoldActions   []string
 }
 
+// EAOSettings is how to find an app's EAO (GVK) and how to read its decision (VerdictConfig).
+type EAOSettings struct {
+	GVK           schema.GroupVersionKind
+	VerdictConfig EAOVerdictConfig
+}
+
 // DefaultEAOVerdictConfig returns the mapping for today's EAO values.
 func DefaultEAOVerdictConfig() EAOVerdictConfig {
 	return EAOVerdictConfig{
@@ -62,6 +69,11 @@ func (c EAOVerdictConfig) Validate() error {
 		}
 	}
 	return nil
+}
+
+// NewEAOSettings returns settings for gvk with the default action mapping.
+func NewEAOSettings(gvk schema.GroupVersionKind) EAOSettings {
+	return EAOSettings{GVK: gvk, VerdictConfig: DefaultEAOVerdictConfig()}
 }
 
 // eaoVerdict translates the EAO's decision; a hold whose slot has started is RunNow,
@@ -148,7 +160,7 @@ func (b *DecisionContextBuilder) fetchEAOForPod(
 	appRef := orchestrationv1alpha1.ApplicationReference{
 		Name: appName, Namespace: appNamespace, Kind: orchestrationv1alpha1.ApplicationKind(appKind),
 	}
-	eao, err := utils.FindEAOForApp(ctx, b.client, b.eaoGVK, appRef)
+	eao, err := utils.FindEAOForApp(ctx, b.client, b.eaoSettings.GVK, appRef)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +252,7 @@ func (b *DecisionContextBuilder) fetchEAOProfileForApp(
 	ctx context.Context,
 	appRef orchestrationv1alpha1.ApplicationReference,
 ) (*EAOProfileContext, error) {
-	eao, err := utils.FindEAOForApp(ctx, b.client, b.eaoGVK, appRef)
+	eao, err := utils.FindEAOForApp(ctx, b.client, b.eaoSettings.GVK, appRef)
 	if err != nil {
 		return nil, err
 	}
@@ -250,10 +262,28 @@ func (b *DecisionContextBuilder) fetchEAOProfileForApp(
 	return b.eaoContext(ctx, eao), nil
 }
 
+// NewEAOContext maps the EAO and adds its verdict at now; shared by the gate, the request and the rebalance engine.
+func NewEAOContext(eao *unstructured.Unstructured, cfg EAOVerdictConfig, now time.Time) *EAOProfileContext {
+	eaoCtx := mapEAOToProfileContext(eao)
+	eaoCtx.Verdict, eaoCtx.HoldUntil = eaoVerdict(eaoCtx.Decision, cfg, now)
+	return eaoCtx
+}
+
+// HoldReason explains a Hold: the EAO's own reason, plus when it ends if known.
+func HoldReason(eao *EAOProfileContext) string {
+	reason := "EAO holds the workload"
+	if eao.Decision != nil && eao.Decision.Reason != "" {
+		reason = eao.Decision.Reason
+	}
+	if eao.HoldUntil != nil {
+		reason += "; held until " + eao.HoldUntil.UTC().Format(time.RFC3339)
+	}
+	return reason
+}
+
 // eaoContext maps the EAO and adds its verdict; an unmapped action is logged, so an EAO change shows up.
 func (b *DecisionContextBuilder) eaoContext(ctx context.Context, eao *unstructured.Unstructured) *EAOProfileContext {
-	eaoCtx := mapEAOToProfileContext(eao)
-	eaoCtx.Verdict, eaoCtx.HoldUntil = eaoVerdict(eaoCtx.Decision, b.eaoVerdict, time.Now())
+	eaoCtx := NewEAOContext(eao, b.eaoSettings.VerdictConfig, time.Now())
 	if eaoCtx.Verdict == placement.EAOVerdictUnknown && eaoCtx.Decision != nil {
 		logf.FromContext(ctx).Info("builder: EAO action not mapped to a verdict",
 			"eao", eao.GetName(), "action", eaoCtx.Decision.Action)
@@ -278,15 +308,14 @@ func observeEAOFetch(caller string, eao *EAOProfileContext, err error) {
 // =============================================================================
 
 // CheckEnergyGate checks whether the pod's governing OrchestrationProfile has
-// energy awareness enabled and, if so, whether the EAO reports sufficient
-// energy for scheduling.
+// energy awareness enabled and, if so, whether the EAO's verdict holds the pod.
 //
 // Called by the scheduler extender /filter handler once per pod scheduling event.
 // Returns Allowed=true when:
 //   - no profile governs the pod (unmanaged pods are never gated)
 //   - energy awareness is disabled in the profile
 //   - EAO data is unavailable (best-effort; scheduling is not blocked)
-//   - EAO energy metrics indicate sufficient energy
+//   - the verdict is RunNow (including a hold whose slot has started) or Unknown (e.g. an EAO failure)
 func (b *DecisionContextBuilder) CheckEnergyGate(
 	ctx context.Context,
 	pod *corev1.Pod,
@@ -307,12 +336,8 @@ func (b *DecisionContextBuilder) CheckEnergyGate(
 		return EnergyGateResponse{Allowed: true}, nil
 	}
 
-	if eaoProfile.EnergyMetrics != nil && !eaoProfile.EnergyMetrics.Sufficient {
-		reason := "insufficient energy available"
-		if eaoProfile.Decision != nil && eaoProfile.Decision.Reason != "" {
-			reason = eaoProfile.Decision.Reason
-		}
-		return EnergyGateResponse{Allowed: false, Reason: reason}, nil
+	if eaoProfile.Verdict == placement.EAOVerdictHold {
+		return EnergyGateResponse{Allowed: false, Reason: HoldReason(eaoProfile)}, nil
 	}
 
 	return EnergyGateResponse{Allowed: true}, nil
