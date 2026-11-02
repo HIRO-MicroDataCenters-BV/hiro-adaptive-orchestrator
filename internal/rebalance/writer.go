@@ -54,6 +54,9 @@ type TransitionOptions struct {
 	// improvement score, dry-run marker).
 	Details string
 
+	// Trigger is the condition that started the cycle; read only when to == StateTriggered.
+	Trigger orchestrationv1alpha1.TriggerCondition
+
 	// Outcome is required whenever to == StateWatching — it is how the
 	// cycle that just ended is recorded in history. Ignored on
 	// every other transition.
@@ -161,6 +164,7 @@ func (w *StateWriter) Transition(
 			rs.StartedAt = now
 			rs.Action = ""
 			rs.Details = ""
+			rs.Trigger = opts.Trigger
 		}
 
 		rs.State = to
@@ -218,6 +222,7 @@ func (w *StateWriter) Transition(
 				}
 				entry := opts.Change
 				entry.Action = rs.Action
+				entry.Trigger = rs.Trigger
 				entry.Outcome = effectiveOutcome
 				entry.Reason = string(historyReason)
 				entry.Message = reason

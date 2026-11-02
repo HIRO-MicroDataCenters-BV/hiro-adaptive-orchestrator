@@ -374,6 +374,16 @@ spec:
                         toReplicas:
                           format: int32
                           type: integer
+                        trigger:
+                          description: trigger is the condition that started the cycle,
+                            so each trigger can read its own tries.
+                          enum:
+                          - CPUThreshold
+                          - MemoryThreshold
+                          - EnergyThreshold
+                          - NodeFailure
+                          - Scheduled
+                          type: string
                       required:
                       - action
                       - at
@@ -402,6 +412,16 @@ spec:
                     - Evaluating
                     - Decided
                     - Enacting
+                    type: string
+                  trigger:
+                    description: trigger is the trigger condition that started the
+                      current cycle.
+                    enum:
+                    - CPUThreshold
+                    - MemoryThreshold
+                    - EnergyThreshold
+                    - NodeFailure
+                    - Scheduled
                     type: string
                 type: object
               status:

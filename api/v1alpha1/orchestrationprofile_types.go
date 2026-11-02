@@ -191,6 +191,10 @@ type RebalancingStatus struct {
 	// +optional
 	Action RebalanceAction `json:"action,omitempty"`
 
+	// trigger is the trigger condition that started the current cycle.
+	// +optional
+	Trigger TriggerCondition `json:"trigger,omitempty"`
+
 	// details carries free-form, state-specific context for the current cycle
 	// (e.g. target node, improvement score, dry-run marker).
 	// +optional
@@ -237,6 +241,10 @@ type HistoryEntry struct {
 	// action has no enum: the AI may return new actions.
 	Action  RebalanceAction  `json:"action"`
 	Outcome RebalanceOutcome `json:"outcome"`
+
+	// trigger is the condition that started the cycle, so each trigger can read its own tries.
+	// +optional
+	Trigger TriggerCondition `json:"trigger,omitempty"`
 
 	// reason is a short CamelCase code for where the cycle ended; not an enum, so new codes need no CRD change.
 	Reason string `json:"reason"`

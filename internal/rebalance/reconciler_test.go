@@ -186,6 +186,147 @@ func TestReconciler_InCooldownSkipsAndRequeuesAtExpiry(t *testing.T) {
 	}
 }
 
+// NodeFailure reads only its own history entries: progress keeps it going, anything else waits its own cooldown.
+func TestReconciler_NodeFailureDue(t *testing.T) {
+	now := time.Now()
+	tried := metav1.NewTime(now.Add(-time.Minute)) // after node-a failed
+	moveOffDead := orchestrationv1alpha1.HistoryEntry{
+		Trigger: TriggerNodeFailure, Action: orchestrationv1alpha1.RebalanceActionMove,
+		Outcome: OutcomeEnacted, SourceNode: "node-a", At: tried,
+	}
+	moveOffHealthy := moveOffDead
+	moveOffHealthy.SourceNode = "node-b"
+	moveOffGone := moveOffDead
+	moveOffGone.SourceNode = "node-gone"
+	unsuccessful := orchestrationv1alpha1.HistoryEntry{
+		Trigger: TriggerNodeFailure, Action: orchestrationv1alpha1.RebalanceActionMove,
+		Outcome: OutcomeDeferred, At: tried,
+	}
+	waitOver := unsuccessful
+	waitOver.At = metav1.NewTime(now.Add(-6 * time.Minute))
+	beforeFailure := unsuccessful
+	beforeFailure.At = metav1.NewTime(now.Add(-11 * time.Minute))
+	otherRetry := orchestrationv1alpha1.HistoryEntry{
+		Trigger: TriggerEnergyThreshold, Action: orchestrationv1alpha1.RebalanceAction(ActionRetryPendingSchedule),
+		Outcome: OutcomeEnacted, At: metav1.NewTime(now),
+	}
+	otherMove := moveOffHealthy
+	otherMove.Trigger, otherMove.At = TriggerCPUThreshold, metav1.NewTime(now)
+	nodeFailureOnly := []orchestrationv1alpha1.TriggerCondition{TriggerNodeFailure}
+
+	cases := []struct {
+		name        string
+		triggers    []orchestrationv1alpha1.TriggerCondition
+		dryRun      bool
+		history     []orchestrationv1alpha1.HistoryEntry
+		wantDue     bool
+		wantRetryIn time.Duration
+	}{
+		{name: "not declared", triggers: []orchestrationv1alpha1.TriggerCondition{TriggerScheduled}},
+		{name: "dry-run keeps the shared cooldown", triggers: nodeFailureOnly, dryRun: true},
+		{name: "first try", triggers: nodeFailureOnly, wantDue: true},
+		{name: "first try for a node that failed after the latest try", triggers: nodeFailureOnly,
+			history: []orchestrationv1alpha1.HistoryEntry{beforeFailure}, wantDue: true},
+		{name: "a pod just left a dead node: keep going", triggers: nodeFailureOnly,
+			history: []orchestrationv1alpha1.HistoryEntry{moveOffDead}, wantDue: true},
+		{name: "a pod left a node that is gone: keep going", triggers: nodeFailureOnly,
+			history: []orchestrationv1alpha1.HistoryEntry{moveOffGone}, wantDue: true},
+		{name: "a Move off a healthy node is no progress", triggers: nodeFailureOnly,
+			history: []orchestrationv1alpha1.HistoryEntry{moveOffHealthy}, wantRetryIn: 4 * time.Minute},
+		{name: "an unsuccessful try waits its own cooldown", triggers: nodeFailureOnly,
+			history: []orchestrationv1alpha1.HistoryEntry{unsuccessful}, wantRetryIn: 4 * time.Minute},
+		{name: "its own wait is over", triggers: nodeFailureOnly,
+			history: []orchestrationv1alpha1.HistoryEntry{waitOver}, wantDue: true},
+		{name: "a newer retry from another trigger doesn't count", triggers: nodeFailureOnly,
+			history: []orchestrationv1alpha1.HistoryEntry{otherRetry, unsuccessful}, wantRetryIn: 4 * time.Minute},
+		{name: "a newer Move from another trigger doesn't hide progress", triggers: nodeFailureOnly,
+			history: []orchestrationv1alpha1.HistoryEntry{otherMove, moveOffDead}, wantDue: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			profile := testProfileWithConditions(tc.triggers...)
+			profile.Spec.Rebalancing.CooldownSeconds = 300
+			profile.Spec.Rebalancing.DryRun = tc.dryRun
+			profile.Status.RebalancingStatus.History = tc.history
+			r, _ := newTestReconciler(t, testDeployment(), testPod("app-a-1", "node-a", corev1.PodRunning),
+				notReadySince("node-a", now.Add(-10*time.Minute)), readyTargetNode())
+
+			due, result, retryIn, err := r.nodeFailureDue(context.Background(), profile, now)
+			if err != nil {
+				t.Fatalf("nodeFailureDue: %v", err)
+			}
+			if due != tc.wantDue || retryIn != tc.wantRetryIn {
+				t.Fatalf("due=%v retryIn=%v, want due=%v retryIn=%v", due, retryIn, tc.wantDue, tc.wantRetryIn)
+			}
+			if due && (result.Condition != TriggerNodeFailure || result.Detail.Node != "node-a") {
+				t.Errorf("result = %+v, want NodeFailure on node-a", result)
+			}
+		})
+	}
+}
+
+// NodeFailure goes ahead of an earlier-declared trigger and the shared cooldown, records its trigger,
+// and waits after an unsuccessful try instead of looping.
+func TestReconciler_NodeFailureGoesFirst(t *testing.T) {
+	profile := testProfileWithConditions(TriggerScheduled, TriggerNodeFailure)
+	profile.Spec.Rebalancing.CooldownSeconds = 300
+	profile.Status.RebalancingStatus.State = StateWatching
+	profile.Status.RebalancingStatus.CooldownUntil = metav1.NewTime(time.Now().Add(4 * time.Minute))
+	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
+	r, c := newTestReconciler(t, testDeployment(), pod, notReadySince("node-a", time.Now().Add(-10*time.Second)), profile)
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
+	if rs.DecisionID == "" || rs.Trigger != TriggerNodeFailure {
+		t.Fatalf("decisionId=%q trigger=%q, want a NodeFailure cycle despite the cooldown", rs.DecisionID, rs.Trigger)
+	}
+	if len(rs.History) == 0 || rs.History[0].Trigger != TriggerNodeFailure {
+		t.Fatalf("history = %+v, want the newest entry recorded with trigger NodeFailure", rs.History)
+	}
+
+	// The AI is unreachable, so the try failed; its status write wakes the reconcile at once, which must wait.
+	res, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+	if after := getProfile(t, c, profile.Name).Status.RebalancingStatus.DecisionID; after != rs.DecisionID {
+		t.Errorf("second reconcile started another cycle (%q → %q), want a wait after a failed try", rs.DecisionID, after)
+	}
+	if res.RequeueAfter <= 30*time.Second {
+		t.Errorf("RequeueAfter = %v, want NodeFailure's own wait (~5m)", res.RequeueAfter)
+	}
+}
+
+// Another action's cooldown doesn't delay NodeFailure: the reconcile wakes when NodeFailure's own wait ends.
+func TestReconciler_NodeFailureWaitIgnoresOtherCooldowns(t *testing.T) {
+	now := time.Now()
+	profile := testProfileWithConditions(TriggerNodeFailure)
+	profile.Spec.Rebalancing.CooldownSeconds = 300
+	profile.Status.RebalancingStatus.State = StateWatching
+	// A pending-pod retry re-armed the shared cooldown after NodeFailure's unsuccessful try 4 minutes ago.
+	profile.Status.RebalancingStatus.CooldownUntil = metav1.NewTime(now.Add(5 * time.Minute))
+	profile.Status.RebalancingStatus.History = []orchestrationv1alpha1.HistoryEntry{
+		{Trigger: TriggerEnergyThreshold, Action: orchestrationv1alpha1.RebalanceAction(ActionRetryPendingSchedule),
+			Outcome: OutcomeEnacted, At: metav1.NewTime(now)},
+		{Trigger: TriggerNodeFailure, Action: orchestrationv1alpha1.RebalanceActionMove,
+			Outcome: OutcomeDeferred, At: metav1.NewTime(now.Add(-4 * time.Minute))},
+	}
+	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
+	r, _ := newTestReconciler(t, testDeployment(), pod, notReadySince("node-a", now.Add(-10*time.Minute)), profile)
+
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.RequeueAfter <= 30*time.Second || res.RequeueAfter > time.Minute {
+		t.Errorf("RequeueAfter = %v, want NodeFailure's own remaining wait (~1m), not the shared cooldown (~5m)",
+			res.RequeueAfter)
+	}
+}
+
 func TestReconciler_CycleInFlightSkipsDetection(t *testing.T) {
 	profile := testProfileWithConditions(TriggerScheduled)
 	profile.Status.RebalancingStatus.State = StateEvaluating // already past Triggered

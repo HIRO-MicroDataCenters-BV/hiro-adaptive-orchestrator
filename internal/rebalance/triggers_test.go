@@ -362,6 +362,16 @@ func TestTriggerEvaluator_NodeFailureIgnoresTerminatingPod(t *testing.T) {
 	}
 }
 
+// notReadySince is a node that went NotReady at since.
+func notReadySince(name string, since time.Time) *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+			Type: corev1.NodeReady, Status: corev1.ConditionUnknown, LastTransitionTime: metav1.NewTime(since),
+		}}},
+	}
+}
+
 func TestTriggerEvaluator_NodeHealthyNoMatch(t *testing.T) {
 	profile := testProfileWithConditions(TriggerNodeFailure)
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)

@@ -19,6 +19,7 @@ package rebalance
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -307,7 +308,8 @@ func NewReconciler(
 
 // Reconcile checks one profile's trigger conditions and transitions it to
 // Triggered if warranted. Cooldown only gates the AI-consultation path, not
-// the mechanical bypass path — see the BypassAction branch below for why.
+// the mechanical bypass path — see the BypassAction branch below for why —
+// and NodeFailure goes first, skipping it while it makes progress (see nodeFailureDue).
 func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 
@@ -342,6 +344,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl
 		return ctrl.Result{RequeueAfter: r.DetectionInterval}, nil
 	}
 
+	// NodeFailure goes first: its pods are down, so it skips the shared cooldown while it makes progress.
+	due, nodeResult, nodeRetryIn, err := r.nodeFailureDue(ctx, profile, time.Now())
+	if err != nil {
+		logger.Error(err, "rebalance: NodeFailure check failed", "profile", profile.Name)
+	}
+	if due {
+		logger.Info("rebalance: NodeFailure goes ahead of other triggers and the cooldown",
+			"profile", profile.Name, "node", nodeResult.Detail.Node)
+		r.evaluateWithAI(ctx, req.NamespacedName, profile, nodeResult)
+		return ctrl.Result{RequeueAfter: r.DetectionInterval}, nil
+	}
+
 	matched, result, err := r.Evaluator.Evaluate(ctx, profile)
 	if err != nil {
 		logger.Error(err, "rebalance: trigger evaluation failed", "profile", profile.Name)
@@ -371,12 +385,62 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl
 			logger.V(1).Info("rebalance: still in cooldown, skipping AI consultation",
 				"profile", profile.Name, "remaining", remaining)
 			metrics.RebalanceCooldownSkipsTotal.Inc()
+			if nodeRetryIn > 0 {
+				remaining = min(remaining, nodeRetryIn) // NodeFailure's own wait may end first
+			}
 			return ctrl.Result{RequeueAfter: remaining}, nil
 		}
 	}
 
 	r.evaluateWithAI(ctx, req.NamespacedName, profile, result)
 	return ctrl.Result{RequeueAfter: r.DetectionInterval}, nil
+}
+
+// nodeFailureDue reports whether a declared NodeFailure acts now, ahead of other triggers and the shared cooldown:
+// a NotReady node still hosts the app's live pods, and NodeFailure's own latest history entry allows it.
+// retryIn is how long it still waits after its own unsuccessful try; 0 when it isn't waiting.
+func (r *Reconciler) nodeFailureDue(
+	ctx context.Context,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	now time.Time,
+) (due bool, result TriggerResult, retryIn time.Duration, err error) {
+	rebalancing := profile.Spec.Rebalancing
+	// Dry-run writes no history, so it can't tell its own tries apart; it keeps the shared cooldown.
+	if rebalancing.DryRun || !slices.Contains(rebalancing.TriggerConditions, TriggerNodeFailure) {
+		return false, TriggerResult{}, 0, nil
+	}
+	pods, err := utils.FindPodsForApplication(ctx, r.Client, profile.Spec.ApplicationRef)
+	if err != nil {
+		return false, TriggerResult{}, 0, fmt.Errorf("finding pods for the NodeFailure check: %w", err)
+	}
+	failed := r.Evaluator.failedNodes(ctx, pods)
+	if len(failed) == 0 {
+		return false, TriggerResult{}, 0, nil
+	}
+	result = TriggerResult{
+		Condition: TriggerNodeFailure,
+		Reason:    fmt.Sprintf("node %s is not Ready (pod %s)", failed[0].node, failed[0].pod),
+		Detail:    TriggerDetail{Node: failed[0].node},
+	}
+
+	latest := latestEntryForTrigger(profile.Status.RebalancingStatus.History, TriggerNodeFailure)
+	if latest == nil {
+		return true, result, 0, nil // first try
+	}
+	for _, f := range failed {
+		if f.since.After(latest.At.Time) {
+			return true, result, 0, nil // first try for a node that failed after it
+		}
+	}
+	if latest.Action == orchestrationv1alpha1.RebalanceActionMove && latest.Outcome == OutcomeEnacted &&
+		latest.SourceNode != "" && r.unusableTarget(ctx, latest.SourceNode) != "" {
+		return true, result, 0, nil // a pod just left a dead node: keep going
+	}
+	retryIn = time.Duration(rebalancing.CooldownSeconds)*time.Second - now.Sub(latest.At.Time)
+	if retryIn <= 0 {
+		return true, result, 0, nil // its own wait after an unsuccessful try is over
+	}
+	return false, TriggerResult{}, retryIn, nil
 }
 
 // enactBypassAction drives Triggered -> Evaluating -> Decided -> Enacting ->
@@ -399,7 +463,8 @@ func (r *Reconciler) enactBypassAction(
 	reason := fmt.Sprintf("%s: %s", result.Condition, result.Reason)
 	bypassAction := orchestrationv1alpha1.RebalanceAction(result.BypassAction)
 
-	if _, err := r.Writer.Transition(ctx, key, StateTriggered, reason, TransitionOptions{}); err != nil {
+	if _, err := r.Writer.Transition(ctx, key, StateTriggered, reason,
+		TransitionOptions{Trigger: result.Condition}); err != nil {
 		logger.Error(err, "rebalance: bypass transition to Triggered failed", "profile", profile.Name)
 		return
 	}
@@ -495,7 +560,8 @@ func (r *Reconciler) evaluateWithAI(
 	logger := logf.FromContext(ctx)
 	reason := fmt.Sprintf("%s: %s", result.Condition, result.Reason)
 
-	if _, err := r.Writer.Transition(ctx, key, StateTriggered, reason, TransitionOptions{}); err != nil {
+	if _, err := r.Writer.Transition(ctx, key, StateTriggered, reason,
+		TransitionOptions{Trigger: result.Condition}); err != nil {
 		logger.Error(err, "rebalance: AI-path transition to Triggered failed", "profile", profile.Name)
 		return
 	}

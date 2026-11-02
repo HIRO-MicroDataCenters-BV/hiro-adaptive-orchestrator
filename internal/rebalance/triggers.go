@@ -92,6 +92,13 @@ type TriggerDetail struct {
 	Threshold *float64
 }
 
+// nodeFailure is a node hosting one of the app's pods that isn't Ready, and since when.
+type nodeFailure struct {
+	node  string
+	pod   string
+	since time.Time
+}
+
 // TriggerEvaluator evaluates an OrchestrationProfile's declared rebalancing
 // trigger conditions against current cluster state.
 //
@@ -141,7 +148,7 @@ func (e *TriggerEvaluator) Evaluate(
 		case TriggerMemoryThreshold:
 			ok, r, detail = e.evaluateNodeResource(ctx, pods, cond, e.pressure.readMemory)
 		case TriggerNodeFailure:
-			ok, r, detail = e.evaluateNodeFailure(ctx, pods, cond)
+			ok, r, detail = e.evaluateNodeFailure(ctx, pods)
 		case TriggerScheduled:
 			ok, r = true, "scheduled rebalance window reached"
 		default:
@@ -195,15 +202,11 @@ func (e *TriggerEvaluator) evaluateNodeResource(
 	return false, "", TriggerDetail{}
 }
 
-// evaluateNodeFailure reports whether any node hosting one of the
-// profile's pods currently reports NotReady.
-func (e *TriggerEvaluator) evaluateNodeFailure(
-	ctx context.Context,
-	pods []corev1.Pod,
-	cond orchestrationv1alpha1.TriggerCondition,
-) (bool, string, TriggerDetail) {
+// failedNodes lists the nodes hosting the app's pods that report NotReady, in pod order.
+func (e *TriggerEvaluator) failedNodes(ctx context.Context, pods []corev1.Pod) []nodeFailure {
 	logger := logf.FromContext(ctx)
 
+	var failed []nodeFailure
 	seen := map[string]bool{}
 	for _, pod := range pods {
 		nodeName := pod.Spec.NodeName
@@ -214,19 +217,29 @@ func (e *TriggerEvaluator) evaluateNodeFailure(
 
 		node := &corev1.Node{}
 		if err := e.client.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
-			metrics.RebalanceTriggerErrorsTotal.WithLabelValues(string(cond)).Inc()
+			metrics.RebalanceTriggerErrorsTotal.WithLabelValues(string(TriggerNodeFailure)).Inc()
 			logger.V(1).Info("rebalance: could not fetch node for NodeFailure check, skipping",
 				"node", nodeName, "err", err)
 			continue
 		}
 		for _, cond := range node.Status.Conditions {
 			if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
-				return true, fmt.Sprintf("node %s is not Ready (pod %s)", nodeName, pod.Name),
-					TriggerDetail{Node: nodeName}
+				failed = append(failed, nodeFailure{node: nodeName, pod: pod.Name, since: cond.LastTransitionTime.Time})
 			}
 		}
 	}
-	return false, "", TriggerDetail{}
+	return failed
+}
+
+// evaluateNodeFailure reports whether any node hosting one of the
+// profile's pods currently reports NotReady.
+func (e *TriggerEvaluator) evaluateNodeFailure(ctx context.Context, pods []corev1.Pod) (bool, string, TriggerDetail) {
+	failed := e.failedNodes(ctx, pods)
+	if len(failed) == 0 {
+		return false, "", TriggerDetail{}
+	}
+	f := failed[0]
+	return true, fmt.Sprintf("node %s is not Ready (pod %s)", f.node, f.pod), TriggerDetail{Node: f.node}
 }
 
 // evaluateEnergyThreshold finds the EnergyAwareOrchestration resource
