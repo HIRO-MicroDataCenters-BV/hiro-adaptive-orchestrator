@@ -65,7 +65,7 @@ type PlacementSpec struct {
 }
 
 // TriggerCondition enumerates the supported rebalancing trigger conditions.
-// +kubebuilder:validation:Enum=CPUThreshold;MemoryThreshold;EnergyThreshold;NodeFailure;Scheduled
+// +kubebuilder:validation:Enum=CPUThreshold;MemoryThreshold;EnergyThreshold;NodeFailure;PeriodicReview
 type TriggerCondition string
 
 const (
@@ -73,7 +73,7 @@ const (
 	TriggerConditionMemoryThreshold TriggerCondition = "MemoryThreshold"
 	TriggerConditionEnergyThreshold TriggerCondition = "EnergyThreshold"
 	TriggerConditionNodeFailure     TriggerCondition = "NodeFailure"
-	TriggerConditionScheduled       TriggerCondition = "Scheduled"
+	TriggerConditionPeriodicReview  TriggerCondition = "PeriodicReview"
 )
 
 // Rebalancing Spec

@@ -133,7 +133,7 @@ spec:
                       - MemoryThreshold
                       - EnergyThreshold
                       - NodeFailure
-                      - Scheduled
+                      - PeriodicReview
                       type: string
                     type: array
                 required:
@@ -374,7 +374,7 @@ spec:
                           - MemoryThreshold
                           - EnergyThreshold
                           - NodeFailure
-                          - Scheduled
+                          - PeriodicReview
                           type: string
                       required:
                       - action
@@ -413,7 +413,7 @@ spec:
                     - MemoryThreshold
                     - EnergyThreshold
                     - NodeFailure
-                    - Scheduled
+                    - PeriodicReview
                     type: string
                 type: object
               status:

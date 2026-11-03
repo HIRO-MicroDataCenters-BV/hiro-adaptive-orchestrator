@@ -68,12 +68,12 @@ func TestEvaluate_UnevaluableConditionIsCounted(t *testing.T) {
 // A condition that fires must be recorded as fired, and must not be counted
 // as an error.
 func TestEvaluate_FiredConditionIsCounted(t *testing.T) {
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	evaluator := newTestTriggerEvaluator(t, testDeployment())
 
 	fired := metrics.RebalanceTriggerEvaluationsTotal.
-		WithLabelValues(string(TriggerScheduled), "true")
-	errCounter := metrics.RebalanceTriggerErrorsTotal.WithLabelValues(string(TriggerScheduled))
+		WithLabelValues(string(TriggerPeriodicReview), "true")
+	errCounter := metrics.RebalanceTriggerErrorsTotal.WithLabelValues(string(TriggerPeriodicReview))
 
 	beforeFired := testutil.ToFloat64(fired)
 	beforeErr := testutil.ToFloat64(errCounter)
@@ -83,7 +83,7 @@ func TestEvaluate_FiredConditionIsCounted(t *testing.T) {
 		t.Fatalf("Evaluate: %v", err)
 	}
 	if !matched {
-		t.Fatal("expected Scheduled to match")
+		t.Fatal("expected PeriodicReview to match")
 	}
 
 	if got := testutil.ToFloat64(fired) - beforeFired; got != 1 {

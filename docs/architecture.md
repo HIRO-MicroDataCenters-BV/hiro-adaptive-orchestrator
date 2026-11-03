@@ -333,7 +333,7 @@ spec:
     cooldownSeconds: 300
     triggerConditions:
       - "EnergyThreshold"     # EnergyThreshold | CPUThreshold | MemoryThreshold
-                              # | NodeFailure | Scheduled
+                              # | NodeFailure | PeriodicReview
     replicasExternallyManaged: false   # true: an HPA/KEDA/GitOps owns replicas — never changed
     resourcesExternallyManaged: false  # true: a VPA or similar owns CPU/memory — never changed
 ```

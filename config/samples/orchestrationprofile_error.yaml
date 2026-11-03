@@ -25,6 +25,6 @@ spec:
   # rebalancing:
   #   enabled: true
   #   cooldownSeconds: 300
-  #   # EnergyThreshold/CPUThreshold/MemoryThreshold/NodeFailure/Scheduled
+  #   # EnergyThreshold/CPUThreshold/MemoryThreshold/NodeFailure/PeriodicReview
   #   triggerConditions:
   #     - "EnergyThreshold"

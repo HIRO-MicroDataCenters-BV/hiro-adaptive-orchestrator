@@ -44,7 +44,7 @@ import (
 )
 
 // DefaultDetectionInterval is how often each rebalancing-enabled profile is
-// re-checked for slow-drifting trigger conditions (CPU/Memory/Scheduled)
+// re-checked for slow-drifting trigger conditions (CPU/Memory/PeriodicReview)
 // when no faster event has fired first.
 const DefaultDetectionInterval = 30 * time.Second
 
@@ -113,8 +113,8 @@ const DefaultWatchdogStaleThreshold = 15 * time.Minute
 //
 //   - Periodic — Reconcile always requeues itself after DetectionInterval,
 //     which is the only path that can catch CPUThreshold, MemoryThreshold,
-//     and Scheduled (there's no discrete Kubernetes event for "resource
-//     requests drifted" or "the scheduled window arrived").
+//     and PeriodicReview (there's no discrete Kubernetes event for "resource
+//     requests drifted" or "a periodic review is due").
 //   - Event-driven — Pod, Node, and (optionally) EnergyAwareOrchestration
 //     watches cause an immediate reconcile instead of waiting for the next
 //     tick, so EnergyThreshold and NodeFailure don't have to wait up to

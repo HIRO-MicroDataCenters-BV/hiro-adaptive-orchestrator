@@ -394,16 +394,16 @@ func TestTriggerEvaluator_NodeHealthyNoMatch(t *testing.T) {
 	}
 }
 
-func TestTriggerEvaluator_Scheduled(t *testing.T) {
-	profile := testProfileWithConditions(TriggerScheduled)
+func TestTriggerEvaluator_PeriodicReview(t *testing.T) {
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	evaluator := newTestTriggerEvaluator(t, testDeployment())
 
 	matched, result, err := evaluator.Evaluate(context.Background(), profile)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if !matched || result.Condition != TriggerScheduled {
-		t.Fatalf("matched=%v condition=%q, want true/%q", matched, result.Condition, TriggerScheduled)
+	if !matched || result.Condition != TriggerPeriodicReview {
+		t.Fatalf("matched=%v condition=%q, want true/%q", matched, result.Condition, TriggerPeriodicReview)
 	}
 }
 
@@ -421,9 +421,9 @@ func TestTriggerEvaluator_NoConditionsDeclaredNoMatch(t *testing.T) {
 }
 
 func TestTriggerEvaluator_FirstMatchWins(t *testing.T) {
-	// NodeFailure declared before Scheduled; NodeFailure doesn't match
-	// (node healthy) so Scheduled (always true) should be the one returned.
-	profile := testProfileWithConditions(TriggerNodeFailure, TriggerScheduled)
+	// NodeFailure declared before PeriodicReview; NodeFailure doesn't match
+	// (node healthy) so PeriodicReview (always true) should be the one returned.
+	profile := testProfileWithConditions(TriggerNodeFailure, TriggerPeriodicReview)
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
@@ -439,8 +439,8 @@ func TestTriggerEvaluator_FirstMatchWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if !matched || result.Condition != TriggerScheduled {
-		t.Fatalf("matched=%v condition=%q, want true/%q (NodeFailure shouldn't match, Scheduled should)",
-			matched, result.Condition, TriggerScheduled)
+	if !matched || result.Condition != TriggerPeriodicReview {
+		t.Fatalf("matched=%v condition=%q, want true/%q (NodeFailure shouldn't match, PeriodicReview should)",
+			matched, result.Condition, TriggerPeriodicReview)
 	}
 }

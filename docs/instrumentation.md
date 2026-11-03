@@ -131,7 +131,7 @@ placement is running blind. It isn't counted at all when a profile has energy aw
 | `action` | `improvement_score`, `guardrail_rejections_total`, `enactment_*` | `Move`, `AdjustReplicas`, `AdjustResources` |
 | `action` | `rate_limit_exhausted_total` | `Move` — the rate limiter applies to Moves only |
 | `outcome` | `transitions_total` | `Enacted`, `NoOp`, `Rejected`, `Deferred`, `Failed`, `Escalated`, or `""` while non-terminal |
-| `condition` | `trigger_*` | `CPUThreshold`, `MemoryThreshold`, `EnergyThreshold`, `NodeFailure`, `Scheduled` |
+| `condition` | `trigger_*` | `CPUThreshold`, `MemoryThreshold`, `EnergyThreshold`, `NodeFailure`, `PeriodicReview` |
 | `fired` | `trigger_evaluations_total` | `true`, `false` |
 | `guardrail` | `guardrail_rejections_total` | `threshold`, `bounds`, `target` |
 | `stage` | `enactment_failures_total` | `evict`, `patch`, `wait_replacement` |

@@ -127,7 +127,7 @@ type RebalanceState struct {
 // RebalanceTrigger is the trigger condition that started this evaluation.
 type RebalanceTrigger struct {
 	// Type is the profile's TriggerCondition that matched (CPUThreshold,
-	// MemoryThreshold, EnergyThreshold, NodeFailure, Scheduled).
+	// MemoryThreshold, EnergyThreshold, NodeFailure, PeriodicReview).
 	Type string `json:"type"`
 
 	// Node is the node the condition was observed on, for node-scoped triggers.

@@ -176,9 +176,9 @@ flowchart TD
 
 ### Why both paths exist
 
-- **CPUThreshold, MemoryThreshold, Scheduled** can *only* be caught by the periodic path —
-  there's no Kubernetes event for "resource usage drifted past a threshold" or "the
-  scheduled window arrived." `Reconcile` requeues itself every `DetectionInterval` (default
+- **CPUThreshold, MemoryThreshold, PeriodicReview** can *only* be caught by the periodic path —
+  there's no Kubernetes event for "resource usage drifted past a threshold" or "a
+  periodic review is due." `Reconcile` requeues itself every `DetectionInterval` (default
   30s) forever, for every rebalancing-enabled profile.
 - **EnergyThreshold, NodeFailure** are also checked on the periodic tick, but don't have to
   wait up to 30s — `Reconciler.SetupWithManager` wires watches on `Pod`, `Node`, and (if
@@ -217,7 +217,7 @@ flowchart TD
     C3 -- yes --> N{"hosting node<br/>NotReady?"}
     N -- yes --> Match
     N -- no --> C4
-    C3 -- no --> C4{"Scheduled<br/>declared?"}
+    C3 -- no --> C4{"PeriodicReview<br/>declared?"}
     C4 -- yes --> Match
     C4 -- no --> None(["no match this cycle"])
 ```
@@ -232,7 +232,7 @@ nothing to do this cycle. `NodeFailure` is checked before this walk (see its row
 | `EnergyThreshold` | Finds the `EnergyAwareOrchestration` matching the profile's `ApplicationRef` directly (no pod resolution needed, unlike the placement-server's pod-triggered EAO lookup), and reads its verdict — the same one the energy gate uses (`EAO_RUN_NOW_ACTIONS` / `EAO_HOLD_ACTIONS`; `energyMetrics.sufficient` is ignored). (1) `Hold` (e.g. `Scheduled` with the slot still ahead) matches and asks the AI. (2) `RunNow` (`DeployImmediately`, or a hold whose `slotStart` has passed, even if the EAO hasn't re-evaluated yet) **and** a pod for this app is still `Pending` — it was likely held by the energy gate and the window has since opened; this case sets `TriggerResult.BypassAction` — see below. (3) `Unknown` (no decision, an EAO failure such as `Waiting`, an unmapped action) never matches. A pod held before its slot is never retried early. |
 | `CPUThreshold` / `MemoryThreshold` | Delegates to `NodePressureEvaluator` for every distinct node the profile's pods are currently on. |
 | `NodeFailure` | `NotReady` node hosting one of the profile's live pods. **Goes first, ignoring the shared cooldown**, while it makes progress: it moves one pod per cycle until the dead nodes are empty. After any other result (NoOp, Failed, Deferred) it waits `cooldownSeconds` from its own last try. It reads only history entries with `trigger: NodeFailure`, so other triggers' actions never delay it. Dry-run keeps the shared cooldown. |
-| `Scheduled` | Always matches — the periodic tick itself *is* the schedule. |
+| `PeriodicReview` | Always matches, so the AI reviews the placement every `DetectionInterval`, paced by the cooldown. |
 
 EAO being unavailable, or a metrics-server call failing, is soft-failed per condition
 (logged at V(1), evaluator moves on) — never a hard error that would derail the whole

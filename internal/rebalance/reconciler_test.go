@@ -154,7 +154,7 @@ func TestReconciler_ProfileNotFound(t *testing.T) {
 }
 
 func TestReconciler_RebalancingDisabledNoOp(t *testing.T) {
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Spec.Rebalancing.Enabled = false
 	r, c := newTestReconciler(t, testDeployment(), profile)
 
@@ -173,7 +173,7 @@ func TestReconciler_RebalancingDisabledNoOp(t *testing.T) {
 }
 
 func TestReconciler_InCooldownSkipsAndRequeuesAtExpiry(t *testing.T) {
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Status.RebalancingStatus.CooldownUntil = metav1.NewTime(time.Now().Add(10 * time.Second))
 	r, _ := newTestReconciler(t, testDeployment(), profile)
 
@@ -222,7 +222,7 @@ func TestReconciler_NodeFailureDue(t *testing.T) {
 		wantDue     bool
 		wantRetryIn time.Duration
 	}{
-		{name: "not declared", triggers: []orchestrationv1alpha1.TriggerCondition{TriggerScheduled}},
+		{name: "not declared", triggers: []orchestrationv1alpha1.TriggerCondition{TriggerPeriodicReview}},
 		{name: "dry-run keeps the shared cooldown", triggers: nodeFailureOnly, dryRun: true},
 		{name: "first try", triggers: nodeFailureOnly, wantDue: true},
 		{name: "first try for a node that failed after the latest try", triggers: nodeFailureOnly,
@@ -268,7 +268,7 @@ func TestReconciler_NodeFailureDue(t *testing.T) {
 // NodeFailure goes ahead of an earlier-declared trigger and the shared cooldown, records its trigger,
 // and waits after an unsuccessful try instead of looping.
 func TestReconciler_NodeFailureGoesFirst(t *testing.T) {
-	profile := testProfileWithConditions(TriggerScheduled, TriggerNodeFailure)
+	profile := testProfileWithConditions(TriggerPeriodicReview, TriggerNodeFailure)
 	profile.Spec.Rebalancing.CooldownSeconds = 300
 	profile.Status.RebalancingStatus.State = StateWatching
 	profile.Status.RebalancingStatus.CooldownUntil = metav1.NewTime(time.Now().Add(4 * time.Minute))
@@ -328,7 +328,7 @@ func TestReconciler_NodeFailureWaitIgnoresOtherCooldowns(t *testing.T) {
 }
 
 func TestReconciler_CycleInFlightSkipsDetection(t *testing.T) {
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Status.RebalancingStatus.State = StateEvaluating // already past Triggered
 	profile.Status.RebalancingStatus.LastTransitionAt = metav1.Now()
 	r, c := newTestReconciler(t, testDeployment(), profile)
@@ -353,7 +353,7 @@ func TestReconciler_CycleInFlightSkipsDetection(t *testing.T) {
 // Watching with Outcome Failed and a cooldown, instead of being skipped
 // forever.
 func TestReconciler_StaleCycleRecoveredByWatchdog(t *testing.T) {
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Spec.Rebalancing.CooldownSeconds = 60
 	profile.Status.RebalancingStatus.State = StateEnacting
 	profile.Status.RebalancingStatus.LastTransitionAt = metav1.NewTime(time.Now().Add(-1 * time.Hour))
@@ -389,7 +389,7 @@ func TestReconciler_StaleCycleRecoveredByWatchdog(t *testing.T) {
 // recently entered a non-Watching state (still plausibly progressing) must
 // not be force-recovered.
 func TestReconciler_RecentStuckCycleLeftAlone(t *testing.T) {
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Status.RebalancingStatus.State = StateDecided
 	profile.Status.RebalancingStatus.LastTransitionAt = metav1.Now()
 	r, c := newTestReconciler(t, testDeployment(), profile)
@@ -427,14 +427,14 @@ func TestReconciler_NoTriggerMatchRequeuesWithoutTransition(t *testing.T) {
 	}
 }
 
-// TestReconciler_ScheduledTriggerReachesFailedWhenAIUnreachable covers the
+// TestReconciler_PeriodicReviewReachesFailedWhenAIUnreachable covers the
 // non-bypass path end to end: a trigger match with no mechanical answer
 // drives Triggered -> Evaluating -> (AI consultation) -> Watching (Outcome
 // Failed) when the External AI Agent can't be reached, all within one
 // Reconcile call. A successful AI response's continuation is covered
 // separately by TestReconciler_AIPathSuccessStopsAtEvaluating.
-func TestReconciler_ScheduledTriggerReachesFailedWhenAIUnreachable(t *testing.T) {
-	profile := testProfileWithConditions(TriggerScheduled)
+func TestReconciler_PeriodicReviewReachesFailedWhenAIUnreachable(t *testing.T) {
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	r, c := newTestReconciler(t, testDeployment(), profile)
 
 	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}})
@@ -509,7 +509,7 @@ func TestReconciler_MoveBelowThresholdRejected(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), profile)
 
 	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}})
@@ -546,7 +546,7 @@ func TestReconciler_NoOpDispatchedDirectly(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), profile)
 
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
@@ -578,7 +578,7 @@ func TestReconciler_UnrecognizedActionFailsDirectly(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), profile)
 
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
@@ -610,7 +610,7 @@ func TestReconciler_RejectDispatchedDirectly(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), profile)
 
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
@@ -641,7 +641,7 @@ func TestReconciler_DeferDispatchedDirectly(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Spec.Rebalancing.CooldownSeconds = 60
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), profile)
 
@@ -677,7 +677,7 @@ func TestReconciler_EscalateDispatchedDirectly(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), profile)
 
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
@@ -703,7 +703,7 @@ func TestReconciler_EscalateDispatchedDirectly(t *testing.T) {
 // to Escalated with the loop paused — without the AI ever being asked to
 // escalate itself.
 func TestReconciler_AutoEscalatesAfterConsecutiveFailures(t *testing.T) {
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Spec.Rebalancing.EscalationThreshold = 2
 	r, c := newTestReconciler(t, testDeployment(), profile)
 
@@ -727,7 +727,7 @@ func TestReconciler_AutoEscalatesAfterConsecutiveFailures(t *testing.T) {
 // Escalated is set, Reconcile must not evaluate triggers or touch state at
 // all, and must not keep self-requeuing (same posture as Enabled=false).
 func TestReconciler_EscalatedProfileSkipsDetection(t *testing.T) {
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Status.RebalancingStatus.Escalated = true
 	profile.Status.RebalancingStatus.EscalatedReason = "3 consecutive Failed outcomes"
 	r, c := newTestReconciler(t, testDeployment(), profile)
@@ -754,7 +754,7 @@ func TestReconciler_EscalatedProfileSkipsDetection(t *testing.T) {
 // flag (a plain status patch, per the documented recovery), the very next
 // Reconcile must resume normal detection instead of staying paused forever.
 func TestReconciler_ClearingEscalatedResumesDetection(t *testing.T) {
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Status.RebalancingStatus.Escalated = true
 	r, c := newTestReconciler(t, testDeployment(), profile)
 
@@ -802,7 +802,7 @@ func TestReconciler_MoveAboveThresholdReachesEnacting(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, readyTargetNode())
 	// Short-circuit awaitReplacement's poll loop — no replacement pod will
@@ -855,7 +855,7 @@ func TestReconciler_MoveToUnusableTargetRejected(t *testing.T) {
 			}))
 			defer server.Close()
 
-			profile := testProfileWithConditions(TriggerScheduled)
+			profile := testProfileWithConditions(TriggerPeriodicReview)
 			pod := testPod("app-a-1", "node-a", corev1.PodRunning)
 			objs := append([]client.Object{testDeployment(), pod, profile}, tc.nodes...)
 			r, c := newTestReconcilerWithAgent(t, server.URL, objs...)
@@ -921,7 +921,7 @@ func TestReconciler_MoveTimeoutWithoutEnergyAwarenessStaysFailed(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled) // Awareness.Energy: false
+	profile := testProfileWithConditions(TriggerPeriodicReview) // Awareness.Energy: false
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
 	eao := heldEAO("demo: energy window closed", time.Now().Add(time.Hour))
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao, readyTargetNode())
@@ -1034,7 +1034,7 @@ func TestReconciler_MoveRateLimitedFailsCleanly(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, readyTargetNode())
 	r.MoveRateLimiter = rate.NewLimiter(rate.Limit(0), 0) // burst 0: every Wait fails instantly
@@ -1076,7 +1076,7 @@ func TestReconciler_MoveDryRunSkipsSideEffectsAndRateLimit(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Spec.Rebalancing.DryRun = true
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, readyTargetNode())
@@ -1121,7 +1121,7 @@ func TestReconciler_MoveDryRunBelowThresholdStillRejected(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Spec.Rebalancing.DryRun = true
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
 	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile)

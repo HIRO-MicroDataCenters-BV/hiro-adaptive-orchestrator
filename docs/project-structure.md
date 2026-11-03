@@ -36,7 +36,7 @@ internal/
                                        #   HostPriority, EnergyGateResult
   rebalance/                           # See internal/rebalance/README.md for full details
     reconciler.go                      # Detection stage — hybrid periodic + event-driven triggers
-    triggers.go                        # TriggerEvaluator — Energy/CPU/Memory/NodeFailure/Scheduled
+    triggers.go                        # TriggerEvaluator — Energy/CPU/Memory/NodeFailure/PeriodicReview
     pressure.go                        # NodePressureEvaluator — CPU/Memory pressure via metrics-server
     writer.go                          # StateWriter — sole writer of status.rebalancingStatus
     state.go                           # Decision lifecycle state machine transition table

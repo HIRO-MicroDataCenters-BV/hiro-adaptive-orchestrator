@@ -107,7 +107,7 @@ func TestReconciler_ResourceAboveThresholdReachesEnacted(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	deploy := testResizableDeployment(true)
 	pod := testRunningPod("app-a-1")
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, pod, profile)
@@ -154,7 +154,7 @@ func TestReconciler_ResourceInPlaceResizeConfirmedConverged(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	deploy := testResizableDeployment(true)
 	pod := testRunningPod("app-a-1")
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
@@ -192,7 +192,7 @@ func TestReconciler_ResourceInPlaceResizeRejectedFallsBackToNextRollout(t *testi
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	deploy := testResizableDeployment(true)
 	pod := testRunningPod("app-a-1")
 	pod.Status.Conditions = []corev1.PodCondition{{
@@ -221,7 +221,7 @@ func TestReconciler_ResourceBelowThresholdRejected(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	deploy := testResizableDeployment(true)
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile)
 
@@ -242,7 +242,7 @@ func TestReconciler_ResourceMalformedMissingFieldsFails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	deploy := testResizableDeployment(true)
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile)
 
@@ -263,7 +263,7 @@ func TestReconciler_ResourceInvalidQuantityFails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	deploy := testResizableDeployment(true)
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile)
 
@@ -284,7 +284,7 @@ func TestReconciler_ResourceContainerNotFoundFails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	deploy := testResizableDeployment(true)
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile)
 
@@ -312,7 +312,7 @@ func TestReconciler_ResourceNoExistingLimitsDeferred(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	deploy := testResizableDeployment(false) // no existing requests/limits
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile)
 
@@ -345,7 +345,7 @@ func TestReconciler_ResourceOutsideDefaultBoundsRejected(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	deploy := testResizableDeployment(true)
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile)
 
@@ -369,7 +369,7 @@ func TestReconciler_ResourceDryRunSkipsSideEffects(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Spec.Rebalancing.DryRun = true
 	deploy := testResizableDeployment(true)
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile)

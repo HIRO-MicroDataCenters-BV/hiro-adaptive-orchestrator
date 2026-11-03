@@ -25,13 +25,13 @@ spec:
   rebalancing:
     enabled: true
     cooldownSeconds: 300
-    # EnergyThreshold/CPUThreshold/MemoryThreshold/NodeFailure/Scheduled
+    # EnergyThreshold/CPUThreshold/MemoryThreshold/NodeFailure/PeriodicReview
     triggerConditions:
       - "CPUThreshold"
       - "MemoryThreshold"
       - "EnergyThreshold"
       - "NodeFailure"
-      - "Scheduled"
+      - "PeriodicReview"
     # true = an HPA/KEDA/GitOps (replicas) or a VPA (CPU/memory) owns it; never changed
     replicasExternallyManaged: false
     resourcesExternallyManaged: false

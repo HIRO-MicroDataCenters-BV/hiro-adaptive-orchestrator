@@ -40,7 +40,7 @@ const (
 	TriggerCPUThreshold    = orchestrationv1alpha1.TriggerConditionCPUThreshold
 	TriggerMemoryThreshold = orchestrationv1alpha1.TriggerConditionMemoryThreshold
 	TriggerNodeFailure     = orchestrationv1alpha1.TriggerConditionNodeFailure
-	TriggerScheduled       = orchestrationv1alpha1.TriggerConditionScheduled
+	TriggerPeriodicReview  = orchestrationv1alpha1.TriggerConditionPeriodicReview
 )
 
 // ActionRetryPendingSchedule is NOT a trigger condition — it never appears
@@ -149,8 +149,8 @@ func (e *TriggerEvaluator) Evaluate(
 			ok, r, detail = e.evaluateNodeResource(ctx, pods, cond, e.pressure.readMemory)
 		case TriggerNodeFailure:
 			ok, r, detail = e.evaluateNodeFailure(ctx, pods)
-		case TriggerScheduled:
-			ok, r = true, "scheduled rebalance window reached"
+		case TriggerPeriodicReview:
+			ok, r = true, "periodic review due"
 		default:
 			continue // unrecognized condition — spec validation should have already caught this
 		}

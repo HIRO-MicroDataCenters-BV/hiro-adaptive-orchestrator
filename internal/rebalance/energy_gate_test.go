@@ -29,7 +29,7 @@ import (
 // testEnergyAwareProfile mirrors testProfileWithConditions but with energy
 // awareness enabled, since classifyScheduleTimeout checks that first.
 func testEnergyAwareProfile() *orchestrationv1alpha1.OrchestrationProfile {
-	p := testProfileWithConditions(TriggerScheduled)
+	p := testProfileWithConditions(TriggerPeriodicReview)
 	p.Spec.Placement.Awareness.Energy = true
 	return p
 }
@@ -48,7 +48,7 @@ func TestClassifyScheduleTimeout(t *testing.T) {
 	}{
 		{
 			name:        "energy awareness disabled stays Failed",
-			profile:     testProfileWithConditions(TriggerScheduled), // Awareness.Energy: false
+			profile:     testProfileWithConditions(TriggerPeriodicReview),
 			objs:        []client.Object{heldEAO("demo: closed", slotAhead)},
 			wantOutcome: OutcomeFailed,
 			wantReason:  timeoutReason,
