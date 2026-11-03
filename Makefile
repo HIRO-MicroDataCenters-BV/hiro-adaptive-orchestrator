@@ -90,13 +90,16 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
+# Every Go module in the repo; golangci-lint stops at a nested go.mod, so each is linted on its own.
+GO_MODULES ?= . scheduler-plugin ai-decision-service
+
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter
-	"$(GOLANGCI_LINT)" run
+lint: golangci-lint ## Run golangci-lint linter on every Go module
+	@rc=0; for m in $(GO_MODULES); do echo "Linting $$m"; (cd $$m && "$(GOLANGCI_LINT)" run) || rc=1; done; exit $$rc
 
 .PHONY: lint-fix
-lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
-	"$(GOLANGCI_LINT)" run --fix
+lint-fix: golangci-lint ## Run golangci-lint linter on every Go module and perform fixes
+	@rc=0; for m in $(GO_MODULES); do echo "Linting $$m"; (cd $$m && "$(GOLANGCI_LINT)" run --fix) || rc=1; done; exit $$rc
 
 .PHONY: lint-config
 lint-config: golangci-lint ## Verify golangci-lint linter configuration

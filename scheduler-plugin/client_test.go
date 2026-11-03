@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -149,9 +148,10 @@ func TestDecide_ContextCancelled(t *testing.T) {
 }
 
 func TestNewPlacementClientFromEnv_Defaults(t *testing.T) {
-	os.Unsetenv("PLACEMENT_SERVER_URL")
-	os.Unsetenv("PLACEMENT_SCORE_PATH")
-	os.Unsetenv("PLACEMENT_FILTER_PATH")
+	// Empty means "use the default" in NewPlacementClientFromEnv; t.Setenv restores the env after the test.
+	t.Setenv("PLACEMENT_SERVER_URL", "")
+	t.Setenv("PLACEMENT_SCORE_PATH", "")
+	t.Setenv("PLACEMENT_FILTER_PATH", "")
 
 	client := schedulerplugin.NewPlacementClientFromEnv(5 * time.Second)
 	if client == nil {

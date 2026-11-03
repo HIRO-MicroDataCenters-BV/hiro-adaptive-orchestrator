@@ -263,6 +263,8 @@ make lint        # report issues
 make lint-fix    # auto-fix where possible
 ```
 
+Both run on every Go module listed in `GO_MODULES` (root, `scheduler-plugin`, `ai-decision-service`).
+
 > **Never manually edit** auto-generated files: `config/crd/bases/*.yaml`, `config/rbac/role.yaml`, `zz_generated.*.go`, `dist/chart/`, `dist/install.yaml`.
 
 ---
