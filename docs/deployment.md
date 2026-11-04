@@ -57,7 +57,7 @@ always matches what was deployed:
 |----------|---------|-------------|
 | `SCHEDULER_MODE` | `plugin` | `plugin` (scheduler Deployment + webhook), `extender` (patches the cluster's own kube-scheduler), or `none` (operator only) |
 | `USE_MOCK_AGENT` | `false` | Deploy the bundled mock decision agent (needed by `demo/demo_rebalance_with_mock_agent.sh`) |
-| `USE_AI_DECISION_SERVICE` | `true` | Deploy the bundled AI Decision Service. Set only one of the two agents to `true`; the chart points the operator at it. Both `false`: an external agent at `hiro-operator.config.DECISION_AGENT_URL` |
+| `USE_AI_DECISION_SERVICE` | `true` | Deploy the bundled AI Decision Service (needed by `demo/demo_rebalance_with_ai_decision_service.sh`). Set only one of the two agents to `true`; the chart points the operator at it. Both `false`: an external agent at `hiro-operator.config.DECISION_AGENT_URL` |
 | `DEPLOY_SAMPLES` | `true` | Apply the nginx + `OrchestrationProfile` samples from `config/samples/` with kubectl after Helm. `clean` deletes only the sample profiles, not the shared nginx apps |
 | `DEPLOY_PROMETHEUS` | `false` | Bundle kube-prometheus-stack and turn on both ServiceMonitors, so the `hiro_*` metrics are scraped rather than just exposed |
 | `OTLP_ENDPOINT` | *(empty)* | OTLP gRPC collector for traces, e.g. `alloy.observability.svc:4317`. Empty disables tracing entirely |

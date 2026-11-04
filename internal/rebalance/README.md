@@ -1252,6 +1252,26 @@ flowchart LR
 <a id="demo-walkthrough"></a>
 ## 🎬 <u>Demo walkthrough</u>
 
+There are two demo scripts, one per decision agent. Their shared helpers are in [`demo/lib/demo_common.sh`](../../demo/lib/demo_common.sh).
+
+### With the AI Decision Service
+
+[`demo/demo_rebalance_with_ai_decision_service.sh`](../../demo/demo_rebalance_with_ai_decision_service.sh) can't steer the service, which decides from facts. So each scenario creates the real condition (a down node, an EAO hold, a PDB), then checks what the service and the operator did, and restores the cluster.
+
+```bash
+demo/demo_rebalance_with_ai_decision_service.sh                     # numbered menu: 6, or 1 3 5, or all
+demo/demo_rebalance_with_ai_decision_service.sh retry node-failure  # by name
+demo/demo_rebalance_with_ai_decision_service.sh --auto all          # no pauses; exits non-zero on any FAIL
+demo/demo_rebalance_with_ai_decision_service.sh list                # the 13 scenarios
+demo/demo_rebalance_with_ai_decision_service.sh panes               # log commands to watch alongside
+demo/demo_rebalance_with_ai_decision_service.sh cleanup             # recover after a killed run
+```
+
+- **Node failures** stop the kubelet on a worker that hosts the app but no pod from the operator's namespace. Outside Kind, set `NODE_DOWN_CMD` and `NODE_UP_CMD`.
+- **Not covered:** the service answers only `Move` or `NoOp` today, so `AdjustReplicas`, `AdjustResources`, `Reject`, `Defer` and an AI-chosen `Escalate` need the mock script below.
+
+### With the mock agent
+
 [`demo/demo_rebalance_with_mock_agent.sh`](../../demo/demo_rebalance_with_mock_agent.sh) drives all six lifecycle paths
 above against a live cluster, narrated pane-by-pane (see the script's own header comment for
 pane setup and usage: `demo/demo_rebalance_with_mock_agent.sh [noop|retry|move|scale|resources|escalate|all|cleanup]`;

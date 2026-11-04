@@ -121,6 +121,9 @@ deploy/                                # Everything deployment — see deploy/RE
                                        # scheduler plugin/extender + mock agent or AI Decision Service +
                                        # prerequisites
 demo/
+  lib/demo_common.sh                   # Helpers shared by both demo scripts
+  demo_rebalance_with_ai_decision_service.sh  # Selectable scenarios against the real AI Decision Service,
+                                       # with PASS/FAIL checks and a full restore after each
   demo_rebalance_with_mock_agent.sh    # Drives the six rebalance lifecycle beats against a running stack
                                        # (needs the mock agent: USE_MOCK_AGENT=true USE_AI_DECISION_SERVICE=false)
 hack/

@@ -99,44 +99,7 @@
 
 set -euo pipefail
 
-NAMESPACE=${NAMESPACE:-hiro-adaptive-orchestrator-system}
-APP_NAMESPACE=${APP_NAMESPACE:-default}
-
-PROFILE=orchestrationprofile-2
-APP=nginx-deployment-2
-EAO=eaoprofile-optional
-
-# ─── Presentation helpers ──────────────────────────────────────────────────
-
-step() { printf '\n\033[36m===>\033[0m %s\n' "$*"; }
-narrate() { printf '\n\033[33m%s\033[0m\n' "$*"; }
-
-# Reads from /dev/tty explicitly rather than plain stdin — if stdin isn't a
-# real controlling terminal (redirected, piped through `tee`, launched by
-# some wrapper), `read` hits EOF immediately and the old `|| true` swallowed
-# that silently, so every beat blew past its pause unattended. Falls back to
-# a no-op notice only if there's truly no terminal available at all.
-pause() {
-  if [ -r /dev/tty ]; then
-    read -rp $'\n\033[2mPress Enter to continue...\033[0m ' _ < /dev/tty || true
-  else
-    printf '\n\033[2m(no TTY available — continuing without pause)\033[0m\n'
-  fi
-}
-
-# Echoes $@ (dimmed, "$ "-prefixed) before executing it, so the presenter and
-# anyone reading captured output see exactly what ran against the cluster.
-# The echo goes to stderr so `x=$(run kubectl get ...)` still works — only
-# the wrapped command's own stdout is captured by callers doing command
-# substitution.
-run() {
-  printf '\033[2m$ %s\033[0m\n' "$*" >&2
-  "$@"
-}
-
-profile_state() {
-  kubectl get orchestrationprofile "$PROFILE" -o jsonpath='{.status.rebalancingStatus.state}' 2>/dev/null
-}
+source "$(dirname "${BASH_SOURCE[0]}")/lib/demo_common.sh"
 
 # ─── Cleanup (always runs on exit, even Ctrl-C) ────────────────────────────
 
@@ -144,21 +107,7 @@ MOCK_AGENT_MOVE_BUMPED=false
 MOCK_AGENT_SCALE_BUMPED=false
 MOCK_AGENT_RESOURCE_BUMPED=false
 MOCK_AGENT_ESCALATE_BUMPED=false
-APP_ORIGINAL_REPLICAS=""
 RETRY_PENDING_POD=""
-EAO_TOUCHED=false
-EAO_ORIG_ACTION=""
-EAO_ORIG_REASON=""
-EAO_ORIG_SUFFICIENT=""
-EAO_ORIG_SLOT=""
-RESOURCES_TOUCHED=false
-APP_CONTAINER_NAME=""
-APP_ORIGINAL_CPU_REQUEST=""
-APP_ORIGINAL_MEMORY_REQUEST=""
-APP_ORIGINAL_CPU_LIMIT=""
-APP_ORIGINAL_MEMORY_LIMIT=""
-ESCALATION_THRESHOLD_TOUCHED=false
-APP_ORIGINAL_ESCALATION_THRESHOLD=""
 MOCK_AGENT_SCALED_DOWN=false
 
 cleanup() {
@@ -257,131 +206,6 @@ revert_mock_agent_resources() {
   echo "  Reverting mock agent to its default RESOURCE_PROBABILITY / IMPROVEMENT_MIN"
   set_mock_env RESOURCE_PROBABILITY- IMPROVEMENT_MIN-
   MOCK_AGENT_RESOURCE_BUMPED=false
-}
-
-clear_cooldown() {
-  run kubectl patch orchestrationprofile "$PROFILE" --type=merge --subresource=status \
-    -p '{"status":{"rebalancingStatus":{"cooldownUntil":null}}}' >/dev/null
-}
-
-# $EAO is owned by the external, kopf-based Energy Aware Orchestrator — our
-# window patches below are a demo-only override. Its own reconcile would
-# eventually overwrite them, but on its own schedule (minutes), not ours. So
-# we capture its real pre-demo window state here, once, the first time we're
-# about to touch it — then cleanup() restores exactly that instead of
-# waiting the external controller out. Empty capture means the field was
-# genuinely unset (not just empty string), so revert_eao_window patches it
-# back with JSON null (merge-patch semantics: null removes the key) rather
-# than writing a literal empty string.
-capture_eao_original() {
-  [ "$EAO_TOUCHED" = true ] && return
-  EAO_ORIG_ACTION=$(kubectl get energyawareorchestration "$EAO" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.status.decision.action}' 2>/dev/null)
-  EAO_ORIG_REASON=$(kubectl get energyawareorchestration "$EAO" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.status.decision.reason}' 2>/dev/null)
-  EAO_ORIG_SUFFICIENT=$(kubectl get energyawareorchestration "$EAO" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.status.energyMetrics.sufficient}' 2>/dev/null)
-  # jsonpath prints the slot object as JSON, or nothing when it's unset.
-  EAO_ORIG_SLOT=$(kubectl get energyawareorchestration "$EAO" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.status.decision.scheduledSlot}' 2>/dev/null)
-  EAO_TOUCHED=true
-}
-
-revert_eao_window() {
-  echo "  Restoring $EAO's energy window status to its pre-demo values (not waiting on its own controller)"
-  local action_json reason_json sufficient_json slot_json
-  action_json=$([ -n "$EAO_ORIG_ACTION" ] && printf '"%s"' "$EAO_ORIG_ACTION" || echo null)
-  reason_json=$([ -n "$EAO_ORIG_REASON" ] && printf '"%s"' "$EAO_ORIG_REASON" || echo null)
-  sufficient_json=$([ -n "$EAO_ORIG_SUFFICIENT" ] && echo "$EAO_ORIG_SUFFICIENT" || echo null)
-  slot_json=${EAO_ORIG_SLOT:-null}
-  run kubectl patch energyawareorchestration "$EAO" -n "$APP_NAMESPACE" --type=merge --subresource=status \
-    -p "{\"status\":{\"decision\":{\"action\":${action_json},\"reason\":${reason_json},\"scheduledSlot\":${slot_json}},\"energyMetrics\":{\"sufficient\":${sufficient_json}}}}" >/dev/null
-}
-
-# A slot an hour ahead is a Hold: the gate keeps new pods Pending and EnergyThreshold fires.
-close_energy_window() {
-  capture_eao_original
-  local slot_start slot_end
-  slot_start=$(date -u -v+1H +%FT%TZ 2>/dev/null || date -u -d '+1 hour' +%FT%TZ)
-  slot_end=$(date -u -v+2H +%FT%TZ 2>/dev/null || date -u -d '+2 hours' +%FT%TZ)
-  run kubectl patch energyawareorchestration "$EAO" -n "$APP_NAMESPACE" --type=merge --subresource=status \
-    -p "{\"status\":{\"decision\":{\"action\":\"Scheduled\",\"reason\":\"demo: energy window closed\",\"scheduledSlot\":{\"slotStart\":\"${slot_start}\",\"slotEnd\":\"${slot_end}\"}},\"energyMetrics\":{\"sufficient\":false}}}" >/dev/null
-}
-
-open_energy_window() {
-  capture_eao_original
-  run kubectl patch energyawareorchestration "$EAO" -n "$APP_NAMESPACE" --type=merge --subresource=status \
-    -p '{"status":{"decision":{"action":"DeployImmediately","reason":"demo: energy window open","scheduledSlot":null},"energyMetrics":{"sufficient":true}}}' >/dev/null
-}
-
-# Shared by revert_replicas/revert_resources below: both can create a
-# brand-new pod (scaling back up, or a template patch) that needs to
-# schedule, and both need to know it's actually Running before cleanup()
-# hands the energy window back to EAO's true pre-demo status — which can
-# itself be closed/insufficient (it is on this cluster). Blocking here,
-# once, is what lets cleanup() do that safely without repeating the wait
-# after each revert.
-await_app_rollout() {
-  run kubectl rollout status deployment "$APP" -n "$APP_NAMESPACE" --timeout=90s || true
-}
-
-# Captures $APP's real pre-demo replica count exactly once, the first time
-# any beat is about to change it — same idempotent-capture pattern as
-# capture_eao_original, so that whichever beat runs first (retry or scale)
-# is the one whose capture sticks, and cleanup() always restores the true
-# original regardless of how many beats touch replica count along the way.
-capture_original_replicas() {
-  [ -n "$APP_ORIGINAL_REPLICAS" ] && return
-  APP_ORIGINAL_REPLICAS=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.spec.replicas}')
-}
-
-# Restores $APP's replica count. Opens the energy window first — scaling
-# back UP (e.g. beat 2/4 left it one higher) can create a new pod that needs
-# to pass CheckEnergyGate — and waits for the scale to settle before
-# returning, so cleanup() can safely revert EAO status after this.
-revert_replicas() {
-  echo "  Restoring $APP to $APP_ORIGINAL_REPLICAS replica(s)"
-  open_energy_window
-  run kubectl scale deployment "$APP" -n "$APP_NAMESPACE" --replicas="$APP_ORIGINAL_REPLICAS"
-  await_app_rollout
-}
-
-# Captures $APP's real pre-demo container name and CPU/Memory resources
-# exactly once, the same idempotent-capture pattern as
-# capture_original_replicas/capture_eao_original — so revert_resources
-# always restores the true original regardless of what the mock agent's
-# fixed RESOURCE_TARGET_CPU/MEMORY happened to be.
-capture_original_resources() {
-  [ "$RESOURCES_TOUCHED" = true ] && return
-  APP_CONTAINER_NAME=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.spec.template.spec.containers[0].name}')
-  APP_ORIGINAL_CPU_REQUEST=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}')
-  APP_ORIGINAL_MEMORY_REQUEST=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.spec.template.spec.containers[0].resources.requests.memory}')
-  APP_ORIGINAL_CPU_LIMIT=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.spec.template.spec.containers[0].resources.limits.cpu}')
-  APP_ORIGINAL_MEMORY_LIMIT=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}')
-  RESOURCES_TOUCHED=true
-}
-
-# kubectl set resources (not a JSON/merge patch) — patches the Deployment's
-# template, which on its own triggers a normal rollout that both restores
-# every pod's resources AND supersedes any pod resourceEnactor resized in
-# place, so this correctly undoes either path it took. Opens the energy
-# window first (the rollout's replacement pod needs to pass CheckEnergyGate
-# same as revert_replicas' does) and waits for it to finish before
-# returning.
-revert_resources() {
-  echo "  Restoring $APP's container resources to their pre-demo values"
-  open_energy_window
-  run kubectl set resources deployment "$APP" -n "$APP_NAMESPACE" \
-    -c="$APP_CONTAINER_NAME" \
-    --requests="cpu=$APP_ORIGINAL_CPU_REQUEST,memory=$APP_ORIGINAL_MEMORY_REQUEST" \
-    --limits="cpu=$APP_ORIGINAL_CPU_LIMIT,memory=$APP_ORIGINAL_MEMORY_LIMIT"
-  await_app_rollout
 }
 
 # ─── Beat 1 — NoOp ──────────────────────────────────────────────────────────
@@ -669,30 +493,6 @@ effective on next rollout' (a new pod appears below instead)."
 
 # ─── Beat 6 — Escalate ──────────────────────────────────────────────────────
 
-profile_escalated() {
-  kubectl get orchestrationprofile "$PROFILE" -o jsonpath='{.status.rebalancingStatus.escalated}' 2>/dev/null
-}
-
-# The documented unpause (see internal/rebalance/README.md's "Escalation"
-# section) — a plain status patch, nothing operator-specific. Resetting
-# consecutiveFailures alongside escalated avoids an immediate re-escalation
-# off a single subsequent failure.
-clear_escalation() {
-  run kubectl patch orchestrationprofile "$PROFILE" --type=merge --subresource=status \
-    -p '{"status":{"rebalancingStatus":{"escalated":false,"consecutiveFailures":0}}}' >/dev/null
-}
-
-# Safety net called unconditionally from cleanup(), not gated by a
-# beat-scoped flag: escalation is reachable from any beat's own repeated
-# failures, not just this one, so cleanup should never leave the real
-# profile paused regardless of which beat ran or where it was interrupted.
-ensure_not_escalated() {
-  if [ "$(profile_escalated)" = "true" ]; then
-    echo "  $PROFILE is escalated — clearing it so the loop isn't left paused."
-    clear_escalation
-  fi
-}
-
 # Re-asserts clear-cooldown + close-window every 2s (up to 90s) until the
 # profile's escalated flag flips true. EnergyThreshold only matches while the
 # window is closed — without re-closing it, the external EAO controller can flip
@@ -743,31 +543,6 @@ restore_mock_agent_replicas() {
   run kubectl scale deployment mock-decision-agent -n "$NAMESPACE" --replicas=1
   run kubectl rollout status deployment mock-decision-agent -n "$NAMESPACE" --timeout=60s || true
   MOCK_AGENT_SCALED_DOWN=false
-}
-
-# Captures $PROFILE's real pre-demo escalationThreshold exactly once, same
-# idempotent-capture pattern as capture_original_replicas/capture_eao_original.
-# Empty capture means the field was genuinely unset (uses
-# DefaultEscalationThreshold), so revert_escalation_threshold patches it back
-# with JSON null rather than a literal value.
-capture_original_escalation_threshold() {
-  [ "$ESCALATION_THRESHOLD_TOUCHED" = true ] && return
-  APP_ORIGINAL_ESCALATION_THRESHOLD=$(kubectl get orchestrationprofile "$PROFILE" \
-    -o jsonpath='{.spec.rebalancing.escalationThreshold}' 2>/dev/null)
-  ESCALATION_THRESHOLD_TOUCHED=true
-}
-
-set_escalation_threshold() {
-  run kubectl patch orchestrationprofile "$PROFILE" --type=merge \
-    -p "{\"spec\":{\"rebalancing\":{\"escalationThreshold\":$1}}}" >/dev/null
-}
-
-revert_escalation_threshold() {
-  echo "  Restoring escalationThreshold to its pre-demo value"
-  local val_json
-  val_json=$([ -n "$APP_ORIGINAL_ESCALATION_THRESHOLD" ] && echo "$APP_ORIGINAL_ESCALATION_THRESHOLD" || echo null)
-  run kubectl patch orchestrationprofile "$PROFILE" --type=merge \
-    -p "{\"spec\":{\"rebalancing\":{\"escalationThreshold\":${val_json}}}}" >/dev/null
 }
 
 # Two independent ways the loop pauses itself, demoed back to back: Part A
