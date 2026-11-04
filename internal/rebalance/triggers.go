@@ -266,6 +266,12 @@ func (e *TriggerEvaluator) evaluateEnergyThreshold(
 ) (bool, string, string) {
 	logger := logf.FromContext(ctx)
 
+	// Same first check as CheckEnergyGate: with awareness off the gate holds nothing and the decider gets no EAO data.
+	if !profile.Spec.Placement.Awareness.Energy {
+		logger.V(1).Info("rebalance: energy awareness off, skipping EnergyThreshold check")
+		return false, "", ""
+	}
+
 	eao, err := utils.FindEAOForApp(ctx, e.client, e.eaoSettings.GVK, profile.Spec.ApplicationRef)
 	if err != nil {
 		// EnergyAwareOrchestration is an optional component — soft-fail like

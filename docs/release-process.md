@@ -31,7 +31,7 @@ flowchart LR
 `build/version.sh` computes the next tag:
 1. Finds the latest `vX.Y.Z` tag that's an ancestor of the current commit.
 2. No such tag yet → `v1.0.0`, no bump applied.
-3. Otherwise scans commit messages since that tag for Conventional Commits: `BREAKING CHANGE`/`!:` → major, `feat:` → minor, anything else (including plain messages) → patch.
+3. Otherwise scans commit messages since that tag for Conventional Commits: `BREAKING`/`!:` → major, `feat:` → minor, anything else (including plain messages) → patch.
 
 No PR-title enforcement is in place, so an un-prefixed commit message defaults to a patch bump.
 

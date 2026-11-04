@@ -392,7 +392,7 @@ set_strategy() {
     -p "{\"spec\":{\"placement\":{\"strategy\":\"$1\"}}}" >/dev/null
 }
 
-# For scenarios that don't test the gate: the real EAO controller's writes then can't refuse a Move or hold a pod.
+# For scenarios that don't test the gate: the real EAO controller's writes then can't refuse a Move, hold a pod or fire EnergyThreshold.
 disable_energy_awareness() {
   save_profile_spec
   echo "  Energy awareness: off"
@@ -450,11 +450,10 @@ pick_failure_node() {
   return 0
 }
 
-# With the window open, scales to $1 replicas (default: as it is) and picks a safe node hosting a pod; else skips.
+# Scales to $1 replicas (default: as it is) and picks a safe node hosting a pod; else skips.
 prepare_failure_node() {
   capture_original_replicas
   local replicas=${1:-$APP_ORIGINAL_REPLICAS}
-  want_window open
   scale_app "$replicas"
   wait_until 120 "$APP to reach $replicas replica(s)" app_rollout_done || true
   FAILED_NODE=$(pick_failure_node)
@@ -698,7 +697,7 @@ recover_killed_run() {
 scenario_healthy() {
   narrate "Nothing is wrong, so the service should answer NoOp from its rules."
   pause
-  want_window open
+  disable_energy_awareness
   KEEP_COOLDOWN_CLEAR=true
   expect_entry "A healthy cluster gets NoOp from the periodic review" 60 NoOp NoOp NoChange PeriodicReview || return 0
   expect_equal "The service's rules decided" "$(entry_field "$FOUND_ENTRY" 6)" "rules"
@@ -855,6 +854,7 @@ scenario_node_failure_hold() {
   narrate "The service still says Move off a down node, but the operator refuses: the gate would hold the replacement."
   pause
   patch_rebalancing "{\"cooldownSeconds\":$DEMO_COOLDOWN_SECONDS}"
+  want_window open
   prepare_failure_node || return 0
   set_baseline
   want_window closed
@@ -930,7 +930,7 @@ scenario_gates() {
   local message
   narrate "With no rule to apply, the NoOp says what the gates blocked."
   pause
-  want_window open
+  disable_energy_awareness
   patch_rebalancing '{"replicasExternallyManaged":true,"resourcesExternallyManaged":true}'
   create_pdb
   set_baseline
@@ -946,7 +946,7 @@ scenario_escalate() {
   local at
   narrate "The service is down, so cycles fail. Reaching the threshold pauses the loop until a human clears it."
   pause
-  want_window open
+  disable_energy_awareness
   clear_escalation
   patch_rebalancing "{\"cooldownSeconds\":$DEMO_COOLDOWN_SECONDS,\"escalationThreshold\":2}"
   scale_ai_service_down

@@ -35,7 +35,7 @@ graph TB
 Numbers above trace one full cycle (the `Move` case touches every numbered edge; `NoOp`/`Retry` stop after step 3):
 
 1. **Rebalance Engine ↔ Kubernetes API** — the engine watches Pods/Nodes/the `OrchestrationProfile` to detect a trigger, then reuses the same connection for every `StateWriter` transition it writes (`Watching → Triggered → …`) and, for an accepted `Move`, the pod eviction call itself.
-2. **Rebalance Engine → EnergyAwareOrchestration** *(optional)* — if the profile declares an `EnergyThreshold` trigger, the engine also reads the EAO CRD's current status while evaluating trigger conditions.
+2. **Rebalance Engine → EnergyAwareOrchestration** *(optional)* — if the profile declares an `EnergyThreshold` trigger and turns energy awareness on, the engine also reads the EAO CRD's current status while evaluating trigger conditions.
 3. **Rebalance Engine → External AI Agent** — once `Triggered`, the engine calls the AI during `Evaluating` for a decision (skipped entirely for the mechanical `RetryPendingSchedule` bypass — see [Bypassing the AI for mechanical actions](#bypassing-the-ai-for-mechanical-actions)).
 4. **kube-scheduler → PlacementServer** — only reached for an accepted `Move`: evicting the pod in step 1 makes its controller create a replacement, and kube-scheduler calls the PlacementServer's `PreScore` extension point for it, same as any newly-created pod.
 5. **PlacementServer → External AI Agent** — the PlacementServer normally re-consults the same AI Agent to score the replacement — unless the `Move`'s `DecisionStore` entry (written in step 1, just before eviction) is still live, in which case that hit short-circuits this call and scores the target node directly instead.
@@ -204,7 +204,7 @@ checked, just only on the periodic tick instead of instantly.
 
 ```mermaid
 flowchart TD
-    Start(["Evaluate(profile)"]) --> C1{"EnergyThreshold<br/>declared?"}
+    Start(["Evaluate(profile)"]) --> C1{"EnergyThreshold declared<br/>and energy awareness on?"}
     C1 -- yes --> E1{"EAO verdict Hold?<br/>(slot still ahead)"}
     E1 -- yes --> Match(["matched — needs AI<br/>(no bypass)"])
     E1 -- no --> E2{"verdict RunNow<br/>AND the gate held a pod?"}
@@ -230,7 +230,7 @@ nothing to do this cycle. `NodeFailure` is checked before this walk (see its row
 
 | Condition | How it's checked |
 |---|---|
-| `EnergyThreshold` | Finds the `EnergyAwareOrchestration` matching the profile's `ApplicationRef` directly (no pod resolution needed, unlike the placement-server's pod-triggered EAO lookup), and reads its verdict — the same one the energy gate uses (`EAO_RUN_NOW_ACTIONS` / `EAO_HOLD_ACTIONS`; `energyMetrics.sufficient` is ignored). (1) `Hold` (e.g. `Scheduled` with the slot still ahead) matches and asks the AI. (2) `RunNow` (`DeployImmediately`, or a hold whose `slotStart` has passed, even if the EAO hasn't re-evaluated yet) **and** the energy gate held a pod for this app that's still unscheduled (`heldByEnergyGate`: its `PodScheduled` message carries the gate's `energy gate: ` prefix); this case sets `TriggerResult.BypassAction` — see below. A pod stuck for any other reason (no CPU, taints) is left to kube-scheduler. (3) `Unknown` (no decision, an EAO failure such as `Waiting`, an unmapped action) never matches. A pod held before its slot is never retried early. |
+| `EnergyThreshold` | Never matches while `placement.awareness.energy` is off, as the gate holds nothing and the decider gets no EAO data. Otherwise, finds the `EnergyAwareOrchestration` matching the profile's `ApplicationRef` directly (no pod resolution needed, unlike the placement-server's pod-triggered EAO lookup), and reads its verdict — the same one the energy gate uses (`EAO_RUN_NOW_ACTIONS` / `EAO_HOLD_ACTIONS`; `energyMetrics.sufficient` is ignored). (1) `Hold` (e.g. `Scheduled` with the slot still ahead) matches and asks the AI. (2) `RunNow` (`DeployImmediately`, or a hold whose `slotStart` has passed, even if the EAO hasn't re-evaluated yet) **and** the energy gate held a pod for this app that's still unscheduled (`heldByEnergyGate`: its `PodScheduled` message carries the gate's `energy gate: ` prefix); this case sets `TriggerResult.BypassAction` — see below. A pod stuck for any other reason (no CPU, taints) is left to kube-scheduler. (3) `Unknown` (no decision, an EAO failure such as `Waiting`, an unmapped action) never matches. A pod held before its slot is never retried early. |
 | `CPUThreshold` / `MemoryThreshold` | Delegates to `NodePressureEvaluator` for every distinct node the profile's pods are currently on. |
 | `NodeFailure` | `NotReady` node hosting one of the profile's live pods. **Goes first, ignoring the shared cooldown**, while it makes progress: it moves one pod per cycle until the dead nodes are empty. After any other result (NoOp, Failed, Deferred) it waits `cooldownSeconds` from its own last try. It reads only history entries with `trigger: NodeFailure`, so other triggers' actions never delay it. Dry-run keeps the shared cooldown. |
 | `PeriodicReview` | Always matches, so the AI reviews the placement every `DetectionInterval`, paced by the cooldown. |

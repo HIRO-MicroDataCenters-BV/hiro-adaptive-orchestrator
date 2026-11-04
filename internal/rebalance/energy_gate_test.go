@@ -34,6 +34,13 @@ func testEnergyAwareProfile() *orchestrationv1alpha1.OrchestrationProfile {
 	return p
 }
 
+// testEnergyTriggerProfile declares EnergyThreshold on an energy-aware profile, as that trigger needs.
+func testEnergyTriggerProfile() *orchestrationv1alpha1.OrchestrationProfile {
+	p := testEnergyAwareProfile()
+	p.Spec.Rebalancing.TriggerConditions = []orchestrationv1alpha1.TriggerCondition{TriggerEnergyThreshold}
+	return p
+}
+
 func TestClassifyScheduleTimeout(t *testing.T) {
 	const timeoutReason = "no scheduled replacement observed within 1m0s"
 	slotAhead := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)

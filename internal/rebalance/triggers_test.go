@@ -157,7 +157,7 @@ func newTestTriggerEvaluator(t *testing.T, objs ...client.Object) *TriggerEvalua
 }
 
 func TestTriggerEvaluator_EnergyHold(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	eao := heldEAO("optional: scheduled for a later slot", time.Now().Add(time.Hour))
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao)
 
@@ -177,7 +177,7 @@ func TestTriggerEvaluator_EnergyHold(t *testing.T) {
 }
 
 func TestTriggerEvaluator_EnergyDelayed(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	eao := testEAO("Delayed", "waiting for cheaper slot", nil)
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao)
 
@@ -219,7 +219,7 @@ func TestTriggerEvaluator_EnergyVerdicts(t *testing.T) {
 			if tc.holdActions != nil {
 				evaluator.eaoSettings.VerdictConfig.HoldActions = tc.holdActions
 			}
-			matched, result, err := evaluator.Evaluate(context.Background(), testProfileWithConditions(TriggerEnergyThreshold))
+			matched, result, err := evaluator.Evaluate(context.Background(), testEnergyTriggerProfile())
 			if err != nil {
 				t.Fatalf("Evaluate: %v", err)
 			}
@@ -230,8 +230,28 @@ func TestTriggerEvaluator_EnergyVerdicts(t *testing.T) {
 	}
 }
 
+func TestTriggerEvaluator_EnergyAwarenessOffNoMatch(t *testing.T) {
+	cases := map[string]*unstructured.Unstructured{
+		"hold":                  heldEAO("", time.Now().Add(time.Hour)),
+		"run now with held pod": testEAO("DeployImmediately", "", new(true)),
+	}
+	for name, eao := range cases {
+		t.Run(name, func(t *testing.T) {
+			evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, energyHeldPod("app-a-pending"))
+
+			matched, _, err := evaluator.Evaluate(context.Background(), testProfileWithConditions(TriggerEnergyThreshold))
+			if err != nil {
+				t.Fatalf("Evaluate: %v", err)
+			}
+			if matched {
+				t.Error("matched = true, want false — energy awareness is off")
+			}
+		})
+	}
+}
+
 func TestTriggerEvaluator_EnergyWindowReachedWithPendingPod(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	eao := testEAO("DeployImmediately", "", new(true))
 	pending := energyHeldPod("app-a-pending")
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, pending)
@@ -254,7 +274,7 @@ func TestTriggerEvaluator_EnergyWindowReachedWithPendingPod(t *testing.T) {
 
 // A replacement must get a chance to schedule first: without the age floor, retries live-locked in a tight loop.
 func TestTriggerEvaluator_FreshPendingPodNotYetRetryEligible(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	eao := testEAO("DeployImmediately", "", new(true))
 	pending := energyHeldPod("app-a-pending")
 	pending.CreationTimestamp = metav1.NewTime(time.Now())
@@ -276,7 +296,7 @@ func TestTriggerEvaluator_FreshPendingPodNotYetRetryEligible(t *testing.T) {
 // bypass fires repeatedly and unproductively (cooldown-exempt) until the pod
 // leaves Pending on its own.
 func TestTriggerEvaluator_ScheduledPendingPodNotRetryEligible(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	eao := testEAO("DeployImmediately", "", new(true))
 	pending := testPod("app-a-pending", "node-a", corev1.PodPending)
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, pending)
@@ -302,7 +322,7 @@ func TestTriggerEvaluator_PodNotHeldByGateNotRetried(t *testing.T) {
 			eao := testEAO("DeployImmediately", "", new(true))
 			evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, pod)
 
-			matched, _, err := evaluator.Evaluate(context.Background(), testProfileWithConditions(TriggerEnergyThreshold))
+			matched, _, err := evaluator.Evaluate(context.Background(), testEnergyTriggerProfile())
 			if err != nil {
 				t.Fatalf("Evaluate: %v", err)
 			}
@@ -314,7 +334,7 @@ func TestTriggerEvaluator_PodNotHeldByGateNotRetried(t *testing.T) {
 }
 
 func TestTriggerEvaluator_EnergyOKNoPendingPod(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	eao := testEAO("DeployImmediately", "", new(true))
 	running := testPod("app-a-1", "node-a", corev1.PodRunning)
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, running)
@@ -329,7 +349,7 @@ func TestTriggerEvaluator_EnergyOKNoPendingPod(t *testing.T) {
 }
 
 func TestTriggerEvaluator_EAOUnavailableSoftFails(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	evaluator := newTestTriggerEvaluator(t, testDeployment()) // no EAO seeded
 
 	matched, _, err := evaluator.Evaluate(context.Background(), profile)

@@ -468,7 +468,7 @@ func TestReconciler_PeriodicReviewReachesFailedWhenAIUnreachable(t *testing.T) {
 // The AI agent is unreachable in this fake-client setup, so the cycle ends
 // back at Watching with Outcome Failed rather than stopping at Triggered.
 func TestReconciler_EnergyVerdictFlipTriggersWorkload(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	eao := heldEAO("", time.Now().Add(time.Hour))
 	r, c := newTestReconciler(t, testDeployment(), eao, profile)
 
@@ -1109,7 +1109,7 @@ func TestReconciler_MoveDryRunBelowThresholdStillRejected(t *testing.T) {
 // Enacted) sequence in one pass, actually deleting the pending pod so its
 // controller recreates it.
 func TestReconciler_EnergyPendingRetryBypassesToEnacted(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	sufficient := true
 	eao := testEAO("DeployImmediately", "", &sufficient)
 	pending := energyHeldPod("app-a-pending")
@@ -1153,7 +1153,7 @@ func TestReconciler_EnergyPendingRetryBypassesToEnacted(t *testing.T) {
 // TestReconciler_EnergyPendingRetryBypassesToEnacted, but with an active
 // CooldownUntil in the future: the bypass must still fire immediately.
 func TestReconciler_BypassIgnoresActiveCooldown(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	profile.Status.RebalancingStatus.CooldownUntil = metav1.NewTime(time.Now().Add(4 * time.Minute))
 	sufficient := true
 	eao := testEAO("DeployImmediately", "", &sufficient)
