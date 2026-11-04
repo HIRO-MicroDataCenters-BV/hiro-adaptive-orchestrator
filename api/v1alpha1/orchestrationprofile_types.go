@@ -346,6 +346,9 @@ const ConditionReady = "Ready"
 // ConditionRebalancingEscalated mirrors RebalancingStatus.Escalated.
 const ConditionRebalancingEscalated = "RebalancingEscalated"
 
+// ConditionUndeclaredAutoscaler is True while an autoscaler the profile doesn't declare targets the app; information only.
+const ConditionUndeclaredAutoscaler = "UndeclaredAutoscaler"
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=op

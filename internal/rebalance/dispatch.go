@@ -215,6 +215,10 @@ func dispatchMove(
 		return
 	}
 
+	if r.rejectIfEnergyHeld(ctx, key, profile, resp, cooldown, proposedMove(resp)) {
+		return
+	}
+
 	details := fmt.Sprintf("podName=%s targetNode=%s improvement=%.2f", resp.PodName, resp.TargetNode, resp.Improvement)
 	decided, err := r.Writer.Transition(ctx, key, StateDecided, resp.Reason,
 		TransitionOptions{DecidedBy: resp.DecidedBy, Action: resp.Action, Details: details})
@@ -250,8 +254,8 @@ func dispatchMove(
 		// this status write triggers calls Wait() again, and Wait() itself
 		// blocks (up to MoveRateWaitTimeout) before failing — that blocking
 		// IS the pacing, so there's no risk of the sub-second self-triggering
-		// loop a missing cooldown caused elsewhere (see hasPendingPod's doc
-		// comment in triggers.go). MoveRateWaitTimeout defaults generously
+		// loop a missing cooldown caused elsewhere (see DefaultMinPendingPodAge's
+		// doc comment in triggers.go). MoveRateWaitTimeout defaults generously
 		// (see its doc comment) specifically so this path is rarely taken at
 		// all — most waits succeed within the original call, without ever
 		// needing a second AI consultation.
@@ -379,6 +383,31 @@ func (r *Reconciler) deferExternallyManaged(
 		logf.FromContext(ctx).Error(err, "rebalance: dispatch transition to Watching (Deferred, autoscaler-managed) failed",
 			"profile", profile.Name, "dimension", dimension)
 	}
+}
+
+// rejectIfEnergyHeld ends the cycle if the action would remove running pods whose replacements the gate would hold.
+func (r *Reconciler) rejectIfEnergyHeld(
+	ctx context.Context,
+	key types.NamespacedName,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+	resp *placementserver.RebalanceDecisionResponse,
+	cooldown time.Duration,
+	change orchestrationv1alpha1.HistoryEntry,
+) bool {
+	hold := energyGateHold(ctx, r.Client, r.Evaluator.eaoSettings, profile)
+	if hold == "" {
+		return false
+	}
+	reason := fmt.Sprintf("%s: %s", hold, resp.Reason)
+	metrics.RebalanceGuardrailRejectionsTotal.WithLabelValues(string(resp.Action), metrics.GuardrailEnergy).Inc()
+	// Rejected, not Deferred: a long hold is normal and must not build up to an escalation.
+	if _, err := r.Writer.Transition(ctx, key, StateWatching, reason,
+		TransitionOptions{DecidedBy: resp.DecidedBy, Action: resp.Action, Outcome: OutcomeRejected, Cooldown: cooldown,
+			Reason: ReasonEnergyGateClosed, Change: change}); err != nil {
+		logf.FromContext(ctx).Error(err, "rebalance: dispatch transition to Watching (Rejected, energy gate closed) failed",
+			"profile", profile.Name)
+	}
+	return true
 }
 
 // dispatchScale applies the same improvement-threshold guardrail as Move,
@@ -618,6 +647,11 @@ func dispatchResource(
 				Reason: ReasonOutOfBounds, Change: change}); err != nil {
 			logger.Error(err, "rebalance: dispatch transition to Watching (Rejected, out of bounds) failed", "profile", profile.Name)
 		}
+		return
+	}
+
+	// The template patch below starts a rollout, whatever an in-place resize manages.
+	if r.rejectIfEnergyHeld(ctx, key, profile, resp, cooldown, change) {
 		return
 	}
 

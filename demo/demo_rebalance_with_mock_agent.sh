@@ -33,37 +33,26 @@
 #                   engine auto-escalating after repeated Failed cycles — see
 #                   the "Escalation" section of internal/rebalance/README.md.
 #
-# Beats 3 and 4 both need the energy window CLOSED to fire the trigger
-# (EnergyThreshold only matches on an EAO hold: a slot still ahead) but OPEN for
-# the new/replacement pod to actually pass CheckEnergyGate and schedule — see
-# the energy-gate interaction documented in internal/rebalance/README.md
-# (originally found for Move, confirmed to affect AdjustReplicas the same
-# way when scaling up). Same race as beat 2: a one-shot patch can lose to a
-# NoOp re-arming cooldown or to the external EAO controller's own reconcile
-# reverting it before our watch reacts. So this script re-asserts
-# clear-cooldown+close-window every few seconds until the cycle leaves
-# Watching, then re-asserts the open window throughout the whole Enacting
-# phase instead of patching either side once.
+# Beats 3 and 5 keep the energy window OPEN: under a hold the operator refuses
+# Move and AdjustResources, because the gate would hold the pods they replace.
+# PeriodicReview triggers them instead.
 #
-# Beat 5 plays the same close-then-open dance too, defensively — but unlike
-# 3/4 it doesn't strictly need to: a successful in-place resize touches the
-# already-running pod directly, no eviction, no new pod, no scheduling
-# involved at all. It's only resourceEnactor's fallback path (in-place
-# resize unsupported on this cluster) — which patches the pod template
-# instead, triggering a normal rolling update — that creates a new pod
-# subject to the same energy-gate interaction as beats 3/4. Which path this
-# cluster takes isn't known up front, so the dance runs either way; Pane B
-# shows which one actually happened.
+# Beat 4 still needs the window CLOSED to fire the trigger (EnergyThreshold only
+# matches on an EAO hold: a slot still ahead) but OPEN for the new replica's pod
+# to pass CheckEnergyGate and schedule.
 #
-# Unlike 3/4, beat 5 does NOT poll for the Enacting state to know when to
-# stop closing the window: the fallback path patches the template and
-# returns to Watching in the same reconcile, so Enacting never lingers long
-# enough for a 2s poll to observe it. Polling for Enacting there just kept
-# re-arming the trigger every 2s with the window still closed — a burst of
-# AdjustResources decisions, each starting a new rollout that superseded the
-# last before it could schedule, which is what left a pod stuck Pending.
-# wait_for_resources_applied() below polls the Deployment's actual resource
-# values instead, so it stops the instant the first patch is visible.
+# Same race as beat 2: a one-shot patch can lose to a NoOp re-arming cooldown or
+# to the external EAO controller's own reconcile reverting it before our watch
+# reacts. So this script re-asserts clear-cooldown and the window every few
+# seconds instead of patching once.
+#
+# Beat 5 does NOT poll for the Enacting state: the fallback path patches the
+# template and returns to Watching in the same reconcile, so Enacting never
+# lingers long enough for a 2s poll to observe it. Polling for it just kept
+# re-arming the trigger — a burst of AdjustResources decisions, each starting a
+# new rollout that superseded the last. wait_for_resources_applied() below polls
+# the Deployment's actual resource values instead, so it stops the instant the
+# first patch is visible.
 #
 # This script does NOT stream logs itself — open these in separate terminal
 # panes before you start, so you (the presenter) can narrate over them while
@@ -478,7 +467,8 @@ re-asserts every few seconds — the echoed patches double as progress."
 
 # ─── Beat 3 — Move ──────────────────────────────────────────────────────────
 
-# Re-asserts clear-cooldown + close-window every 2s (up to 150s), polling
+# Re-asserts clear-cooldown + $1 (open_energy_window or close_energy_window)
+# every 2s (up to 150s), polling
 # directly for Enacting rather than "left Watching": a full NoOp cycle
 # (Watching->Triggered->Evaluating->Watching) completes in under a second,
 # so sampling for "not Watching" would alias right past it. Enacting is the
@@ -489,10 +479,11 @@ re-asserts every few seconds — the echoed patches double as progress."
 # in the same reconcile, so it never holds Enacting long enough for this to
 # catch — beat 5 uses wait_for_resources_applied() instead (see below).
 wait_for_enacting() {
+  local assert_window=$1
   local waited=0
   while [ "$waited" -lt 150 ]; do
     clear_cooldown
-    close_energy_window
+    "$assert_window"
     if [ "$(profile_state)" = "Enacting" ]; then
       echo "  Reached Enacting after ${waited}s — check Pane A/B for the Decided reason."
       return 0
@@ -508,15 +499,15 @@ wait_for_enacting() {
 # Beat 5's counterpart to wait_for_enacting above — see that function's doc
 # comment for why polling for Enacting doesn't work for resourceEnactor's
 # fallback path. Polls the Deployment's actual requests.cpu instead of
-# profile state: race-free, and stops re-triggering (and re-closing the
-# window) the instant the first patch is visible, instead of hammering the
-# trigger every 2s for the full 150s like an Enacting-based poll would.
+# profile state: race-free, and stops re-triggering the instant the first
+# patch is visible, instead of hammering the trigger every 2s for the full
+# 150s like an Enacting-based poll would.
 wait_for_resources_applied() {
   local waited=0
   local cur_cpu
   while [ "$waited" -lt 150 ]; do
     clear_cooldown
-    close_energy_window
+    open_energy_window
     cur_cpu=$(kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
       -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}' 2>/dev/null)
     if [ -n "$cur_cpu" ] && [ "$cur_cpu" != "$APP_ORIGINAL_CPU_REQUEST" ]; then
@@ -556,20 +547,18 @@ keep_window_open() {
 
 move() {
   step "Beat 3 — Move"
-  narrate "Needs the window CLOSED to trigger, OPEN for the replacement to
-schedule — same cooldown/kopf race as beat 2, handled the same way."
+  narrate "Needs the window OPEN: under a hold the operator refuses a Move, since
+the gate would hold the replacement. PeriodicReview triggers the AI."
   pause
 
   step "Forcing a guaranteed above-threshold Move"
   bump_mock_agent
   pause
 
-  step "Closing the energy window and re-asserting until Enacting is observed"
-  wait_for_enacting || return 1
+  step "Opening the energy window and re-asserting until Enacting is observed"
+  wait_for_enacting open_energy_window || return 1
 
-  step "Eviction is in flight — opening the energy window immediately"
-  open_energy_window
-  narrate "Re-asserting the open window for the rest of the enacting window."
+  narrate "Eviction is in flight — re-asserting the open window for the rest of the enacting window."
   pause
   keep_window_open enacting 60
 
@@ -600,8 +589,8 @@ steered to the Move's target node instead of a fresh AI call."
 # even if this beat runs standalone, without retry() having captured it first.
 scale() {
   step "Beat 4 — AdjustReplicas (Scale)"
-  narrate "Same energy-gate interaction as beat 3: needs the window CLOSED to
-trigger, OPEN for the new replica's pod to actually schedule."
+  narrate "Needs the window CLOSED to trigger, OPEN for the new replica's pod to
+actually schedule. Unlike a Move, scaling up removes no running pod, so it isn't refused."
   capture_original_replicas
   pause
 
@@ -610,7 +599,7 @@ trigger, OPEN for the new replica's pod to actually schedule."
   pause
 
   step "Closing the energy window and re-asserting until Enacting is observed"
-  wait_for_enacting || return 1
+  wait_for_enacting close_energy_window || return 1
 
   step "Spec.Replicas is patched — opening the energy window immediately"
   open_energy_window
@@ -633,31 +622,25 @@ trigger, OPEN for the new replica's pod to actually schedule."
 
 # ─── Beat 5 — AdjustResources (Resize) ─────────────────────────────────────
 
-# Unlike beats 3/4, a successful in-place resize touches the ALREADY-RUNNING
-# pod directly (no eviction, no new pod, no scheduling) — this beat only
-# needs the energy-window dance for resourceEnactor's fallback path (in-place
-# resize unsupported on this cluster), which patches the pod template
-# instead and triggers a normal rollout. capture_original_resources runs
-# here (idempotent) so cleanup() restores the true pre-demo values even if
-# this beat runs standalone.
+# The window stays OPEN: under a hold the operator refuses AdjustResources,
+# because the template patch starts a rollout whose new pods the gate would
+# hold. capture_original_resources runs here (idempotent) so cleanup() restores
+# the true pre-demo values even if this beat runs standalone.
 resources() {
   step "Beat 5 — AdjustResources (Resize)"
   capture_original_resources
   narrate "Resizes $APP_CONTAINER_NAME's CPU/Memory. If this cluster supports
-in-place pod resize (K8s 1.27+), the running pod updates immediately with no
-new pod involved at all — the energy-window dance below is only insurance
-for the fallback path (template patch, effective on the next rollout)."
+in-place pod resize (K8s 1.27+), the running pod updates immediately. The
+window stays open, as under a hold the operator refuses this action."
   pause
 
   step "Forcing a guaranteed above-threshold AdjustResources"
   bump_mock_agent_resources
   pause
 
-  step "Closing the energy window and re-asserting until the resize is applied"
+  step "Opening the energy window and re-asserting until the resize is applied"
   wait_for_resources_applied || return 1
 
-  step "Resize applied — opening the energy window immediately"
-  open_energy_window
   narrate "Re-asserting the open window until $APP finishes rolling out (or
 up to 90s) — returns immediately if an in-place resize succeeded, since
 there's no new rollout to wait for."
@@ -711,10 +694,9 @@ ensure_not_escalated() {
 }
 
 # Re-asserts clear-cooldown + close-window every 2s (up to 90s) until the
-# profile's escalated flag flips true. $PROFILE's only trigger condition is
-# EnergyThreshold, which only matches while the window is closed — without
-# re-closing it, the external EAO controller can flip it back open between
-# cycles and the streak stalls short of the threshold.
+# profile's escalated flag flips true. EnergyThreshold only matches while the
+# window is closed — without re-closing it, the external EAO controller can flip
+# it back open between cycles and the streak stalls short of the threshold.
 wait_for_escalated() {
   local waited=0
   while [ "$waited" -lt 90 ]; do

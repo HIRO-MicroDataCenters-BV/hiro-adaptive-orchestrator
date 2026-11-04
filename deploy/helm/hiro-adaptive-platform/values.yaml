@@ -115,6 +115,7 @@ hiro-operator:
     REBALANCE_DETECTION_INTERVAL: 30s
     REBALANCE_NODE_PRESSURE_THRESHOLD: "0.90"
     REBALANCE_WATCHDOG_STALE_THRESHOLD: 15m
+    REBALANCE_MIN_PENDING_POD_AGE: 10s
 
     # AI call: how long to wait, and the minimum improvement worth acting on.
     REBALANCE_DECISION_TIMEOUT: 5s

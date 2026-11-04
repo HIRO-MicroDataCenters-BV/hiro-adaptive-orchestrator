@@ -156,7 +156,7 @@ func TestReconciler_ScaleTimeoutWithClosedEnergyGateIsDeferred(t *testing.T) {
 	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeDeferred {
 		t.Fatalf("history = %+v, want one Deferred-outcome entry", rs.History)
 	}
-	if !strings.Contains(rs.History[0].Message, "energy gate closed") {
+	if !strings.Contains(rs.History[0].Message, "energy gate: ") {
 		t.Errorf("reason = %q, want it to mention the energy gate", rs.History[0].Message)
 	}
 }

@@ -88,3 +88,6 @@ type EnergyGateResponse struct {
 	Allowed bool   `json:"allowed"`
 	Reason  string `json:"reason,omitempty"`
 }
+
+// EnergyGateReasonPrefix starts every hold reason, marking a held pod through its PodScheduled message.
+const EnergyGateReasonPrefix = "energy gate: "

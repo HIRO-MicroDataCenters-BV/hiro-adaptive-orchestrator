@@ -30,6 +30,7 @@ import (
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
 )
 
 // -----------------------------------------------------------------------------
@@ -186,13 +187,8 @@ func fetchPodStatuses(
 		case corev1.PodPending:
 			pending++
 			// Surface the scheduling failure message when the pod is Unschedulable.
-			for _, cond := range pod.Status.Conditions {
-				if cond.Type == corev1.PodScheduled &&
-					cond.Status == corev1.ConditionFalse &&
-					cond.Message != "" {
-					ps.Reason = cond.Message
-					break
-				}
+			if msg := utils.SchedulingFailureMessage(&pod); msg != "" {
+				ps.Reason = msg
 			}
 		case corev1.PodFailed:
 			failed++

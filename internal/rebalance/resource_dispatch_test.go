@@ -359,6 +359,36 @@ func TestReconciler_ResourceOutsideDefaultBoundsRejected(t *testing.T) {
 	}
 }
 
+// TestReconciler_ResourceRefusedWhileEnergyHeld: patching the template would start a rollout whose new pods the gate holds.
+func TestReconciler_ResourceRefusedWhileEnergyHeld(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(adjustResourcesResponse(testResourceContainerName, "200m", "256Mi", 50))
+	}))
+	defer server.Close()
+
+	profile := testEnergyAwareProfile()
+	eao := heldEAO("demo: energy window closed", time.Now().Add(time.Hour))
+	r, c := newTestReconcilerWithAgent(t, server.URL, testResizableDeployment(true), profile, eao)
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
+	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeRejected || rs.History[0].Reason != string(ReasonEnergyGateClosed) {
+		t.Fatalf("history = %+v, want one Rejected/EnergyGateClosed entry", rs.History)
+	}
+
+	deploy := &appsv1.Deployment{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "app-a", Namespace: "default"}, deploy); err != nil {
+		t.Fatalf("Get deployment: %v", err)
+	}
+	if got := deploy.Spec.Template.Spec.Containers[0].Resources.Requests; got.Cpu().String() != "100m" {
+		t.Errorf("template resources = %v, want unchanged at cpu=100m", got)
+	}
+}
+
 // TestReconciler_ResourceDryRunSkipsSideEffects covers dry-run for
 // AdjustResources: the cycle must still end Enacted with a [dry-run] marker,
 // but the actual Deployment template must never change.

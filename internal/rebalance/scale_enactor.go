@@ -96,26 +96,36 @@ func resolveReplicaBounds(
 		fallbackMax = DefaultMaxReplicas
 	}
 
-	ref := profile.Spec.ApplicationRef
-	hpaList := &autoscalingv2.HorizontalPodAutoscalerList{}
-	if err := c.List(ctx, hpaList, client.InNamespace(ref.Namespace)); err == nil {
-		for i := range hpaList.Items {
-			hpa := &hpaList.Items[i]
-			target := hpa.Spec.ScaleTargetRef
-			if target.Kind != string(ref.Kind) || target.Name != ref.Name {
-				continue
-			}
-			lo := int32(1)
-			if hpa.Spec.MinReplicas != nil {
-				lo = *hpa.Spec.MinReplicas
-			}
-			return replicaBounds{
-				Min: lo, Max: hpa.Spec.MaxReplicas,
-				Source: fmt.Sprintf("HorizontalPodAutoscaler %s", hpa.Name),
-			}
+	if hpa := findHPA(ctx, c, profile.Spec.ApplicationRef); hpa != nil {
+		lo := int32(1)
+		if hpa.Spec.MinReplicas != nil {
+			lo = *hpa.Spec.MinReplicas
+		}
+		return replicaBounds{
+			Min: lo, Max: hpa.Spec.MaxReplicas,
+			Source: fmt.Sprintf("HorizontalPodAutoscaler %s", hpa.Name),
 		}
 	}
 	return replicaBounds{Min: fallbackMin, Max: fallbackMax, Source: "default bounds"}
+}
+
+// findHPA returns the HorizontalPodAutoscaler targeting the workload, or nil if none exists or the list fails.
+func findHPA(
+	ctx context.Context,
+	c client.Client,
+	ref orchestrationv1alpha1.ApplicationReference,
+) *autoscalingv2.HorizontalPodAutoscaler {
+	hpaList := &autoscalingv2.HorizontalPodAutoscalerList{}
+	if err := c.List(ctx, hpaList, client.InNamespace(ref.Namespace)); err != nil {
+		return nil
+	}
+	for i := range hpaList.Items {
+		target := hpaList.Items[i].Spec.ScaleTargetRef
+		if target.Kind == string(ref.Kind) && target.Name == ref.Name {
+			return &hpaList.Items[i]
+		}
+	}
+	return nil
 }
 
 // scaleEnactor patches profile's workload (Deployment or StatefulSet) to

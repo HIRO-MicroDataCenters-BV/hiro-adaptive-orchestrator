@@ -296,7 +296,7 @@ Every parameter can be set as an environment variable before calling any deploy 
 | `EAO_VERSION` | `v1` | API version |
 | `EAO_KIND` | `EnergyAwareOrchestration` | Kind name |
 | `EAO_RUN_NOW_ACTIONS` | `DeployImmediately` | EAO `decision.action` values that mean the workload may run now (verdict `RunNow`) |
-| `EAO_HOLD_ACTIONS` | `Scheduled,Delayed` | Values that mean no energy now (verdict `Hold`, until the slot start). Anything in neither list is `Unknown` and logged. A value in both lists stops the operator at startup. The verdict drives the energy gate (only `Hold` keeps new pods Pending), the EnergyThreshold trigger, the Move/Scale timeout label and the AI request; `energyMetrics.sufficient` is informational only |
+| `EAO_HOLD_ACTIONS` | `Scheduled,Delayed` | Values that mean no energy now (verdict `Hold`, until the slot start). Anything in neither list is `Unknown` and logged. A value in both lists stops the operator at startup. The verdict drives the energy gate (only `Hold` keeps new pods Pending), the EnergyThreshold trigger, refusing Move and AdjustResources during a `Hold`, the Move/Scale timeout label and the AI request; `energyMetrics.sufficient` is informational only |
 
 #### Operator — Rebalance Engine
 
@@ -306,6 +306,7 @@ Every parameter can be set as an environment variable before calling any deploy 
 | `REBALANCE_HISTORY_MAX_ENTRIES` | `20` | Max history entries kept per profile |
 | `REBALANCE_HISTORY_MESSAGE_MAX` | `200` | Max characters of a history entry's message |
 | `REBALANCE_DETECTION_INTERVAL` | `30s` | Periodic detection tick (Go duration) |
+| `REBALANCE_MIN_PENDING_POD_AGE` | `10s` | How long a pod the energy gate held must exist before it's retried (Go duration) |
 | `REBALANCE_DECISION_TIMEOUT` | `5s` | AI-consultation timeout (Go duration) |
 | `REBALANCE_NODE_PRESSURE_THRESHOLD` | `0.90` | CPU/Memory pressure fraction that triggers `CPUThreshold`/`MemoryThreshold` |
 | `REBALANCE_IMPROVEMENT_THRESHOLD` | `20` | Minimum `Improvement` score a `Move` recommendation must clear to be enacted |

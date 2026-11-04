@@ -561,6 +561,13 @@ rules:
   - list
   - watch
 - apiGroups:
+  - autoscaling.k8s.io
+  resources:
+  - verticalpodautoscalers
+  verbs:
+  - get
+  - list
+- apiGroups:
   - batch
   resources:
   - jobs
@@ -885,6 +892,8 @@ spec:
           value: 2Gi
         - name: REBALANCE_WATCHDOG_STALE_THRESHOLD
           value: 15m
+        - name: REBALANCE_MIN_PENDING_POD_AGE
+          value: 10s
         - name: ENABLE_WEBHOOKS
           value: "false"
         - name: HIRO_SCHEDULER_NAME

@@ -224,7 +224,7 @@ func TestCheckEnergyGate_FollowsTheVerdict(t *testing.T) {
 	}{
 		{name: "slot ahead holds the pod",
 			eao:        withSlot(testRebalanceEAO("Optional", 200, "Scheduled", "optional: later slot", false), ahead),
-			wantReason: "optional: later slot; held until 2099-01-01T00:00:00Z"},
+			wantReason: "energy gate: optional: later slot; held until 2099-01-01T00:00:00Z"},
 		{name: "slot started lets it run even if the EAO lags",
 			eao: withSlot(testRebalanceEAO("Optional", 200, "Scheduled", "", false), started), wantAllowed: true},
 		{name: "Waiting is an EAO failure, not a hold",
@@ -233,7 +233,7 @@ func TestCheckEnergyGate_FollowsTheVerdict(t *testing.T) {
 			eao: testRebalanceEAO("Critical", 500, "DeployImmediately", "", false), wantAllowed: true},
 		{name: "a renamed hold action holds even when sufficient is true",
 			eao: testRebalanceEAO("Optional", 200, "Paused", "", true), holdActions: []string{"Paused"},
-			wantReason: "EAO holds the workload"},
+			wantReason: "energy gate: EAO holds the workload"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

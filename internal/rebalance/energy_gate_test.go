@@ -86,14 +86,14 @@ func TestClassifyScheduleTimeout(t *testing.T) {
 			profile:     testEnergyAwareProfile(),
 			objs:        []client.Object{heldEAO("demo: energy window closed", slotAhead)},
 			wantOutcome: OutcomeDeferred,
-			wantReason:  timeoutReason + " (energy gate closed: demo: energy window closed; held until 2099-01-01T00:00:00Z)",
+			wantReason:  timeoutReason + " (energy gate: demo: energy window closed; held until 2099-01-01T00:00:00Z)",
 		},
 		{
 			name:        "a hold with no reason or slot falls back to generic text",
 			profile:     testEnergyAwareProfile(),
 			objs:        []client.Object{testEAO("Scheduled", "", new(false))},
 			wantOutcome: OutcomeDeferred,
-			wantReason:  timeoutReason + " (energy gate closed: EAO holds the workload)",
+			wantReason:  timeoutReason + " (energy gate: EAO holds the workload)",
 		},
 	}
 

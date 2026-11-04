@@ -247,6 +247,16 @@ func FindEAOForApp(
 	return nil, nil
 }
 
+// SchedulingFailureMessage is why the scheduler last turned the pod away, or "" if it hasn't.
+func SchedulingFailureMessage(pod *corev1.Pod) string {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse {
+			return cond.Message
+		}
+	}
+	return ""
+}
+
 // NodeNames extracts the names of a list of nodes as a slice.
 func NodeNames(nodes []*corev1.Node) []string {
 	if len(nodes) == 0 {

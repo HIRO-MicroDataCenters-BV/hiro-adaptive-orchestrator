@@ -483,6 +483,7 @@ func main() {
 	//   REBALANCE_MIN_MEMORY               — AdjustResources guardrail lower bound, e.g. "64Mi"
 	//   REBALANCE_MAX_MEMORY               — AdjustResources guardrail upper bound, e.g. "2Gi"
 	//   REBALANCE_WATCHDOG_STALE_THRESHOLD — max time stuck mid-cycle before force-recovery, e.g. "15m"
+	//   REBALANCE_MIN_PENDING_POD_AGE      — how long a pod must exist before an energy retry, e.g. "10s"
 	// -------------------------------------------------------------------------
 	// Unset/0 fields fall back to the rebalance.DefaultHistory* values.
 	rebalanceHistory := rebalance.HistoryConfig{
@@ -554,6 +555,10 @@ func main() {
 	if rebalanceWatchdogStaleThreshold <= 0 {
 		rebalanceWatchdogStaleThreshold = rebalance.DefaultWatchdogStaleThreshold
 	}
+	rebalanceMinPendingPodAge := parseDurationEnv("REBALANCE_MIN_PENDING_POD_AGE")
+	if rebalanceMinPendingPodAge <= 0 {
+		rebalanceMinPendingPodAge = rebalance.DefaultMinPendingPodAge
+	}
 	// Resolved above (not left at the parseXEnv zero-sentinel) so this log
 	// line — and everything downstream — reflects what's actually in
 	// effect, not "0" for anything the deployer left unset.
@@ -577,6 +582,7 @@ func main() {
 		"minMemory", rebalanceMinMemory.String(),
 		"maxMemory", rebalanceMaxMemory.String(),
 		"watchdogStaleThreshold", rebalanceWatchdogStaleThreshold,
+		"minPendingPodAge", rebalanceMinPendingPodAge,
 	)
 
 	// decisionStore is shared between the PlacementServer (reads it in
@@ -606,7 +612,9 @@ func main() {
 		os.Exit(1)
 	}
 	pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, rebalanceNodePressureThreshold)
-	triggerEvaluator := rebalance.NewTriggerEvaluator(mgr.GetClient(), eaoSettings, pressureEvaluator)
+	triggerEvaluator := rebalance.NewTriggerEvaluator(
+		mgr.GetClient(), eaoSettings, pressureEvaluator, rebalanceMinPendingPodAge,
+	)
 
 	rebalanceDetector := rebalance.NewReconciler(
 		mgr.GetClient(),

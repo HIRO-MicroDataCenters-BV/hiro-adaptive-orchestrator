@@ -32,6 +32,7 @@ const (
 	GuardrailThreshold = "threshold"
 	GuardrailBounds    = "bounds"
 	GuardrailTarget    = "target"
+	GuardrailEnergy    = "energy"
 )
 
 // Result label values for RebalanceAIRequestsTotal.

@@ -325,6 +325,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl
 		return ctrl.Result{}, nil // opt-in — no Triggered ever fires
 	}
 
+	r.reportUndeclaredAutoscalers(ctx, req.NamespacedName, profile)
+
 	rs := profile.Status.RebalancingStatus
 
 	if rs.Escalated {
@@ -652,7 +654,7 @@ func (r *Reconciler) failEvaluation(
 func (r *Reconciler) enact(ctx context.Context, profile *orchestrationv1alpha1.OrchestrationProfile, action string) error {
 	switch action {
 	case ActionRetryPendingSchedule:
-		return retryPendingSchedule(ctx, r.Client, profile)
+		return retryPendingSchedule(ctx, r.Client, profile, r.Evaluator.minPendingPodAge)
 	default:
 		return fmt.Errorf("unknown bypass action %q", action)
 	}

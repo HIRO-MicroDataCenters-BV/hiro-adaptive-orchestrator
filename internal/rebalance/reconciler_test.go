@@ -99,6 +99,8 @@ func newTestReconcilerWithAgent(t *testing.T, agentURL string, objs ...client.Ob
 		schema.GroupVersionKind{Group: testEAOGVK.Group, Version: testEAOGVK.Version, Kind: testEAOGVK.Kind + "List"},
 		&unstructured.UnstructuredList{},
 	)
+	scheme.AddKnownTypeWithName(testVPAGVK, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(vpaListGVK, &unstructured.UnstructuredList{})
 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -121,7 +123,7 @@ func newTestReconcilerWithAgent(t *testing.T, agentURL string, objs ...client.Ob
 	metricsClient := metricsfake.NewSimpleClientset() //nolint:staticcheck // see pressure_test.go
 	pressure := NewNodePressureEvaluator(c, metricsClient, 0.90)
 	eaoSettings := placementserver.NewEAOSettings(testEAOGVK)
-	evaluator := NewTriggerEvaluator(c, eaoSettings, pressure)
+	evaluator := NewTriggerEvaluator(c, eaoSettings, pressure, DefaultMinPendingPodAge)
 
 	contextBuilder := placementserver.NewDecisionContextBuilder(c, testProfileIndexField, eaoSettings)
 	decisionClient := placementserver.NewDecisionClient(agentURL, "", 200*time.Millisecond)
@@ -872,38 +874,44 @@ func TestReconciler_MoveToUnusableTargetRejected(t *testing.T) {
 	}
 }
 
-// TestReconciler_MoveTimeoutWithClosedEnergyGateIsDeferred: awaitReplacement
-// times out (no replacement pod will ever appear against a fake client)
-// against an energy-aware workload whose EAO holds it until a later slot
-// right now — classifyScheduleTimeout should reclassify the timeout
-// Deferred instead of Failed.
-func TestReconciler_MoveTimeoutWithClosedEnergyGateIsDeferred(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
-			RequestID: "test", Action: orchestrationv1alpha1.RebalanceActionMove,
-			PodName: "app-a-1", TargetNode: "node-b", Improvement: 50, Reason: "better spread",
+// TestReconciler_MoveRefusedWhileEnergyHeld: the gate would hold the replacement, so the running pod
+// stays, and the refusal doesn't build up to an escalation however long the hold lasts.
+func TestReconciler_MoveRefusedWhileEnergyHeld(t *testing.T) {
+	for name, dryRun := range map[string]bool{"live": false, "dry-run": true} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
+					RequestID: "test", Action: orchestrationv1alpha1.RebalanceActionMove,
+					PodName: "app-a-1", TargetNode: "node-b", Improvement: 50, Reason: "better spread",
+				})
+			}))
+			defer server.Close()
+
+			profile := testEnergyAwareProfile()
+			profile.Spec.Rebalancing.DryRun = dryRun
+			pod := testPod("app-a-1", "node-a", corev1.PodRunning)
+			eao := heldEAO("demo: energy window closed", time.Now().Add(time.Hour))
+			r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao, readyTargetNode())
+
+			if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+
+			rs := getProfile(t, c, profile.Name).Status.RebalancingStatus
+			if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeRejected || rs.History[0].Reason != string(ReasonEnergyGateClosed) {
+				t.Fatalf("history = %+v, want one Rejected/EnergyGateClosed entry", rs.History)
+			}
+			if !strings.Contains(rs.History[0].Message, "demo: energy window closed") {
+				t.Errorf("message = %q, want the EAO's reason", rs.History[0].Message)
+			}
+			if rs.ConsecutiveFailures != 0 {
+				t.Errorf("ConsecutiveFailures = %d, want 0: a hold is not a failure", rs.ConsecutiveFailures)
+			}
+			if err := c.Get(context.Background(), types.NamespacedName{Name: "app-a-1", Namespace: "default"}, &corev1.Pod{}); err != nil {
+				t.Errorf("the running pod must not be evicted: %v", err)
+			}
 		})
-	}))
-	defer server.Close()
-
-	profile := testEnergyAwareProfile()
-	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
-	eao := heldEAO("demo: energy window closed", time.Now().Add(time.Hour))
-	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao, readyTargetNode())
-	r.MoveActionTimeout = 50 * time.Millisecond
-
-	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-
-	got := getProfile(t, c, profile.Name)
-	rs := got.Status.RebalancingStatus
-	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeDeferred {
-		t.Fatalf("history = %+v, want one Deferred-outcome entry", rs.History)
-	}
-	if !strings.Contains(rs.History[0].Message, "energy gate closed") {
-		t.Errorf("reason = %q, want it to mention the energy gate", rs.History[0].Message)
 	}
 }
 
@@ -966,50 +974,6 @@ func TestReconciler_MoveTimeoutWithOpenEnergyGateStaysFailed(t *testing.T) {
 	rs := got.Status.RebalancingStatus
 	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeFailed {
 		t.Fatalf("history = %+v, want one Failed-outcome entry", rs.History)
-	}
-}
-
-// TestReconciler_MoveWrongNodeStaysFailedEvenWithClosedEnergyGate proves
-// classifyScheduleTimeout is only ever applied to the timeout branch, not
-// the "replacement landed on the wrong node" branch: a replacement pod
-// appears (so awaitReplacement doesn't time out at all) but on the wrong
-// node, with the energy gate closed — must still be Failed, not Deferred.
-// The replacement is created 300ms after Reconcile starts (well under
-// moveActionPollInterval's 2s cadence, so it's reliably missed by the
-// immediate first poll and picked up by the second) to deterministically
-// exercise the "replacement found" path rather than the timeout path.
-func TestReconciler_MoveWrongNodeStaysFailedEvenWithClosedEnergyGate(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(placementserver.RebalanceDecisionResponse{
-			RequestID: "test", Action: orchestrationv1alpha1.RebalanceActionMove,
-			PodName: "app-a-1", TargetNode: "node-b", Improvement: 50, Reason: "better spread",
-		})
-	}))
-	defer server.Close()
-
-	profile := testEnergyAwareProfile()
-	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
-	eao := heldEAO("demo: energy window closed", time.Now().Add(time.Hour))
-	r, c := newTestReconcilerWithAgent(t, server.URL, testDeployment(), pod, profile, eao, readyTargetNode())
-	r.MoveActionTimeout = 5 * time.Second
-
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		_ = c.Create(context.Background(), testPod("app-a-2", "node-c", corev1.PodRunning)) // wrong node
-	}()
-
-	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}}); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-
-	got := getProfile(t, c, profile.Name)
-	rs := got.Status.RebalancingStatus
-	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeFailed {
-		t.Fatalf("history = %+v, want one Failed-outcome entry (wrong node, not a timeout)", rs.History)
-	}
-	if !strings.Contains(rs.History[0].Message, "intent not honoured") {
-		t.Errorf("reason = %q, want the wrong-node reason, not a timeout/energy-gate one", rs.History[0].Message)
 	}
 }
 
@@ -1148,7 +1112,7 @@ func TestReconciler_EnergyPendingRetryBypassesToEnacted(t *testing.T) {
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
 	sufficient := true
 	eao := testEAO("DeployImmediately", "", &sufficient)
-	pending := testPod("app-a-pending", "", corev1.PodPending)
+	pending := energyHeldPod("app-a-pending")
 	r, c := newTestReconciler(t, testDeployment(), eao, pending, profile)
 
 	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}})
@@ -1193,7 +1157,7 @@ func TestReconciler_BypassIgnoresActiveCooldown(t *testing.T) {
 	profile.Status.RebalancingStatus.CooldownUntil = metav1.NewTime(time.Now().Add(4 * time.Minute))
 	sufficient := true
 	eao := testEAO("DeployImmediately", "", &sufficient)
-	pending := testPod("app-a-pending", "", corev1.PodPending)
+	pending := energyHeldPod("app-a-pending")
 	r, c := newTestReconciler(t, testDeployment(), eao, pending, profile)
 
 	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: profile.Name}})

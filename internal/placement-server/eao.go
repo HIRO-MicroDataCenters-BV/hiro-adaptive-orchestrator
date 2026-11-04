@@ -278,7 +278,7 @@ func HoldReason(eao *EAOProfileContext) string {
 	if eao.HoldUntil != nil {
 		reason += "; held until " + eao.HoldUntil.UTC().Format(time.RFC3339)
 	}
-	return reason
+	return placement.EnergyGateReasonPrefix + reason
 }
 
 // eaoContext maps the EAO and adds its verdict; an unmapped action is logged, so an EAO change shows up.

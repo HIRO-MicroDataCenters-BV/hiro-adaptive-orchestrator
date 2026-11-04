@@ -133,7 +133,7 @@ placement is running blind. It isn't counted at all when a profile has energy aw
 | `outcome` | `transitions_total` | `Enacted`, `NoOp`, `Rejected`, `Deferred`, `Failed`, `Escalated`, or `""` while non-terminal |
 | `condition` | `trigger_*` | `CPUThreshold`, `MemoryThreshold`, `EnergyThreshold`, `NodeFailure`, `PeriodicReview` |
 | `fired` | `trigger_evaluations_total` | `true`, `false` |
-| `guardrail` | `guardrail_rejections_total` | `threshold`, `bounds`, `target` |
+| `guardrail` | `guardrail_rejections_total` | `threshold`, `bounds`, `target`, `energy` |
 | `stage` | `enactment_failures_total` | `evict`, `patch`, `wait_replacement` |
 | `result` | `ai_requests_total` | `success`, `context_error`, `ai_error` |
 | `result` | `pressure_queries_total` | `success`, `unavailable` |

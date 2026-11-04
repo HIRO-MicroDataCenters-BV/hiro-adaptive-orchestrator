@@ -117,6 +117,30 @@ func (w *StateWriter) HistoryConfig() HistoryConfig {
 	return w.history
 }
 
+// SetUndeclaredAutoscaler records the autoscaler check; an empty message means none is undeclared.
+func (w *StateWriter) SetUndeclaredAutoscaler(ctx context.Context, key types.NamespacedName, message string) error {
+	status, reason := metav1.ConditionFalse, "NoUndeclaredAutoscaler"
+	if message != "" {
+		status, reason = metav1.ConditionTrue, "UndeclaredAutoscaler"
+	}
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		profile := &orchestrationv1alpha1.OrchestrationProfile{}
+		if err := w.reader.Get(ctx, key, profile); err != nil {
+			return fmt.Errorf("rebalance writer: fetching profile %s: %w", key.Name, err)
+		}
+		changed := apimeta.SetStatusCondition(&profile.Status.Conditions, metav1.Condition{
+			Type:    orchestrationv1alpha1.ConditionUndeclaredAutoscaler,
+			Status:  status,
+			Reason:  reason,
+			Message: message,
+		})
+		if !changed {
+			return nil
+		}
+		return w.client.Status().Update(ctx, profile)
+	})
+}
+
 // Transition moves the OrchestrationProfile identified by key from its
 // current rebalancing state to `to`, validating the move against the state
 // machine, persisting it via the status subresource, and emitting a
