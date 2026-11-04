@@ -392,6 +392,14 @@ set_strategy() {
     -p "{\"spec\":{\"placement\":{\"strategy\":\"$1\"}}}" >/dev/null
 }
 
+# For scenarios that don't test the gate: the real EAO controller's writes then can't refuse a Move or hold a pod.
+disable_energy_awareness() {
+  save_profile_spec
+  echo "  Energy awareness: off"
+  run kubectl patch orchestrationprofile "$PROFILE" --type=merge \
+    -p '{"spec":{"placement":{"awareness":{"energy":false}}}}' >/dev/null
+}
+
 restore_profile_spec() {
   [ -n "$ORIG_REBALANCING" ] || return 0
   echo "  Restoring $PROFILE's spec"
@@ -701,7 +709,7 @@ scenario_placement() {
   local strategy before uid
   narrate "Each strategy scores a new pod. The service logs its answer under the pod's UID."
   pause
-  want_window open
+  disable_energy_awareness
   capture_original_replicas
   for strategy in Packed Balanced Spread; do
     step "Strategy: $strategy"
@@ -795,11 +803,21 @@ scenario_stuck_pod() {
   expect_equal "No retry was attempted" "$(find_entry RetryPendingSchedule)" ""
 }
 
+enacted_node_failure_moves() {
+  new_entries | awk -F'|' '$2=="Move" && $3=="Enacted" && $4=="Moved" && $5=="NodeFailure"'
+}
+
+# A pod counts as gone once evicted, but its Move is only recorded after the replacement lands.
+moves_recorded() {
+  [ "$(enacted_node_failure_moves | grep -c . || true)" -ge "$1" ]
+}
+
 scenario_node_failure() {
   local expected moved not_by_rules onto_failed
   narrate "NodeFailure goes first: every pod moves off the down node, one per cycle, ignoring the shared cooldown."
   pause
   patch_rebalancing '{"cooldownSeconds":300}'
+  disable_energy_awareness
   prepare_failure_node "$NODE_FAILURE_REPLICAS" || return 0
   expected=$(pods_on_node "$FAILED_NODE" | wc -l | tr -d ' ')
   clear_cooldown
@@ -809,18 +827,20 @@ scenario_node_failure() {
   fi
   set_baseline
   node_down "$FAILED_NODE" || return 0
-  if wait_until 180 "all $expected pod(s) to leave $FAILED_NODE" no_live_pods_on_node "$FAILED_NODE"; then
-    pass "All $expected pod(s) left $FAILED_NODE, inside the 300s cooldown"
-  else
+  # Stop here on failure: waiting longer keeps the node down until Kubernetes evicts its pods at 5 minutes.
+  if ! wait_until 180 "all $expected pod(s) to leave $FAILED_NODE" no_live_pods_on_node "$FAILED_NODE"; then
     fail "Pods are still on $FAILED_NODE: $(pods_on_node "$FAILED_NODE" | tr '\n' ' ')"
+    return 0
   fi
-  moved=$(new_entries | awk -F'|' '$2=="Move" && $3=="Enacted" && $4=="Moved" && $5=="NodeFailure"')
+  pass "All $expected pod(s) left $FAILED_NODE, inside the 300s cooldown"
+  wait_until 60 "$expected Move(s) to be recorded" moves_recorded "$expected" || true
+  moved=$(enacted_node_failure_moves)
   expect_equal "One Move per pod" "$(printf '%s' "$moved" | grep -c . || true)" "$expected"
-  not_by_rules=$(printf '%s\n' "$moved" | awk -F'|' '$1!="" && $6!="rules"')
-  expect_equal "The service's rules decided every Move" "$not_by_rules" ""
-  onto_failed=$(printf '%s\n' "$moved" | awk -F'|' -v n="$FAILED_NODE" '$10==n')
-  expect_equal "No replacement landed on $FAILED_NODE" "$onto_failed" ""
   if [ -n "$moved" ]; then
+    not_by_rules=$(printf '%s\n' "$moved" | awk -F'|' '$6!="rules"')
+    expect_equal "The service's rules decided every Move" "$not_by_rules" ""
+    onto_failed=$(printf '%s\n' "$moved" | awk -F'|' -v n="$FAILED_NODE" '$10==n')
+    expect_equal "No replacement landed on $FAILED_NODE" "$onto_failed" ""
     show_entry "$(printf '%s\n' "$moved" | awk 'NR==1')"
   fi
   if wait_until 90 "$APP to be fully available" app_rollout_done; then
@@ -831,6 +851,7 @@ scenario_node_failure() {
 }
 
 scenario_node_failure_hold() {
+  local failures
   narrate "The service still says Move off a down node, but the operator refuses: the gate would hold the replacement."
   pause
   patch_rebalancing "{\"cooldownSeconds\":$DEMO_COOLDOWN_SECONDS}"
@@ -838,9 +859,10 @@ scenario_node_failure_hold() {
   set_baseline
   want_window closed
   node_down "$FAILED_NODE" || return 0
-  expect_entry "The Move is refused under the hold" 120 Move Rejected EnergyGateClosed NodeFailure
+  expect_entry "The Move is refused under the hold" 120 Move Rejected EnergyGateClosed NodeFailure || return 0
   if pod_is_live "$FAILED_POD"; then pass "$FAILED_POD wasn't evicted"; else fail "$FAILED_POD was evicted"; fi
-  expect_equal "A hold isn't counted as a failure" "$(rs_field consecutiveFailures | sed 's/^$/0/')" "0"
+  failures=$(rs_field consecutiveFailures)
+  expect_equal "A hold isn't counted as a failure" "${failures:-0}" "0"
   set_baseline
   want_window open
   expect_entry "Once the window opens, the pod moves" 120 Move Enacted Moved NodeFailure
@@ -850,11 +872,12 @@ scenario_node_failure_no_target() {
   narrate "With every other worker cordoned, no node can take the pod, so the service answers NoOp."
   pause
   patch_rebalancing "{\"cooldownSeconds\":$DEMO_COOLDOWN_SECONDS}"
+  disable_energy_awareness
   prepare_failure_node || return 0
   cordon_other_workers "$FAILED_NODE"
   set_baseline
   node_down "$FAILED_NODE" || return 0
-  expect_entry "The service finds no healthy node" 120 NoOp NoOp NoChange NodeFailure "no healthy node can take pod"
+  expect_entry "The service finds no healthy node" 120 NoOp NoOp NoChange NodeFailure "no healthy node can take pod" || return 0
   if pod_is_live "$FAILED_POD"; then pass "$FAILED_POD wasn't evicted"; else fail "$FAILED_POD was evicted"; fi
   uncordon_demo_nodes
   set_baseline
@@ -865,11 +888,12 @@ scenario_node_failure_pdb() {
   narrate "Leaving a down node skips the service's PDB gate, but the eviction API still enforces the PDB."
   pause
   patch_rebalancing "{\"cooldownSeconds\":$DEMO_COOLDOWN_SECONDS,\"escalationThreshold\":10}"
+  disable_energy_awareness
   prepare_failure_node || return 0
   create_pdb
   set_baseline
   node_down "$FAILED_NODE" || return 0
-  expect_entry "The PDB blocks the eviction" 120 Move Deferred PDBBlocked NodeFailure
+  expect_entry "The PDB blocks the eviction" 120 Move Deferred PDBBlocked NodeFailure || return 0
   if pod_is_live "$FAILED_POD"; then pass "$FAILED_POD wasn't evicted"; else fail "$FAILED_POD was evicted"; fi
   delete_pdb
   set_baseline
@@ -887,6 +911,7 @@ scenario_dry_run() {
   narrate "Dry-run goes through the same decision and reports the Move, but nothing is evicted."
   pause
   patch_rebalancing "{\"dryRun\":true,\"cooldownSeconds\":$DEMO_COOLDOWN_SECONDS}"
+  disable_energy_awareness
   prepare_failure_node || return 0
   set_baseline
   node_down "$FAILED_NODE" || return 0
@@ -937,6 +962,8 @@ scenario_escalate() {
   sleep 15
   expect_equal "The loop stays paused" "$(newest_at)" "$at"
   restore_ai_service
+  # The Service refuses connections briefly after the pod is Ready; those failures mustn't pause the loop again.
+  patch_rebalancing '{"escalationThreshold":10}'
   clear_escalation
   set_baseline
   KEEP_COOLDOWN_CLEAR=true
@@ -1124,7 +1151,7 @@ preflight() {
     esac
   done
   [ "$(kubectl get orchestrationprofile "$PROFILE" -o jsonpath='{.spec.placement.awareness.energy}')" = "true" ] \
-    || die "$PROFILE must set placement.awareness.energy: true."
+    || die "$PROFILE must set placement.awareness.energy: true. A killed run can leave it off: run $0 cleanup."
 
   age=$(kubectl logs "deployment/$OPERATOR_DEPLOYMENT" -n "$NAMESPACE" -c manager 2>/dev/null \
     | grep -m1 'rebalance engine configured' | grep -o '"minPendingPodAge": "[^"]*"' || true)

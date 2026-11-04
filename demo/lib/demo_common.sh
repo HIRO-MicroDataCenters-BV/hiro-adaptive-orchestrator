@@ -97,7 +97,7 @@ close_energy_window() {
   slot_end=$(date -u -v+2H +%FT%TZ 2>/dev/null || date -u -d '+2 hours' +%FT%TZ)
   now=$(date -u +%FT%TZ)
   run kubectl patch energyawareorchestration "$EAO" -n "$APP_NAMESPACE" --type=merge --subresource=status \
-    -p "{\"status\":{\"lastUpdated\":\"${now}\",\"decision\":{\"action\":\"Scheduled\",\"reason\":\"demo: energy window closed\",\"scheduledSlot\":{\"slotStart\":\"${slot_start}\",\"slotEnd\":\"${slot_end}\"}},\"energyMetrics\":{\"sufficient\":false}}}" >/dev/null
+    -p "{\"status\":{\"lastUpdated\":\"${now}\",\"decision\":{\"action\":\"Scheduled\",\"reason\":\"demo: energy window closed\",\"scheduledSlot\":{\"slotNumber\":1,\"slotStart\":\"${slot_start}\",\"slotEnd\":\"${slot_end}\"}},\"energyMetrics\":{\"sufficient\":false}}}" >/dev/null
 }
 
 open_energy_window() {
