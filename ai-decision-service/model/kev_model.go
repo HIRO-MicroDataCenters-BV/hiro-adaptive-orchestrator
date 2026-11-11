@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/scorer"
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
@@ -88,7 +87,6 @@ func (kd *KevDecider) DecidePlacement(ctx context.Context,
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	start := time.Now()
 	resp, err := kd.httpClient.Do(httpReq)
 	if err != nil {
 		return placement.DecisionResponse{},
