@@ -73,7 +73,7 @@ func (kd *KevDecider) DecidePlacement(ctx context.Context,
 			fmt.Errorf("(requestId=%s) no candidate nodes to ask Kev about", req.RequestID)
 	}
 	kd.log.Debug("Sent request to Kev", "requestId", req.RequestID,
-		"state", kevReq.State, "criteria", kevReq.Questions[kevQuestionID].Criteria)
+		"kevRequest", kevReq)
 
 	body, err := json.Marshal(kevReq)
 	if err != nil {
@@ -119,8 +119,7 @@ func (kd *KevDecider) DecidePlacement(ctx context.Context,
 				req.RequestID, kevQuestionID)
 	}
 	kd.log.Debug("Received answer from Kev", "requestId", req.RequestID,
-		"choice", answer.Choice, "confidence", answer.Confidence, "probabilities", answer.Probabilities,
-		"latencyMilliSec", float64(time.Since(start).Microseconds())/1000)
+		"kevResponse", answer)
 
 	nodeScores := make([]placement.NodeScore, 0, len(req.NodeStats))
 	for _, nodeStat := range req.NodeStats {
