@@ -338,6 +338,13 @@ aiDecisionService:
     AI_DECISION_SERVICE_SCORER_ZONE_LABEL: topology.kubernetes.io/zone
     AI_DECISION_SERVICE_SCORER_UNKNOWN_SCORE: "50"
 
+    # Model for placement: provider "" = off (the scorer answers), "kev" = Kev's System One API.
+    AI_DECISION_SERVICE_MODEL_PROVIDER: "kev"
+    AI_DECISION_SERVICE_MODEL_BASE_URL: http://host.docker.internal:8009
+    AI_DECISION_SERVICE_MODEL_PATH: /v1/systemone
+    AI_DECISION_SERVICE_MODEL_NAME: kev-latest
+    AI_DECISION_SERVICE_MODEL_TIMEOUT: 5000ms
+
     # Rebalance rules: EAO data older than this is ignored.
     AI_DECISION_SERVICE_REBALANCE_EAO_STALE_AFTER: 5m
     AI_DECISION_SERVICE_REBALANCE_FLIP_MOVE_ACTION_WINDOW: 30m

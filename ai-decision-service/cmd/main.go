@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/model"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/server"
 )
 
@@ -20,7 +21,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := server.New(cfg, log)
+	placementDecider, err := model.New(cfg.ModelConfig)
+	if err != nil {
+		log.Error("Failed to create placement decider", slog.Any("error", err))
+		os.Exit(1)
+	}
+
+	srv := server.New(cfg, placementDecider, log)
 	log.Info("Starting AI Decision Service", "config", cfg)
 	err = srv.Start()
 	if err != nil {
@@ -94,6 +101,14 @@ func loadConfig() (server.Config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	cfg.ModelConfig.Provider = envString("AI_DECISION_SERVICE_MODEL_PROVIDER", cfg.ModelConfig.Provider)
+	cfg.ModelConfig.BaseURL = envString("AI_DECISION_SERVICE_MODEL_BASE_URL", cfg.ModelConfig.BaseURL)
+	cfg.ModelConfig.Path = envString("AI_DECISION_SERVICE_MODEL_PATH", cfg.ModelConfig.Path)
+	cfg.ModelConfig.ModelName = envString("AI_DECISION_SERVICE_MODEL_NAME", cfg.ModelConfig.ModelName)
+	cfg.ModelConfig.Timeout, err = envDuration("AI_DECISION_SERVICE_MODEL_TIMEOUT", cfg.ModelConfig.Timeout)
+	if err != nil {
+		return cfg, err
+	}
 	return cfg, validateConfig(cfg)
 }
 
@@ -118,6 +133,9 @@ func validateConfig(cfg server.Config) error {
 	}
 	if err := cfg.RebalanceConfig.Validate(); err != nil {
 		return fmt.Errorf("invalid rebalance config: %w", err)
+	}
+	if err := cfg.ModelConfig.Validate(); err != nil {
+		return fmt.Errorf("invalid model config: %w", err)
 	}
 	return nil
 }

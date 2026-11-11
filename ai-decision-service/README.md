@@ -13,7 +13,7 @@ It is a separate Go module (own `go.mod`), like `scheduler-plugin/`. It imports 
 
 | Flow | Answer | `decidedBy` |
 |------|--------|-------------|
-| Placement | Scores each node 0–100 with the profile's strategy (below) | `scorer` |
+| Placement | The model scores the candidates when one is set; otherwise the scorer, with the profile's strategy (below) | `model`; `scorer` when the model is off; `fallback` when it fails |
 | Rebalance | Moves a pod off a down node to the best healthy node; otherwise `NoOp`, listing what is blocked | `rules` (`fallback` if the answer fails validation) |
 
 ### Placement scorer (`scorer/`)
@@ -30,6 +30,20 @@ Utilisation is worked out per resource **after** placing the pod: `(requested + 
 - A node with unknown usage gets the neutral unknown score, and is never dropped.
 - The awareness flags pick the resources (CPU, memory). None set means both.
 - The reason names the best node, e.g. `Balanced: node-2 best (score 74)`.
+
+### Placement model (`model/`)
+
+Off by default (`AI_DECISION_SERVICE_MODEL_PROVIDER` empty). With a provider set:
+
+1. The scorer runs first, so its answer is ready if the model fails.
+2. The model is asked, and given up on after `AI_DECISION_SERVICE_MODEL_TIMEOUT`.
+3. **Check:** each candidate needs exactly one score from 0 to 100. A model error, a timeout or a failed check sends the scorer's answer with `decidedBy: fallback`.
+
+The log also records the scorer's answer beside the model's, so the two can be compared.
+
+**Kev** (`kev`, System One API): each candidate's facts (share of CPU and memory requested, the app's pods on it) become one option of a `choice` question, with the strategy's rule as the instruction. Each node's probability × 100 is its score, and the reason names Kev's pick, e.g. `Spread: node-2 best (probability 0.75)`.
+
+**Adding a model:** a new file in `model/` that implements `PlacementDecider`, plus one `case` in `model.New`.
 
 ### Rebalance (`rebalance/`)
 
@@ -74,6 +88,11 @@ Every setting has a default (`server/config.go`) and an env var:
 | `AI_DECISION_SERVICE_SCORER_SPREAD_BALANCED_WEIGHT` | `0.1` | Spread: weight of the Balanced tie-break |
 | `AI_DECISION_SERVICE_SCORER_ZONE_LABEL` | `topology.kubernetes.io/zone` | Node label that names its zone |
 | `AI_DECISION_SERVICE_SCORER_UNKNOWN_SCORE` | `50` | Score for a node whose usage is unknown |
+| `AI_DECISION_SERVICE_MODEL_PROVIDER` | `""` | Placement model: `""` = off (the scorer answers), `kev` = Kev's System One API |
+| `AI_DECISION_SERVICE_MODEL_BASE_URL` | `""` | Model's address; the full URL is base URL + path. Required with a provider |
+| `AI_DECISION_SERVICE_MODEL_PATH` | `""` | Model's API path, e.g. `/v1/systemone` for Kev. Required with a provider |
+| `AI_DECISION_SERVICE_MODEL_NAME` | `""` | Model name sent with each request, e.g. `kev-latest`. Required with a provider |
+| `AI_DECISION_SERVICE_MODEL_TIMEOUT` | `500ms` | Gives up on the model after this; the scorer answers instead |
 | `AI_DECISION_SERVICE_REBALANCE_EAO_STALE_AFTER` | `5m` | EAO data older than this is ignored |
 | `AI_DECISION_SERVICE_REBALANCE_FLIP_MOVE_ACTION_WINDOW` | `30m` | How long a Move blocks churn and ping-pong moves |
 | `AI_DECISION_SERVICE_REBALANCE_RISK_CONDITIONS` | `MemoryPressure,DiskPressure,PIDPressure,NetworkUnavailable` | Node conditions that mark a node at risk when `True` |

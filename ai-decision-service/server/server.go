@@ -1,31 +1,43 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
+	"math"
 	"net/http"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/model"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/rebalance"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/scorer"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
 
+// kube-scheduler's node score range
+const (
+	MinScore = 0
+	MaxScore = 100
+)
+
 type AIDecisionService struct {
-	cfg Config
-	log *slog.Logger
+	cfg              Config
+	placementDecider model.PlacementDecider // nil when the model is off, so the scorer answers.
+	log              *slog.Logger
 }
 
-func New(cfg Config, log *slog.Logger) *AIDecisionService {
+func New(cfg Config, placementDecider model.PlacementDecider, log *slog.Logger) *AIDecisionService {
 	return &AIDecisionService{
-		cfg: cfg,
-		log: log,
+		cfg:              cfg,
+		placementDecider: placementDecider,
+		log:              log,
 	}
 }
 
@@ -84,7 +96,7 @@ func (s *AIDecisionService) handleDecision(w http.ResponseWriter, r *http.Reques
 		ans := s.rebalanceAnswer(req)
 		resp, flow, decidedBy = ans, "rebalance", ans.DecidedBy
 	} else {
-		ans := s.placementAnswer(req)
+		ans := s.placementAnswer(r.Context(), req)
 		resp, flow, decidedBy = ans, "placement", ans.DecidedBy
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -103,17 +115,43 @@ func (s *AIDecisionService) handleDecision(w http.ResponseWriter, r *http.Reques
 	)
 }
 
-func (s *AIDecisionService) placementAnswer(req placement.DecisionRequest) placement.DecisionResponse {
+func (s *AIDecisionService) placementAnswer(ctx context.Context,
+	req placement.DecisionRequest) placement.DecisionResponse {
 	scores, reason := scorer.Score(req, s.cfg.ScorerConfig)
-	return placement.DecisionResponse{
+	scorerAnswer := placement.DecisionResponse{
 		RequestID:  req.RequestID, // echo it back, so logs can join request and answer
 		NodeScores: scores,
 		Reason:     reason,
 		DecidedBy:  placement.DecidedByScorer,
 	}
+	if s.placementDecider == nil {
+		return scorerAnswer
+	}
+	s.log.Info("Scorer answer is in standby",
+		"requestId", req.RequestID, "scoreAnswer", scorerAnswer)
+
+	modelAnswer, err := s.placementDecider.DecidePlacement(ctx, req)
+	if err == nil {
+		err = checkPlacementAnswer(modelAnswer, req)
+	}
+	if err != nil {
+		s.log.Warn("Placement model failed, scorer will be used instead",
+			"requestId", req.RequestID, "error", err)
+		scorerAnswer.DecidedBy = placement.DecidedByFallback
+		return scorerAnswer
+	}
+	modelAnswer.DecidedBy = placement.DecidedByModel
+	modelAnswer.RequestID = req.RequestID
+	s.log.Info("Placement model answered successfully",
+		"requestId", req.RequestID, "modelAnswer", modelAnswer)
+	s.log.Debug("Comparing the model answer with the scorer answer",
+		"requestId", req.RequestID, "modelReason",
+		modelAnswer.Reason, "scoreReason", scorerAnswer.Reason)
+	return modelAnswer
 }
 
-func (s *AIDecisionService) rebalanceAnswer(req placement.DecisionRequest) placement.RebalanceDecisionResponse {
+func (s *AIDecisionService) rebalanceAnswer(
+	req placement.DecisionRequest) placement.RebalanceDecisionResponse {
 	return rebalance.Decide(req, time.Now(), s.cfg.RebalanceConfig, s.cfg.ScorerConfig)
 }
 
@@ -129,4 +167,30 @@ func inputHash(req placement.DecisionRequest) string {
 	body, _ := json.Marshal(req)
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:8])
+}
+
+// checkPlacementAnswer returns why a model answer can't be used:
+// each candidate needs exactly one score from 0 to 100.
+func checkPlacementAnswer(answer placement.DecisionResponse, req placement.DecisionRequest) error {
+	unscored := map[string]bool{}
+	for _, node := range req.NodeStats {
+		if node.Candidate {
+			unscored[node.Name] = true
+		}
+	}
+	for _, nodeScore := range answer.NodeScores {
+		nodeName := nodeScore.NodeName
+		if _, ok := unscored[nodeName]; !ok {
+			return fmt.Errorf("node %s is not a possible node or scored twice", nodeName)
+		}
+		if nodeScore.Score < MinScore ||
+			nodeScore.Score > MaxScore || math.IsNaN(nodeScore.Score) {
+			return fmt.Errorf("node %s has invalid score %v", nodeName, nodeScore.Score)
+		}
+		delete(unscored, nodeName)
+	}
+	if len(unscored) > 0 {
+		return fmt.Errorf("nodes %v were left unscored", maps.Keys(unscored))
+	}
+	return nil
 }

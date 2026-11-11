@@ -9,20 +9,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// average returns the mean utilisation among the scored resources.
-func average(util map[string]float64) float64 {
-	var sum float64
-	for _, u := range util {
-		sum += u
+// Strategy returns the placement strategy from the profile, defaulting to Balanced.
+func Strategy(profile *placement.AOProfileContext) string {
+	strategy := string(orchestrationv1alpha1.PlacementStrategyBalanced)
+	if profile != nil && profile.Strategy != "" {
+		strategy = profile.Strategy
 	}
-	if len(util) == 0 {
-		return 0
-	}
-	return sum / float64(len(util))
+	return strategy
 }
 
-// podRequests sums the pod's container requests: CPU in millicores, memory in bytes.
-func podRequests(pod *corev1.Pod) map[string]int64 {
+// PodRequests sums the pod's container requests: CPU in millicores, memory in bytes.
+func PodRequests(pod *corev1.Pod) map[string]int64 {
 	resources := make(map[string]int64)
 	if pod == nil {
 		return resources
@@ -34,8 +31,8 @@ func podRequests(pod *corev1.Pod) map[string]int64 {
 	return resources
 }
 
-// scoredResources picks the resources the profile cares about; none flagged means CPU and memory.
-func scoredResources(profile *placement.AOProfileContext) []string {
+// ScoredResources picks the resources the profile cares about; none flagged means CPU and memory.
+func ScoredResources(profile *placement.AOProfileContext) []string {
 	var resources []string
 	if profile != nil && profile.Awareness.CPU {
 		resources = append(resources, corev1.ResourceCPU.String())
@@ -52,8 +49,22 @@ func scoredResources(profile *placement.AOProfileContext) []string {
 	return resources
 }
 
-// utilAfter is (requested + pod) / allocatable per resource; ok is false when any of it is unknown.
-func utilAfter(node placement.NodeStat, pod map[string]int64, resources []string) (util map[string]float64, ok bool) {
+// average returns the mean utilisation among the scored resources.
+func average(util map[string]float64) float64 {
+	var sum float64
+	for _, u := range util {
+		sum += u
+	}
+	if len(util) == 0 {
+		return 0
+	}
+	return sum / float64(len(util))
+}
+
+// RequestedUtilization is (requested + pod) / allocatable per resource; ok is false when any of it is unknown.
+func RequestedUtilization(node placement.NodeStat,
+	pod map[string]int64,
+	resources []string) (util map[string]float64, ok bool) {
 	util = make(map[string]float64)
 	for _, r := range resources {
 		nr, found := node.Resources[r]
@@ -111,8 +122,9 @@ type spreadCounts struct {
 	highestNodeCount int
 }
 
-// countAppPods counts the app's pods per zone; nodes with unknown appPods or no zone label are skipped for zones.
-func countAppPods(nodes []placement.NodeStat, cfg Config) spreadCounts {
+// countAppPodsPerZone counts the app's pods per zone;
+// nodes with unknown appPods or no zone label are skipped for zones.
+func countAppPodsPerZone(nodes []placement.NodeStat, cfg Config) spreadCounts {
 	counts := spreadCounts{
 		zoneCounts: make(map[string]int),
 	}
@@ -166,13 +178,10 @@ func spreadScore(node placement.NodeStat, util map[string]float64, counts spread
 
 // Score rates every candidate node 0–100 for the request's strategy; the reason names the best node.
 func Score(req placement.DecisionRequest, cfg Config) ([]placement.NodeScore, string) {
-	strategy := string(orchestrationv1alpha1.PlacementStrategyBalanced)
-	if req.AOProfile != nil && req.AOProfile.Strategy != "" {
-		strategy = req.AOProfile.Strategy
-	}
-	pod := podRequests(req.Pod)
-	resources := scoredResources(req.AOProfile)
-	counts := countAppPods(req.NodeStats, cfg)
+	strategy := Strategy(req.AOProfile)
+	pod := PodRequests(req.Pod)
+	resources := ScoredResources(req.AOProfile)
+	counts := countAppPodsPerZone(req.NodeStats, cfg)
 
 	nodeScores := make([]placement.NodeScore, 0, len(req.NodeStats))
 	var bestNodeScore float64
@@ -182,7 +191,7 @@ func Score(req placement.DecisionRequest, cfg Config) ([]placement.NodeScore, st
 			continue // not a target; rebalance requests list it only so the decider sees every pod's node
 		}
 		var score float64
-		util, ok := utilAfter(nodeStat, pod, resources)
+		util, ok := RequestedUtilization(nodeStat, pod, resources)
 		if !ok {
 			score = cfg.UnknownScore
 		} else {

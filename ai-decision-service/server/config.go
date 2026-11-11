@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/model"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/rebalance"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/scorer"
 )
@@ -27,6 +28,7 @@ type Config struct {
 	MaxBodyBytes    int64
 	ScorerConfig    scorer.Config
 	RebalanceConfig rebalance.Config
+	ModelConfig     model.Config
 	LogLevel        slog.Level
 }
 
@@ -39,6 +41,7 @@ func DefaultConfig() Config {
 		MaxBodyBytes:    DefaultMaxBodyBytes,
 		ScorerConfig:    scorer.DefaultConfig(),
 		RebalanceConfig: rebalance.DefaultConfig(),
+		ModelConfig:     model.DefaultConfig(),
 		LogLevel:        DefaultLogLevel,
 	}
 }
