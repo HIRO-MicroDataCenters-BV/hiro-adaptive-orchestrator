@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
@@ -17,12 +18,12 @@ type PlacementDecider interface {
 const ProviderKev = "kev"
 
 // New returns the decider for cfg.Provider, or nil when the model is off.
-func New(cfg Config) (PlacementDecider, error) {
+func New(cfg Config, log *slog.Logger) (PlacementDecider, error) {
 	switch cfg.Provider {
 	case "":
 		return nil, nil // model off, the scorer answers
 	case ProviderKev:
-		return NewKevDecider(cfg), nil
+		return NewKevDecider(cfg, log), nil
 	default:
 		return nil, fmt.Errorf("unknown model provider %q", cfg.Provider)
 	}

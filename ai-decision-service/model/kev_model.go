@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/scorer"
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
@@ -52,13 +54,14 @@ type kevAnswer struct {
 type KevDecider struct {
 	cfg        Config
 	httpClient *http.Client
+	log        *slog.Logger
 }
 
 var _ PlacementDecider = (*KevDecider)(nil) // the build fails if KevDecider stops matching the interface
 
 // NewKevDecider returns a KevDecider whose calls stop after cfg.Timeout.
-func NewKevDecider(cfg Config) *KevDecider {
-	return &KevDecider{cfg: cfg, httpClient: &http.Client{Timeout: cfg.Timeout}}
+func NewKevDecider(cfg Config, log *slog.Logger) *KevDecider {
+	return &KevDecider{cfg: cfg, httpClient: &http.Client{Timeout: cfg.Timeout}, log: log}
 }
 
 // DecidePlacement asks Kev where to place a pod based on the current node statistics and AO profile.
@@ -69,6 +72,8 @@ func (kd *KevDecider) DecidePlacement(ctx context.Context,
 		return placement.DecisionResponse{},
 			fmt.Errorf("(requestId=%s) no candidate nodes to ask Kev about", req.RequestID)
 	}
+	kd.log.Debug("Sent request to Kev", "requestId", req.RequestID,
+		"state", kevReq.State, "criteria", kevReq.Questions[kevQuestionID].Criteria)
 
 	body, err := json.Marshal(kevReq)
 	if err != nil {
@@ -83,6 +88,7 @@ func (kd *KevDecider) DecidePlacement(ctx context.Context,
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	start := time.Now()
 	resp, err := kd.httpClient.Do(httpReq)
 	if err != nil {
 		return placement.DecisionResponse{},
@@ -112,6 +118,9 @@ func (kd *KevDecider) DecidePlacement(ctx context.Context,
 			fmt.Errorf("(requestId=%s) Kev response missing answer for question ID %s",
 				req.RequestID, kevQuestionID)
 	}
+	kd.log.Debug("Received answer from Kev", "requestId", req.RequestID,
+		"choice", answer.Choice, "confidence", answer.Confidence, "probabilities", answer.Probabilities,
+		"latencyMilliSec", float64(time.Since(start).Microseconds())/1000)
 
 	nodeScores := make([]placement.NodeScore, 0, len(req.NodeStats))
 	for _, nodeStat := range req.NodeStats {

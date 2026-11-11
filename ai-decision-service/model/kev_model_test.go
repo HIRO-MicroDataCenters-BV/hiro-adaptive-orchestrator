@@ -173,7 +173,7 @@ func kevTestDecider(baseURL string, timeout time.Duration) *KevDecider {
 		Path:      kevTestPath,
 		ModelName: kevTestModel,
 		Timeout:   timeout,
-	})
+	}, discardLog)
 }
 
 // kevTestRequest builds a Spread request for a small pod over nodes.

@@ -21,7 +21,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	placementDecider, err := model.New(cfg.ModelConfig)
+	placementDecider, err := model.New(cfg.ModelConfig, log)
 	if err != nil {
 		log.Error("Failed to create placement decider", slog.Any("error", err))
 		os.Exit(1)
