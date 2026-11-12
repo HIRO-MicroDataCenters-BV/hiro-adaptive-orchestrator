@@ -23,7 +23,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -75,13 +74,13 @@ func TestBuildNodeStats_DescribesNodeAndUsage(t *testing.T) {
 	donePod := withRequests(testAppPod("app-a-done", "node-a", corev1.PodSucceeded), "uid-3", "1", "1Gi")
 
 	b := newTestBuilder(t, testAppDeployment(), nodeA, nodeB, appPod, otherPod, donePod)
-	stats := b.buildNodeStats(context.Background(), []*corev1.Node{nodeA, nodeB}, testAppRef(), nil)
+	stats := b.buildNodeStats(context.Background(), []*corev1.Node{nodeA, nodeB}, testAppRef(), nil, true)
 	if len(stats) != 2 {
 		t.Fatalf("len(stats) = %d, want 2", len(stats))
 	}
 
 	a := stats[0]
-	if a.Name != "node-a" || a.Labels["topology.kubernetes.io/zone"] != "zone-1" {
+	if a.Name != "node-a" || !a.Candidate || a.Labels["topology.kubernetes.io/zone"] != "zone-1" {
 		t.Errorf("node-a name/labels = %q %v", a.Name, a.Labels)
 	}
 	if a.Conditions["Ready"] != "True" || a.Platform.Arch != "arm64" || a.Platform.Kubelet != "v1.35.0" {
@@ -110,6 +109,29 @@ func TestBuildNodeStats_DescribesNodeAndUsage(t *testing.T) {
 	}
 }
 
+func TestNonCandidateNodeStats_AddsTheAppsOtherNodes(t *testing.T) {
+	ready := sizedNode("node-a", nil)
+	down := testNode("node-down", false)
+	pods := []corev1.Pod{
+		*testAppPod("app-1", "node-a", corev1.PodRunning),
+		*testAppPod("app-2", "node-down", corev1.PodRunning),
+		*testAppPod("app-3", "node-gone", corev1.PodRunning),
+		*testAppPod("app-4", "", corev1.PodPending),
+	}
+	b := newTestBuilder(t, testAppDeployment(), ready, down)
+
+	stats := b.nonCandidateNodeStats(context.Background(), pods, []*corev1.Node{ready}, testAppRef())
+	if len(stats) != 2 {
+		t.Fatalf("stats = %+v, want node-down and node-gone only", stats)
+	}
+	if d := stats[0]; d.Name != "node-down" || d.Candidate || d.Conditions["Ready"] != "False" {
+		t.Errorf("node-down = %+v, want candidate=false with Ready=False", d)
+	}
+	if g := stats[1]; g.Name != "node-gone" || g.Candidate || g.Conditions != nil {
+		t.Errorf("node-gone = %+v, want a name-only entry", g)
+	}
+}
+
 // failNodeListClient fails per-node pod lists, as an unsynced or missing index would.
 type failNodeListClient struct{ client.Client }
 
@@ -127,7 +149,7 @@ func TestBuildNodeStats_KeepsNodeWhenUsageUnknown(t *testing.T) {
 	b := newTestBuilder(t, testAppDeployment(), node)
 	b.client = failNodeListClient{b.client}
 
-	stats := b.buildNodeStats(context.Background(), []*corev1.Node{node}, testAppRef(), nil)
+	stats := b.buildNodeStats(context.Background(), []*corev1.Node{node}, testAppRef(), nil, true)
 	if len(stats) != 1 {
 		t.Fatalf("len(stats) = %d, want the node kept", len(stats))
 	}
@@ -146,7 +168,7 @@ func TestBuildNodeStats_ImagesPresentForPlacedPod(t *testing.T) {
 	pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: "cache", Image: "redis:7"})
 
 	b := newTestBuilder(t, testAppDeployment(), node)
-	stats := b.buildNodeStats(context.Background(), []*corev1.Node{node}, testAppRef(), pod)
+	stats := b.buildNodeStats(context.Background(), []*corev1.Node{node}, testAppRef(), pod, true)
 	if got := stats[0].ImagesPresent; len(got) != 1 || got[0] != "nginx" {
 		t.Errorf("imagesPresent = %v, want [nginx] (redis:7 not pulled)", got)
 	}
@@ -183,29 +205,5 @@ func TestPodRequests_InitContainerAndOverhead(t *testing.T) {
 	}
 	if mem := got.Memory().Value(); mem != 64*1024*1024 {
 		t.Errorf("memory = %d, want 64Mi", mem)
-	}
-}
-
-func TestMapEAOToProfileContext_SlotFreshnessAndWholeWatts(t *testing.T) {
-	eao := testRebalanceEAO("Optional", 200, "Scheduled", "waiting for solar", false)
-	_ = unstructured.SetNestedMap(eao.Object, map[string]any{
-		"slotStart": "2026-10-16T12:00:00Z", "slotEnd": "2026-10-16T18:00:00Z",
-	}, "status", "decision", "scheduledSlot")
-	_ = unstructured.SetNestedField(eao.Object, "2026-10-16T11:58:00Z", "status", "lastUpdated")
-	_ = unstructured.SetNestedField(eao.Object, int64(200), "status", "energyMetrics", "requiredWatts")
-	_ = unstructured.SetNestedField(eao.Object, 187.5, "status", "energyMetrics", "measuredWatts")
-
-	got := mapEAOToProfileContext(eao)
-
-	if got.Decision == nil || got.Decision.ScheduledSlot == nil ||
-		got.Decision.ScheduledSlot.SlotStart != "2026-10-16T12:00:00Z" ||
-		got.Decision.ScheduledSlot.SlotEnd != "2026-10-16T18:00:00Z" {
-		t.Errorf("decision = %+v, want scheduledSlot 12:00–18:00", got.Decision)
-	}
-	if got.LastUpdated != "2026-10-16T11:58:00Z" {
-		t.Errorf("lastUpdated = %q", got.LastUpdated)
-	}
-	if got.EnergyMetrics == nil || got.EnergyMetrics.RequiredWatts != 200 || got.EnergyMetrics.MeasuredWatts != 187.5 {
-		t.Errorf("energyMetrics = %+v, want requiredWatts 200 (whole number) and measuredWatts 187.5", got.EnergyMetrics)
 	}
 }

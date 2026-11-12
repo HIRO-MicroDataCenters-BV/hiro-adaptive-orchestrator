@@ -19,9 +19,11 @@ package rebalance
 import (
 	"context"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -40,12 +42,12 @@ func newRetryTestClient(t *testing.T, objs ...client.Object) client.Client {
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 }
 
-func TestRetryPendingSchedule_DeletesUnscheduledPendingPod(t *testing.T) {
-	pending := testPod("app-a-pending", "", corev1.PodPending)
+func TestRetryPendingSchedule_DeletesPodHeldByGate(t *testing.T) {
+	pending := energyHeldPod("app-a-pending")
 	c := newRetryTestClient(t, testDeployment(), pending)
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
 
-	if err := retryPendingSchedule(context.Background(), c, profile); err != nil {
+	if err := retryPendingSchedule(context.Background(), c, profile, DefaultMinPendingPodAge); err != nil {
 		t.Fatalf("retryPendingSchedule: %v", err)
 	}
 
@@ -63,7 +65,7 @@ func TestRetryPendingSchedule_LeavesScheduledPendingPodAlone(t *testing.T) {
 	c := newRetryTestClient(t, testDeployment(), scheduledPending)
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
 
-	err := retryPendingSchedule(context.Background(), c, profile)
+	err := retryPendingSchedule(context.Background(), c, profile, DefaultMinPendingPodAge)
 	if err == nil {
 		t.Fatal("expected an error (no unscheduled pending pod found), got nil")
 	}
@@ -79,7 +81,7 @@ func TestRetryPendingSchedule_LeavesRunningPodAlone(t *testing.T) {
 	c := newRetryTestClient(t, testDeployment(), running)
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
 
-	err := retryPendingSchedule(context.Background(), c, profile)
+	err := retryPendingSchedule(context.Background(), c, profile, DefaultMinPendingPodAge)
 	if err == nil {
 		t.Fatal("expected an error (no pending pod found), got nil")
 	}
@@ -94,24 +96,33 @@ func TestRetryPendingSchedule_NoPendingPodReturnsError(t *testing.T) {
 	c := newRetryTestClient(t, testDeployment())
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
 
-	if err := retryPendingSchedule(context.Background(), c, profile); err == nil {
+	if err := retryPendingSchedule(context.Background(), c, profile, DefaultMinPendingPodAge); err == nil {
 		t.Fatal("expected an error when there's nothing to retry, got nil")
 	}
 }
 
 func TestRetryPendingSchedule_DeletesOnlyMatchingCandidates(t *testing.T) {
-	pending := testPod("app-a-pending", "", corev1.PodPending)
+	pending := energyHeldPod("app-a-pending")
 	running := testPod("app-a-running", "node-a", corev1.PodRunning)
 	scheduledPending := testPod("app-a-scheduled-pending", "node-b", corev1.PodPending)
-	c := newRetryTestClient(t, testDeployment(), pending, running, scheduledPending)
+	stuck := unschedulablePod("app-a-stuck", "0/3 nodes are available: 3 Insufficient cpu.")
+	fresh := energyHeldPod("app-a-fresh")
+	fresh.CreationTimestamp = metav1.NewTime(time.Now())
+	c := newRetryTestClient(t, testDeployment(), pending, running, scheduledPending, stuck, fresh)
 	profile := testProfileWithConditions(TriggerEnergyThreshold)
 
-	if err := retryPendingSchedule(context.Background(), c, profile); err != nil {
+	if err := retryPendingSchedule(context.Background(), c, profile, DefaultMinPendingPodAge); err != nil {
 		t.Fatalf("retryPendingSchedule: %v", err)
 	}
 
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "app-a-pending", Namespace: "default"}, &corev1.Pod{}); err == nil {
-		t.Error("expected the unscheduled pending pod to be deleted")
+		t.Error("expected the pod the gate held to be deleted")
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "app-a-stuck", Namespace: "default"}, &corev1.Pod{}); err != nil {
+		t.Errorf("a pod stuck on resources should remain untouched: %v", err)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "app-a-fresh", Namespace: "default"}, &corev1.Pod{}); err != nil {
+		t.Errorf("a pod younger than the minimum age should remain untouched: %v", err)
 	}
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "app-a-running", Namespace: "default"}, &corev1.Pod{}); err != nil {
 		t.Errorf("running pod should remain untouched: %v", err)

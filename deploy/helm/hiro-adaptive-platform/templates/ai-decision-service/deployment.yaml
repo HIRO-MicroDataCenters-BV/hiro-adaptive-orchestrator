@@ -1,0 +1,48 @@
+{{- if .Values.aiDecisionService.enable }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.aiDecisionService.serviceName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Values.aiDecisionService.serviceName }}
+    app.kubernetes.io/name: ai-decision-service
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Values.aiDecisionService.serviceName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.aiDecisionService.serviceName }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: ai-decision-service
+          image: "{{ .Values.aiDecisionService.image.repository }}:{{ .Values.aiDecisionService.image.tag }}"
+          imagePullPolicy: {{ .Values.aiDecisionService.image.pullPolicy }}
+          env:
+            - name: AI_DECISION_SERVICE_PORT
+              value: {{ .Values.aiDecisionService.port | quote }}
+            {{- range $k, $v := .Values.aiDecisionService.config }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.aiDecisionService.port }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            {{- toYaml .Values.aiDecisionService.resources | nindent 12 }}
+{{- end }}

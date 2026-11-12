@@ -371,6 +371,39 @@ func TestStateWriter_History_OtherReasonNeverMerges(t *testing.T) {
 	}
 }
 
+func TestStateWriter_History_DifferentDecidersDoNotMerge(t *testing.T) {
+	writer, _ := newTestWriter(t, testProfile("profile-l"))
+	writer.history = HistoryConfig{MessageMax: 5}.WithDefaults()
+	key := types.NamespacedName{Name: "profile-l"}
+
+	for _, by := range []string{"mock", "rules", "rules-but-too-long"} {
+		endCycle(t, writer, key, "nothing to do", TransitionOptions{Outcome: OutcomeNoOp, Reason: ReasonNoChange, DecidedBy: by})
+	}
+	h := historyOf(t, writer, key)
+	if len(h) != 3 || h[2].DecidedBy != "mock" || h[1].DecidedBy != "rules" {
+		t.Fatalf("history = %+v, want one entry per decider, oldest from mock", h)
+	}
+	if got := []rune(h[0].DecidedBy); len(got) != 5 {
+		t.Errorf("decidedBy = %q, want it truncated to 5 characters", h[0].DecidedBy)
+	}
+}
+
+// A run is one entry for as long as it repeats, like a Kubernetes Event series.
+func TestRecordHistory_RunOlderThanWindowKeepsMerging(t *testing.T) {
+	cfg := HistoryConfig{Window: time.Hour}.WithDefaults()
+	now := time.Now()
+	run := orchestrationv1alpha1.HistoryEntry{
+		Outcome: OutcomeNoOp, Reason: string(ReasonNoChange), Count: 120,
+		FirstAt: metav1.NewTime(now.Add(-3 * time.Hour)), At: metav1.NewTime(now.Add(-time.Minute)),
+	}
+	next := orchestrationv1alpha1.HistoryEntry{Outcome: OutcomeNoOp, Reason: string(ReasonNoChange), At: metav1.NewTime(now)}
+
+	h := recordHistory([]orchestrationv1alpha1.HistoryEntry{run}, next, cfg, now)
+	if len(h) != 1 || h[0].Count != 121 || !h[0].FirstAt.Equal(&run.FirstAt) {
+		t.Errorf("history = %+v, want the run to keep merging with its firstAt", h)
+	}
+}
+
 func TestStateWriter_History_CappedAndTruncated(t *testing.T) {
 	profile := testProfile("profile-g")
 	writer, _ := newTestWriter(t, profile)

@@ -65,7 +65,7 @@ type PlacementSpec struct {
 }
 
 // TriggerCondition enumerates the supported rebalancing trigger conditions.
-// +kubebuilder:validation:Enum=CPUThreshold;MemoryThreshold;EnergyThreshold;NodeFailure;Scheduled
+// +kubebuilder:validation:Enum=CPUThreshold;MemoryThreshold;EnergyThreshold;NodeFailure;PeriodicReview
 type TriggerCondition string
 
 const (
@@ -73,7 +73,7 @@ const (
 	TriggerConditionMemoryThreshold TriggerCondition = "MemoryThreshold"
 	TriggerConditionEnergyThreshold TriggerCondition = "EnergyThreshold"
 	TriggerConditionNodeFailure     TriggerCondition = "NodeFailure"
-	TriggerConditionScheduled       TriggerCondition = "Scheduled"
+	TriggerConditionPeriodicReview  TriggerCondition = "PeriodicReview"
 )
 
 // Rebalancing Spec
@@ -191,6 +191,10 @@ type RebalancingStatus struct {
 	// +optional
 	Action RebalanceAction `json:"action,omitempty"`
 
+	// trigger is the trigger condition that started the current cycle.
+	// +optional
+	Trigger TriggerCondition `json:"trigger,omitempty"`
+
 	// details carries free-form, state-specific context for the current cycle
 	// (e.g. target node, improvement score, dry-run marker).
 	// +optional
@@ -238,12 +242,20 @@ type HistoryEntry struct {
 	Action  RebalanceAction  `json:"action"`
 	Outcome RebalanceOutcome `json:"outcome"`
 
+	// trigger is the condition that started the cycle, so each trigger can read its own tries.
+	// +optional
+	Trigger TriggerCondition `json:"trigger,omitempty"`
+
 	// reason is a short CamelCase code for where the cycle ended; not an enum, so new codes need no CRD change.
 	Reason string `json:"reason"`
 
 	// message is the human-readable detail, truncated to a configured length.
 	// +optional
 	Message string `json:"message,omitempty"`
+
+	// decidedBy is who answered (e.g. mock, rules, model); empty when no agent was asked.
+	// +optional
+	DecidedBy string `json:"decidedBy,omitempty"`
 
 	// count is how many identical decisions in a row this entry stands for; unset means 1.
 	// +optional
@@ -333,6 +345,9 @@ const ConditionReady = "Ready"
 
 // ConditionRebalancingEscalated mirrors RebalancingStatus.Escalated.
 const ConditionRebalancingEscalated = "RebalancingEscalated"
+
+// ConditionUndeclaredAutoscaler is True while an autoscaler the profile doesn't declare targets the app; information only.
+const ConditionUndeclaredAutoscaler = "UndeclaredAutoscaler"
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

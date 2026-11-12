@@ -55,7 +55,7 @@ data:
 
     # Rebalance (Move / AdjustReplicas / AdjustResources / Escalate / NoOp)
     # knobs. All *_PROBABILITY knobs default to 0.0 — keep NoOp dominant by
-    # default, bump one of them (see demo/demo_rebalance.sh's
+    # default, bump one of them (see demo/demo_rebalance_with_mock_agent.sh's
     # bump_mock_agent / _scale / _resources / _escalate) when a test
     # specifically wants to force that action.
     # Overridable per run with `kubectl set env deployment/mock-decision-agent ...`.
@@ -135,12 +135,12 @@ data:
         def _rebalance_response(self, request_id, req):
             rebalance_context = req.get("rebalanceContext") or {}
             current_placements = rebalance_context.get("currentPlacements", [])
-            # nodeStats already excludes NotReady nodes and taints the app's pods
-            # don't tolerate; only cordoned nodes are left to skip here.
+            # Only candidate=true nodes may be picked; rebalance also lists the app's
+            # other nodes (e.g. NotReady) with candidate=false. Cordoned ones are skipped too.
             candidate_names = [
                 n.get("name")
                 for n in req.get("nodeStats") or []
-                if n.get("name") and not n.get("unschedulable")
+                if n.get("name") and n.get("candidate") and not n.get("unschedulable")
             ]
 
             # Escalate: checked first and unconditionally (no Improvement

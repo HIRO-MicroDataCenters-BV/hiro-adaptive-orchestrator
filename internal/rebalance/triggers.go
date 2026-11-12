@@ -20,18 +20,19 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
+	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
 
 // Trigger condition names, aliased from the canonical api/v1alpha1 enum.
@@ -40,7 +41,7 @@ const (
 	TriggerCPUThreshold    = orchestrationv1alpha1.TriggerConditionCPUThreshold
 	TriggerMemoryThreshold = orchestrationv1alpha1.TriggerConditionMemoryThreshold
 	TriggerNodeFailure     = orchestrationv1alpha1.TriggerConditionNodeFailure
-	TriggerScheduled       = orchestrationv1alpha1.TriggerConditionScheduled
+	TriggerPeriodicReview  = orchestrationv1alpha1.TriggerConditionPeriodicReview
 )
 
 // ActionRetryPendingSchedule is NOT a trigger condition — it never appears
@@ -92,6 +93,13 @@ type TriggerDetail struct {
 	Threshold *float64
 }
 
+// nodeFailure is a node hosting one of the app's pods that isn't Ready, and since when.
+type nodeFailure struct {
+	node  string
+	pod   string
+	since time.Time
+}
+
 // TriggerEvaluator evaluates an OrchestrationProfile's declared rebalancing
 // trigger conditions against current cluster state.
 //
@@ -100,14 +108,17 @@ type TriggerDetail struct {
 // Evaluate the same way — the watches only decide *when* to check, this
 // decides *what* currently holds.
 type TriggerEvaluator struct {
-	client   client.Client
-	eaoGVK   schema.GroupVersionKind
-	pressure *NodePressureEvaluator
+	client           client.Client
+	eaoSettings      placementserver.EAOSettings
+	pressure         *NodePressureEvaluator
+	minPendingPodAge time.Duration
 }
 
 // NewTriggerEvaluator creates a TriggerEvaluator.
-func NewTriggerEvaluator(c client.Client, eaoGVK schema.GroupVersionKind, pressure *NodePressureEvaluator) *TriggerEvaluator {
-	return &TriggerEvaluator{client: c, eaoGVK: eaoGVK, pressure: pressure}
+func NewTriggerEvaluator(
+	c client.Client, eaoSettings placementserver.EAOSettings, pressure *NodePressureEvaluator, minPendingPodAge time.Duration,
+) *TriggerEvaluator {
+	return &TriggerEvaluator{client: c, eaoSettings: eaoSettings, pressure: pressure, minPendingPodAge: minPendingPodAge}
 }
 
 // Evaluate checks every trigger condition declared on the profile, in
@@ -139,9 +150,9 @@ func (e *TriggerEvaluator) Evaluate(
 		case TriggerMemoryThreshold:
 			ok, r, detail = e.evaluateNodeResource(ctx, pods, cond, e.pressure.readMemory)
 		case TriggerNodeFailure:
-			ok, r, detail = e.evaluateNodeFailure(ctx, pods, cond)
-		case TriggerScheduled:
-			ok, r = true, "scheduled rebalance window reached"
+			ok, r, detail = e.evaluateNodeFailure(ctx, pods)
+		case TriggerPeriodicReview:
+			ok, r = true, "periodic review due"
 		default:
 			continue // unrecognized condition — spec validation should have already caught this
 		}
@@ -193,15 +204,11 @@ func (e *TriggerEvaluator) evaluateNodeResource(
 	return false, "", TriggerDetail{}
 }
 
-// evaluateNodeFailure reports whether any node hosting one of the
-// profile's pods currently reports NotReady.
-func (e *TriggerEvaluator) evaluateNodeFailure(
-	ctx context.Context,
-	pods []corev1.Pod,
-	cond orchestrationv1alpha1.TriggerCondition,
-) (bool, string, TriggerDetail) {
+// failedNodes lists the nodes hosting the app's pods that report NotReady, in pod order.
+func (e *TriggerEvaluator) failedNodes(ctx context.Context, pods []corev1.Pod) []nodeFailure {
 	logger := logf.FromContext(ctx)
 
+	var failed []nodeFailure
 	seen := map[string]bool{}
 	for _, pod := range pods {
 		nodeName := pod.Spec.NodeName
@@ -212,40 +219,46 @@ func (e *TriggerEvaluator) evaluateNodeFailure(
 
 		node := &corev1.Node{}
 		if err := e.client.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
-			metrics.RebalanceTriggerErrorsTotal.WithLabelValues(string(cond)).Inc()
+			metrics.RebalanceTriggerErrorsTotal.WithLabelValues(string(TriggerNodeFailure)).Inc()
 			logger.V(1).Info("rebalance: could not fetch node for NodeFailure check, skipping",
 				"node", nodeName, "err", err)
 			continue
 		}
 		for _, cond := range node.Status.Conditions {
 			if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
-				return true, fmt.Sprintf("node %s is not Ready (pod %s)", nodeName, pod.Name),
-					TriggerDetail{Node: nodeName}
+				failed = append(failed, nodeFailure{node: nodeName, pod: pod.Name, since: cond.LastTransitionTime.Time})
 			}
 		}
 	}
-	return false, "", TriggerDetail{}
+	return failed
+}
+
+// evaluateNodeFailure reports whether any node hosting one of the
+// profile's pods currently reports NotReady.
+func (e *TriggerEvaluator) evaluateNodeFailure(ctx context.Context, pods []corev1.Pod) (bool, string, TriggerDetail) {
+	failed := e.failedNodes(ctx, pods)
+	if len(failed) == 0 {
+		return false, "", TriggerDetail{}
+	}
+	f := failed[0]
+	return true, fmt.Sprintf("node %s is not Ready (pod %s)", f.node, f.pod), TriggerDetail{Node: f.node}
 }
 
 // evaluateEnergyThreshold finds the EnergyAwareOrchestration resource
 // governing the profile's application (matched directly by ApplicationRef,
 // no pod resolution needed — unlike internal/placement-server's
-// pod-triggered EAO lookup) and checks three cases, in order:
+// pod-triggered EAO lookup) and acts on its verdict, the same one the energy gate uses:
 //
-//  1. Energy currently reported insufficient — a problem signal.
-//  2. Decision explicitly Delayed/Waiting — also a problem signal.
-//  3. The opposite signal: the decision now says DeployImmediately/Scheduled
-//     (i.e. the EAO's own re-evaluation window has arrived and it already
-//     refreshed its status to reflect that) AND a pod for this app is still
-//     sitting Pending — meaning it was likely blocked by the energy gate
-//     earlier and is worth retrying now. We deliberately don't parse
-//     nextEvaluationTime ourselves; by the time we look, the EAO's own
-//     status already reflects the new window.
+//  1. Hold (no energy until the slot) — a problem signal for the decider.
+//  2. RunNow (DeployImmediately, or a hold whose slot has started) AND the
+//     energy gate held a pod for this app that's still unscheduled — worth
+//     retrying now (see heldByEnergyGate).
+//  3. Unknown (no decision, an EAO failure such as Waiting, an unmapped
+//     action) — not an energy signal; the gate lets pods through.
 //
 // Returns (matched, reason, bypassAction). bypassAction is
-// ActionRetryPendingSchedule for case 3 (no AI consultation needed) and
-// empty for cases 1/2 (genuine problem signals — the normal Evaluating flow,
-// once built, decides what to do about them).
+// ActionRetryPendingSchedule for case 2 (no AI consultation needed) and
+// empty for case 1 (the normal Evaluating flow decides what to do about it).
 func (e *TriggerEvaluator) evaluateEnergyThreshold(
 	ctx context.Context,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
@@ -253,7 +266,13 @@ func (e *TriggerEvaluator) evaluateEnergyThreshold(
 ) (bool, string, string) {
 	logger := logf.FromContext(ctx)
 
-	eao, err := utils.FindEAOForApp(ctx, e.client, e.eaoGVK, profile.Spec.ApplicationRef)
+	// Same first check as CheckEnergyGate: with awareness off the gate holds nothing and the decider gets no EAO data.
+	if !profile.Spec.Placement.Awareness.Energy {
+		logger.V(1).Info("rebalance: energy awareness off, skipping EnergyThreshold check")
+		return false, "", ""
+	}
+
+	eao, err := utils.FindEAOForApp(ctx, e.client, e.eaoSettings.GVK, profile.Spec.ApplicationRef)
 	if err != nil {
 		// EnergyAwareOrchestration is an optional component — soft-fail like
 		// internal/placement-server's DecisionContextBuilder.fetchEAOProfile.
@@ -265,61 +284,31 @@ func (e *TriggerEvaluator) evaluateEnergyThreshold(
 		return false, "", ""
 	}
 
-	if sufficient, found, _ := unstructured.NestedBool(eao.Object, "status", "energyMetrics", "sufficient"); found && !sufficient {
-		reason, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "reason")
-		if reason == "" {
-			reason = "energy supply reported insufficient"
-		}
-		return true, reason, ""
+	eaoCtx := placementserver.NewEAOContext(eao, e.eaoSettings.VerdictConfig, time.Now())
+	switch eaoCtx.Verdict {
+	case placement.EAOVerdictHold:
+		return true, placementserver.HoldReason(eaoCtx), ""
+	case placement.EAOVerdictUnknown:
+		logger.V(1).Info("rebalance: EAO verdict unknown, skipping EnergyThreshold check", "eao", eao.GetName())
+		return false, "", ""
 	}
 
-	action, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "action")
-
-	if action == "Delayed" || action == "Waiting" {
-		reason, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "reason")
-		if reason == "" {
-			reason = fmt.Sprintf("energy decision action=%s", action)
+	// RunNow; retry only now, so a pod held before the slot isn't retried early.
+	for i := range pods {
+		if heldByEnergyGate(&pods[i], e.minPendingPodAge) {
+			return true, "energy window reached — retrying a pod the energy gate held", ActionRetryPendingSchedule
 		}
-		return true, reason, ""
-	}
-
-	if (action == "DeployImmediately" || action == "Scheduled") && hasPendingPod(pods) {
-		return true, "energy window reached — retrying previously deferred pod", ActionRetryPendingSchedule
 	}
 
 	return false, "", ""
 }
 
-// MinPendingPodAge is how long a pod must have been Pending before
-// hasPendingPod considers it retry-eligible. Reconcile no longer gates the
-// RetryPendingSchedule bypass on cooldown (see reconciler.go), so without
-// this floor a retry's own deletion produces a brand-new replacement that is
-// itself briefly Pending — and since every StateWriter transition is a
-// status write the primary watch reacts to, that immediately re-queues
-// another Reconcile which would see "still Pending" and retry again before
-// the replacement ever got a real chance to schedule, live-locking in a
-// tight loop with no backstop at all. This floor gives normal scheduling a
-// fair window first; a pod genuinely stuck behind the energy gate stays
-// Pending well past it regardless, so real retries are barely delayed.
-const MinPendingPodAge = 10 * time.Second
+// DefaultMinPendingPodAge backstops a tight delete/recreate loop: the retry isn't cooldown-gated.
+const DefaultMinPendingPodAge = 10 * time.Second
 
-// hasPendingPod reports whether any pod in the list is Pending, unscheduled
-// (NodeName == ""), and has been so for at least MinPendingPodAge. Must
-// match retryPendingSchedule's own selection criteria (retry_enactor.go)
-// exactly: a pod that's already scheduled but simply hasn't started its
-// container yet is still Phase: Pending for a few seconds — normal startup
-// latency, nothing to do with the energy gate. Without the NodeName check,
-// hasPendingPod would keep matching that pod on every reconcile while
-// retryPendingSchedule (correctly) finds nothing to act on, and since the
-// bypass path isn't cooldown-gated, that mismatch alone is enough to drive
-// a tight, unproductive Triggered->...->Watching loop until the pod
-// naturally leaves Pending.
-func hasPendingPod(pods []corev1.Pod) bool {
-	for _, pod := range pods {
-		if pod.Status.Phase == corev1.PodPending && pod.Spec.NodeName == "" &&
-			time.Since(pod.CreationTimestamp.Time) >= MinPendingPodAge {
-			return true
-		}
-	}
-	return false
+// heldByEnergyGate reports whether the energy gate last turned this unscheduled pod away; other stuck pods are left alone.
+func heldByEnergyGate(pod *corev1.Pod, minPendingPodAge time.Duration) bool {
+	return pod.Status.Phase == corev1.PodPending && pod.Spec.NodeName == "" &&
+		time.Since(pod.CreationTimestamp.Time) >= minPendingPodAge &&
+		strings.Contains(utils.SchedulingFailureMessage(pod), placement.EnergyGateReasonPrefix)
 }

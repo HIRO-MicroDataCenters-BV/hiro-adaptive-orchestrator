@@ -130,6 +130,18 @@ func parseQuantityEnv(name string) resource.Quantity {
 	return q
 }
 
+// parseListEnv returns nil (letting the caller apply its own default) when name is
+// unset, or its comma-separated items, trimmed, with empty ones dropped.
+func parseListEnv(name string) []string {
+	var items []string
+	for item := range strings.SplitSeq(os.Getenv(name), ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
@@ -398,10 +410,25 @@ func main() {
 		"schedulerName", hiroSchedulerName,
 	)
 
+	// How to find an app's EAO, and which decision.action values mean run now and which mean hold.
+	eaoSettings := placementserver.NewEAOSettings(eaoGVK)
+	if v := parseListEnv("EAO_RUN_NOW_ACTIONS"); v != nil {
+		eaoSettings.VerdictConfig.RunNowActions = v
+	}
+	if v := parseListEnv("EAO_HOLD_ACTIONS"); v != nil {
+		eaoSettings.VerdictConfig.HoldActions = v
+	}
+	if err := eaoSettings.VerdictConfig.Validate(); err != nil {
+		setupLog.Error(err, "invalid EAO action mapping")
+		os.Exit(1)
+	}
+	setupLog.Info("EAO action mapping configured",
+		"runNow", eaoSettings.VerdictConfig.RunNowActions, "hold", eaoSettings.VerdictConfig.HoldActions)
+
 	contextBuilder := placementserver.NewDecisionContextBuilder(
 		mgr.GetClient(),
 		controller.ProfileByAppRefIndex,
-		eaoGVK,
+		eaoSettings,
 	)
 
 	// Register the pod scheduler MutatingAdmissionWebhook.
@@ -456,6 +483,7 @@ func main() {
 	//   REBALANCE_MIN_MEMORY               — AdjustResources guardrail lower bound, e.g. "64Mi"
 	//   REBALANCE_MAX_MEMORY               — AdjustResources guardrail upper bound, e.g. "2Gi"
 	//   REBALANCE_WATCHDOG_STALE_THRESHOLD — max time stuck mid-cycle before force-recovery, e.g. "15m"
+	//   REBALANCE_MIN_PENDING_POD_AGE      — how long a pod must exist before an energy retry, e.g. "10s"
 	// -------------------------------------------------------------------------
 	// Unset/0 fields fall back to the rebalance.DefaultHistory* values.
 	rebalanceHistory := rebalance.HistoryConfig{
@@ -527,6 +555,10 @@ func main() {
 	if rebalanceWatchdogStaleThreshold <= 0 {
 		rebalanceWatchdogStaleThreshold = rebalance.DefaultWatchdogStaleThreshold
 	}
+	rebalanceMinPendingPodAge := parseDurationEnv("REBALANCE_MIN_PENDING_POD_AGE")
+	if rebalanceMinPendingPodAge <= 0 {
+		rebalanceMinPendingPodAge = rebalance.DefaultMinPendingPodAge
+	}
 	// Resolved above (not left at the parseXEnv zero-sentinel) so this log
 	// line — and everything downstream — reflects what's actually in
 	// effect, not "0" for anything the deployer left unset.
@@ -550,6 +582,7 @@ func main() {
 		"minMemory", rebalanceMinMemory.String(),
 		"maxMemory", rebalanceMaxMemory.String(),
 		"watchdogStaleThreshold", rebalanceWatchdogStaleThreshold,
+		"minPendingPodAge", rebalanceMinPendingPodAge,
 	)
 
 	// decisionStore is shared between the PlacementServer (reads it in
@@ -579,7 +612,9 @@ func main() {
 		os.Exit(1)
 	}
 	pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, rebalanceNodePressureThreshold)
-	triggerEvaluator := rebalance.NewTriggerEvaluator(mgr.GetClient(), eaoGVK, pressureEvaluator)
+	triggerEvaluator := rebalance.NewTriggerEvaluator(
+		mgr.GetClient(), eaoSettings, pressureEvaluator, rebalanceMinPendingPodAge,
+	)
 
 	rebalanceDetector := rebalance.NewReconciler(
 		mgr.GetClient(),

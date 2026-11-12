@@ -35,7 +35,7 @@ graph TB
 Numbers above trace one full cycle (the `Move` case touches every numbered edge; `NoOp`/`Retry` stop after step 3):
 
 1. **Rebalance Engine ↔ Kubernetes API** — the engine watches Pods/Nodes/the `OrchestrationProfile` to detect a trigger, then reuses the same connection for every `StateWriter` transition it writes (`Watching → Triggered → …`) and, for an accepted `Move`, the pod eviction call itself.
-2. **Rebalance Engine → EnergyAwareOrchestration** *(optional)* — if the profile declares an `EnergyThreshold` trigger, the engine also reads the EAO CRD's current status while evaluating trigger conditions.
+2. **Rebalance Engine → EnergyAwareOrchestration** *(optional)* — if the profile declares an `EnergyThreshold` trigger and turns energy awareness on, the engine also reads the EAO CRD's current status while evaluating trigger conditions.
 3. **Rebalance Engine → External AI Agent** — once `Triggered`, the engine calls the AI during `Evaluating` for a decision (skipped entirely for the mechanical `RetryPendingSchedule` bypass — see [Bypassing the AI for mechanical actions](#bypassing-the-ai-for-mechanical-actions)).
 4. **kube-scheduler → PlacementServer** — only reached for an accepted `Move`: evicting the pod in step 1 makes its controller create a replacement, and kube-scheduler calls the PlacementServer's `PreScore` extension point for it, same as any newly-created pod.
 5. **PlacementServer → External AI Agent** — the PlacementServer normally re-consults the same AI Agent to score the replacement — unless the `Move`'s `DecisionStore` entry (written in step 1, just before eviction) is still live, in which case that hit short-circuits this call and scores the target node directly instead.
@@ -139,6 +139,7 @@ graph LR
 | [`triggers.go`](triggers.go) | `TriggerEvaluator` — checks the five CRD-declared trigger conditions. |
 | [`pressure.go`](pressure.go) | `NodePressureEvaluator` — CPU/Memory node pressure via metrics-server. Used by `TriggerEvaluator`. |
 | [`retry_enactor.go`](retry_enactor.go) | `retryPendingSchedule` — the mechanical enactor for `ActionRetryPendingSchedule` (see [Bypassing the AI for mechanical actions](#bypassing-the-ai-for-mechanical-actions)). |
+| [`autoscaler_check.go`](autoscaler_check.go) | Sets the info-only `UndeclaredAutoscaler` status condition. |
 | [`dispatch.go`](dispatch.go) | `dispatchDecision` and the `actionDispatchers` registry — carries a successful AI response to a terminal transition (see [Dispatch](#dispatch--acting-on-the-ais-decision)). |
 | [`move_enactor.go`](move_enactor.go) | `moveEnactor` — evicts a pod and waits for its replacement, driving `Decided → Enacting → Watching` for an accepted `Move`. |
 | [`scale_enactor.go`](scale_enactor.go) | `scaleEnactor` — patches `Spec.Replicas` and waits for it to become ready, driving `Decided → Enacting → Watching` for an accepted `AdjustReplicas` (see [Replica bounds](#replica-bounds--adjustreplicas)). |
@@ -176,9 +177,9 @@ flowchart TD
 
 ### Why both paths exist
 
-- **CPUThreshold, MemoryThreshold, Scheduled** can *only* be caught by the periodic path —
-  there's no Kubernetes event for "resource usage drifted past a threshold" or "the
-  scheduled window arrived." `Reconcile` requeues itself every `DetectionInterval` (default
+- **CPUThreshold, MemoryThreshold, PeriodicReview** can *only* be caught by the periodic path —
+  there's no Kubernetes event for "resource usage drifted past a threshold" or "a
+  periodic review is due." `Reconcile` requeues itself every `DetectionInterval` (default
   30s) forever, for every rebalancing-enabled profile.
 - **EnergyThreshold, NodeFailure** are also checked on the periodic tick, but don't have to
   wait up to 30s — `Reconciler.SetupWithManager` wires watches on `Pod`, `Node`, and (if
@@ -203,10 +204,10 @@ checked, just only on the periodic tick instead of instantly.
 
 ```mermaid
 flowchart TD
-    Start(["Evaluate(profile)"]) --> C1{"EnergyThreshold<br/>declared?"}
-    C1 -- yes --> E1{"insufficient energy OR<br/>Delayed / Waiting?"}
+    Start(["Evaluate(profile)"]) --> C1{"EnergyThreshold declared<br/>and energy awareness on?"}
+    C1 -- yes --> E1{"EAO verdict Hold?<br/>(slot still ahead)"}
     E1 -- yes --> Match(["matched — needs AI<br/>(no bypass)"])
-    E1 -- no --> E2{"DeployImmediately / Scheduled<br/>AND a pod is Pending?"}
+    E1 -- no --> E2{"verdict RunNow<br/>AND the gate held a pod?"}
     E2 -- yes --> Bypass(["matched — BypassAction set<br/>(no AI needed)"])
     E2 -- no --> C2
     C1 -- no --> C2{"CPU/MemoryThreshold<br/>declared?"}
@@ -217,7 +218,7 @@ flowchart TD
     C3 -- yes --> N{"hosting node<br/>NotReady?"}
     N -- yes --> Match
     N -- no --> C4
-    C3 -- no --> C4{"Scheduled<br/>declared?"}
+    C3 -- no --> C4{"PeriodicReview<br/>declared?"}
     C4 -- yes --> Match
     C4 -- no --> None(["no match this cycle"])
 ```
@@ -225,14 +226,14 @@ flowchart TD
 `TriggerEvaluator.Evaluate` (in [`triggers.go`](triggers.go)) walks
 `profile.Spec.Rebalancing.TriggerConditions` in the order the user declared them and returns
 the **first** one that currently matches. If nothing matches, that's not an error — it's just
-nothing to do this cycle.
+nothing to do this cycle. `NodeFailure` is checked before this walk (see its row).
 
 | Condition | How it's checked |
 |---|---|
-| `EnergyThreshold` | Finds the `EnergyAwareOrchestration` matching the profile's `ApplicationRef` directly (no pod resolution needed, unlike the placement-server's pod-triggered EAO lookup). Three cases, in order: (1) energy reported insufficient, (2) decision is `Delayed`/`Waiting`, (3) decision says `DeployImmediately`/`Scheduled` **and** a pod for this app is still `Pending` — meaning it was likely blocked by the energy gate earlier and the window has since reopened. Case 3 deliberately reads the EAO's *current* status rather than parsing `nextEvaluationTime` itself — by the time this runs, the EAO's own status already reflects the new window. Case 3 also sets `TriggerResult.BypassAction` — see below. |
+| `EnergyThreshold` | Never matches while `placement.awareness.energy` is off, as the gate holds nothing and the decider gets no EAO data. Otherwise, finds the `EnergyAwareOrchestration` matching the profile's `ApplicationRef` directly (no pod resolution needed, unlike the placement-server's pod-triggered EAO lookup), and reads its verdict — the same one the energy gate uses (`EAO_RUN_NOW_ACTIONS` / `EAO_HOLD_ACTIONS`; `energyMetrics.sufficient` is ignored). (1) `Hold` (e.g. `Scheduled` with the slot still ahead) matches and asks the AI. (2) `RunNow` (`DeployImmediately`, or a hold whose `slotStart` has passed, even if the EAO hasn't re-evaluated yet) **and** the energy gate held a pod for this app that's still unscheduled (`heldByEnergyGate`: its `PodScheduled` message carries the gate's `energy gate: ` prefix); this case sets `TriggerResult.BypassAction` — see below. A pod stuck for any other reason (no CPU, taints) is left to kube-scheduler. (3) `Unknown` (no decision, an EAO failure such as `Waiting`, an unmapped action) never matches. A pod held before its slot is never retried early. |
 | `CPUThreshold` / `MemoryThreshold` | Delegates to `NodePressureEvaluator` for every distinct node the profile's pods are currently on. |
-| `NodeFailure` | `NotReady` condition on any node hosting one of the profile's pods. |
-| `Scheduled` | Always matches — the periodic tick itself *is* the schedule. |
+| `NodeFailure` | `NotReady` node hosting one of the profile's live pods. **Goes first, ignoring the shared cooldown**, while it makes progress: it moves one pod per cycle until the dead nodes are empty. After any other result (NoOp, Failed, Deferred) it waits `cooldownSeconds` from its own last try. It reads only history entries with `trigger: NodeFailure`, so other triggers' actions never delay it. Dry-run keeps the shared cooldown. |
+| `PeriodicReview` | Always matches, so the AI reviews the placement every `DetectionInterval`, paced by the cooldown. |
 
 EAO being unavailable, or a metrics-server call failing, is soft-failed per condition
 (logged at V(1), evaluator moves on) — never a hard error that would derail the whole
@@ -253,7 +254,7 @@ sequenceDiagram
     R->>W: Transition -> Decided
     R->>W: Transition -> Enacting
     R->>E: retryPendingSchedule(profile)
-    E->>E: delete the Pending, unscheduled pod
+    E->>E: delete the pods the gate held
     E-->>R: ok / error
     R->>W: Transition -> Watching (Enacted / Failed)
 ```
@@ -279,7 +280,7 @@ latency gap, not to fix a correctness gap.
 So instead of an annotation-patch nudge (unreliable — whether a generic pod update actually
 causes kube-scheduler to requeue *that* pod depends on internal queueing-hint heuristics we
 don't control), `retryPendingSchedule` (in [`retry_enactor.go`](retry_enactor.go)) **deletes**
-the Pending, unscheduled pod outright. Its owning controller (Deployment/StatefulSet/Job)
+each pod the gate held outright. Its owning controller (Deployment/StatefulSet/Job)
 notices the missing replica and creates a fresh Pod object — a `CREATE` event, which
 unconditionally goes through full scheduling immediately, no heuristics involved. This is
 safe specifically because the pod was never `Ready`: deleting it has no availability/PDB
@@ -413,7 +414,9 @@ genuinely unrecognized, not one of the known values — is treated as a processi
 - **`Move`** (`dispatchMove`) first applies the improvement-threshold guardrail
   (`Reconciler.ImprovementThreshold`, default `DefaultImprovementThreshold` — a single global
   value for now, not per-trigger-reason). Below threshold, or missing `PodName`/`TargetNode`,
-  exits straight to `Watching` (`Rejected` / `Failed`) without ever reaching `Decided`. An
+  exits straight to `Watching` (`Rejected` / `Failed`) without ever reaching `Decided`. So does
+  an EAO `Hold` on an energy-aware profile (`Rejected`, see
+  [below](#refusing-actions-the-energy-gate-would-strand)). An
   accepted, well-formed `Move` transitions to `Decided`, then must clear the cluster-wide rate
   limit (see [below](#cluster-wide-move-rate-limit)) before `Enacting` and calling `moveEnactor`
   ([`move_enactor.go`](move_enactor.go)):
@@ -444,8 +447,9 @@ genuinely unrecognized, not one of the known values — is treated as a processi
   parseable (`Failed` otherwise), then that named container to actually exist in the workload's
   pod template (`Failed` if not), then that container to already have *some* CPU/Memory
   requests or limits (`Deferred` if not — see [below](#adjustresources--cpumemory) for why), then
-  a CPU/Memory bounds guardrail (`Rejected` if outside). An accepted recommendation transitions
-  to `Decided`, then `Enacting`, and calls `resourceEnactor`
+  a CPU/Memory bounds guardrail (`Rejected` if outside), then the energy guardrail (`Rejected`
+  under an EAO `Hold`, see [below](#refusing-actions-the-energy-gate-would-strand)). An accepted
+  recommendation transitions to `Decided`, then `Enacting`, and calls `resourceEnactor`
   ([`resource_enactor.go`](resource_enactor.go)) — see
   [AdjustResources — CPU/Memory](#adjustresources--cpumemory) for the full guardrail chain and
   the in-place-resize-vs-next-rollout distinction. Like `AdjustReplicas`, no cluster-wide rate
@@ -504,6 +508,21 @@ in the schema currently supports batching several decisions into one response, a
 machine (one active decision per profile at a time) isn't shaped for concurrent per-pod cycles
 either.
 
+### Refusing actions the energy gate would strand
+
+`Move` and `AdjustResources` remove running pods and rely on new ones to replace them. While the
+EAO verdict is `Hold` on an energy-aware profile, the gate would keep those new pods `Pending`, so
+`rejectIfEnergyHeld` refuses both before `Decided`. A running pod stays running.
+
+- **Outcome `Rejected`, reason `EnergyGateClosed`:** not `Deferred`, because `Deferred` counts toward
+  escalation and a long hold is normal.
+- **Dry-run reports the same refusal.**
+- **`NodeFailure` isn't exempt:** its replacement couldn't schedule during the hold either. It tries
+  again after its cooldown.
+- **`AdjustReplicas` isn't refused:** it never removes a running pod to make room for a new one.
+
+The gate can still close right after this check, so the timeout classification below stays as the backstop.
+
 ### Energy-gate-aware timeout classification
 
 `moveEnactor` and `scaleEnactor` both end in a poll loop waiting for a scheduling-dependent
@@ -528,10 +547,9 @@ flowchart TD
     Aware -- no --> Failed(["Failed<br/>(unchanged)"])
     Aware -- yes --> Lookup["FindEAOForApp<br/>(fresh read, not the<br/>Evaluating-stage snapshot)"]
     Lookup -- "not found / lookup error" --> Failed
-    Lookup -- found --> Sufficient{"status.energyMetrics<br/>.sufficient?"}
-    Sufficient -- "field absent" --> Failed
-    Sufficient -- "true" --> Failed
-    Sufficient -- "false" --> Deferred(["Deferred<br/>(energy gate closed: reason)"])
+    Lookup -- found --> Verdict{"EAO verdict?"}
+    Verdict -- "RunNow / Unknown" --> Failed
+    Verdict -- "Hold" --> Deferred(["Deferred<br/>(energy gate: reason; held until)"])
 ```
 
 Two things worth calling out:
@@ -541,11 +559,12 @@ Two things worth calling out:
   the gate can flip open or closed well within an enactor's own timeout window (default 60s), so
   only a read taken right here is trustworthy.
 - **It mirrors `CheckEnergyGate`'s own gating precisely** (`internal/placement-server/
-  builder.go`): `Awareness.Energy` is checked first, exactly like the gate itself does, so a
-  workload the gate would never have blocked in the first place isn't misclassified just
-  because some unrelated `EnergyAwareOrchestration` happens to exist and happens to report
-  insufficient energy. Every "can't confirm" case falls back to the original `Failed` — this
-  only ever reclassifies toward `Deferred` on a positive, direct signal, never guesses.
+  eao.go`): `Awareness.Energy` is checked first, exactly like the gate itself does, and both
+  read the same EAO verdict, so a workload the gate would never have blocked in the first
+  place isn't misclassified just because some unrelated `EnergyAwareOrchestration` happens to
+  exist and happens to hold. Every "can't confirm" case (`RunNow`, `Unknown`) falls back to the
+  original `Failed` — this only ever reclassifies toward `Deferred` on a positive, direct
+  signal (a `Hold`), never guesses.
 
 Out of scope: `resourceEnactor`'s best-effort in-place resize never goes through the
 scheduler at all (it's a direct kubelet-level operation on an already-running pod), so the
@@ -613,7 +632,7 @@ refills in seconds, so applying the normal cooldown would leave a still-valid Mo
 after capacity actually freed up. This is safe specifically because `Wait()` itself already
 blocks (up to `MoveRateWaitTimeout`) before failing — that blocking *is* the pacing, so
 skipping cooldown here doesn't risk the sub-second self-triggering loop a missing cooldown
-caused elsewhere (see `hasPendingPod`'s doc comment in `triggers.go` for that story).
+caused elsewhere (see `DefaultMinPendingPodAge`'s doc comment in `triggers.go` for that story).
 
 ### Dry-run mode
 
@@ -684,6 +703,10 @@ ends `Watching` + `Deferred`. `resourcesExternallyManaged` does the same for `di
 Both flags also travel to the decision agent in `aoProfile.rebalancing`, so it can avoid
 proposing those actions at all. The operator doesn't try to detect *which* tool owns sizing — any
 controller (KEDA, a custom autoscaler, Argo CD) can, and patching underneath it would just flap.
+
+As a hint only, the loop sets the `UndeclaredAutoscaler` status condition when an HPA or an active
+VPA targets the app but the matching flag is false. It never changes a decision. A VPA in `Off`
+mode only recommends, so it isn't flagged, and a flag set with no autoscaler found is fine.
 Both default to `false`, meaning the operator may change that dimension.
 
 <a id="adjustresources--cpumemory"></a>
@@ -995,7 +1018,9 @@ decisionStore := placementserver.NewDecisionStore(rebalanceDecisionStoreTTL)
 
 metricsClient, _ := metricsclientset.NewForConfig(restConfig)
 pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, rebalanceNodePressureThreshold)
-triggerEvaluator := rebalance.NewTriggerEvaluator(mgr.GetClient(), eaoGVK, pressureEvaluator)
+// eaoSettings (placementserver.EAOSettings) is the same value the contextBuilder gets: how to find an
+// app's EAO and read its decision, so the energy gate, this trigger and the timeout label agree.
+triggerEvaluator := rebalance.NewTriggerEvaluator(mgr.GetClient(), eaoSettings, pressureEvaluator)
 
 // contextBuilder and decisionClient are the same instances the placement server
 // uses for initial-placement scoring — the rebalance engine's AI consultation is
@@ -1036,6 +1061,7 @@ flowchart LR
         V13["REBALANCE_MIN_CPU / REBALANCE_MAX_CPU"]
         V14["REBALANCE_MIN_MEMORY / REBALANCE_MAX_MEMORY"]
         V15["REBALANCE_WATCHDOG_STALE_THRESHOLD"]
+        V16["REBALANCE_MIN_PENDING_POD_AGE"]
     end
 
     Resolve{"main.go: resolve unset/invalid<br/>before constructing anything —<br/>bad value fails the operator at startup"}
@@ -1055,6 +1081,7 @@ flowchart LR
     V13 --> Resolve
     V14 --> Resolve
     V15 --> Resolve
+    V16 --> Resolve
 
     Resolve -->|"unset → DefaultHistoryWindow (1h)<br/>MaxEntries (20) / MessageMax (200)"| SW["StateWriter<br/>history bounds"]
     Resolve -->|"unset → DefaultDetectionInterval (30s)"| Recon1["Reconciler<br/>periodic detection tick"]
@@ -1090,6 +1117,7 @@ flowchart LR
 | `REBALANCE_MIN_CPU` / `REBALANCE_MAX_CPU` | `AdjustResources` CPU bounds (see [AdjustResources](#adjustresources--cpumemory)) | `DefaultMinCPU` (50m) / `DefaultMaxCPU` (2) |
 | `REBALANCE_MIN_MEMORY` / `REBALANCE_MAX_MEMORY` | `AdjustResources` Memory bounds (see [AdjustResources](#adjustresources--cpumemory)) | `DefaultMinMemory` (64Mi) / `DefaultMaxMemory` (2Gi) |
 | `REBALANCE_WATCHDOG_STALE_THRESHOLD` | How long a profile may sit in a non-Watching state before force-recovery (see [Watchdog for a profile stuck in a non-Watching state](#watchdog-for-a-profile-stuck-in-a-non-watching-state)) | `DefaultWatchdogStaleThreshold` (15m) |
+| `REBALANCE_MIN_PENDING_POD_AGE` | How long a pod the energy gate held must exist before `RetryPendingSchedule` deletes it (Go duration) | `DefaultMinPendingPodAge` (10s) |
 
 Each default lives once, as a constant next to the type it configures — `main.go` doesn't
 duplicate the numbers, it just resolves "unset" to that constant before constructing anything,
@@ -1162,7 +1190,7 @@ Regenerate `config/rbac/role.yaml` with `make manifests` after changing these ma
 flowchart TD
     RS["RebalancingStatus"] --> Active["Active fields:<br/>state, reason, decisionId,<br/>action, details, startedAt,<br/>lastTransitionAt, cooldownUntil"]
     RS --> RD["history[]"]
-    RD --> RDF["HistoryEntry:<br/>action, outcome, reason, message,<br/>count, firstAt, at, change facts"]
+    RD --> RDF["HistoryEntry:<br/>action, outcome, reason, message,<br/>decidedBy, count, firstAt, at, change facts"]
 ```
 
 `RebalancingStatus` (in `api/v1alpha1/orchestrationprofile_types.go`) carries: `state`
@@ -1224,9 +1252,29 @@ flowchart LR
 <a id="demo-walkthrough"></a>
 ## 🎬 <u>Demo walkthrough</u>
 
-[`demo/demo_rebalance.sh`](../../demo/demo_rebalance.sh) drives all six lifecycle paths
+There are two demo scripts, one per decision agent. Their shared helpers are in [`demo/lib/demo_common.sh`](../../demo/lib/demo_common.sh).
+
+### With the AI Decision Service
+
+[`demo/demo_rebalance_with_ai_decision_service.sh`](../../demo/demo_rebalance_with_ai_decision_service.sh) can't steer the service, which decides from facts. So each scenario creates the real condition (a down node, an EAO hold, a PDB), then checks what the service and the operator did, and restores the cluster.
+
+```bash
+demo/demo_rebalance_with_ai_decision_service.sh                     # numbered menu: 6, or 1 3 5, or all
+demo/demo_rebalance_with_ai_decision_service.sh retry node-failure  # by name
+demo/demo_rebalance_with_ai_decision_service.sh --auto all          # no pauses; exits non-zero on any FAIL
+demo/demo_rebalance_with_ai_decision_service.sh list                # the 13 scenarios
+demo/demo_rebalance_with_ai_decision_service.sh panes               # log commands to watch alongside
+demo/demo_rebalance_with_ai_decision_service.sh cleanup             # recover after a killed run
+```
+
+- **Node failures** stop the kubelet on a worker that hosts the app but no pod from the operator's namespace. Outside Kind, set `NODE_DOWN_CMD` and `NODE_UP_CMD`.
+- **Not covered:** the service answers only `Move` or `NoOp` today, so `AdjustReplicas`, `AdjustResources`, `Reject`, `Defer` and an AI-chosen `Escalate` need the mock script below.
+
+### With the mock agent
+
+[`demo/demo_rebalance_with_mock_agent.sh`](../../demo/demo_rebalance_with_mock_agent.sh) drives all six lifecycle paths
 above against a live cluster, narrated pane-by-pane (see the script's own header comment for
-pane setup and usage: `demo/demo_rebalance.sh [noop|retry|move|scale|resources|escalate|all|cleanup]`;
+pane setup and usage: `demo/demo_rebalance_with_mock_agent.sh [noop|retry|move|scale|resources|escalate|all|cleanup]`;
 with no argument it shows a numbered menu).
 
 ### Feature view — what each beat proves
@@ -1319,7 +1367,7 @@ forever or guessing.
 ### Mechanics — what the script actually does
 
 The diagrams above show the capability; these show the state-machine path and the
-`demo/demo_rebalance.sh` mechanics that get there for each beat.
+`demo/demo_rebalance_with_mock_agent.sh` mechanics that get there for each beat.
 
 **Beat 1 — NoOp**
 
@@ -1351,11 +1399,10 @@ flowchart TD
 ```mermaid
 flowchart TD
     Start(["move()"]) --> Bump["bump_mock_agent<br/>(force guaranteed Move)"]
-    Bump --> CloseLoop["reassert clear_cooldown +<br/>close_energy_window<br/>every 2s (up to 150s)"]
-    CloseLoop --> Trigger["EnergyThreshold matches<br/>(window closed)"]
+    Bump --> OpenLoop["reassert clear_cooldown +<br/>open_energy_window<br/>every 2s (up to 150s)"]
+    OpenLoop --> Trigger["PeriodicReview matches<br/>(a hold would refuse the Move)"]
     Trigger --> Cycle1["Triggered → Evaluating (AI call,<br/>Move accepted) → Decided →<br/>rate-limit gate → Enacting"]
-    Cycle1 --> Open["open_energy_window<br/>(replacement needs it open)"]
-    Open --> KeepOpen["keep_window_open enacting:<br/>reassert every 3s for<br/>60s window"]
+    Cycle1 --> KeepOpen["keep_window_open enacting:<br/>reassert every 3s for<br/>60s window"]
     KeepOpen --> Store["DecisionStore hit —<br/>replacement scored onto<br/>TargetNode, no 2nd AI call"]
     Store --> Revert["revert_mock_agent"]
     Revert --> Cycle2["Watching (outcome: Enacted)"]
@@ -1383,11 +1430,10 @@ flowchart TD
 flowchart TD
     Start(["resources()"]) --> Capture["capture_original_resources<br/>(idempotent)"]
     Capture --> Bump["bump_mock_agent_resources<br/>(force guaranteed AdjustResources)"]
-    Bump --> CloseLoop["wait_for_resources_applied:<br/>reassert clear_cooldown +<br/>close_energy_window every 2s,<br/>polling requests.cpu (up to 150s)"]
-    CloseLoop --> Trigger["EnergyThreshold matches<br/>(window closed)"]
+    Bump --> OpenLoop["wait_for_resources_applied:<br/>reassert clear_cooldown +<br/>open_energy_window every 2s,<br/>polling requests.cpu (up to 150s)"]
+    OpenLoop --> Trigger["PeriodicReview matches<br/>(a hold would refuse the resize)"]
     Trigger --> Cycle1["Triggered → Evaluating (AI call,<br/>AdjustResources accepted) → Decided<br/>→ Enacting → Watching, all in<br/>one reconcile (template patched)"]
-    Cycle1 --> Open["open_energy_window<br/>(only matters if the fallback<br/>rollout path is taken)"]
-    Open --> KeepOpen["keep_window_open rollout:<br/>reassert every 3s until $APP's<br/>rollout finishes (up to 90s)"]
+    Cycle1 --> KeepOpen["keep_window_open rollout:<br/>reassert every 3s until $APP's<br/>rollout finishes (up to 90s)"]
     KeepOpen --> Resize["template patched, then<br/>in-place resize attempted<br/>on running pod(s)"]
     Resize --> Revert["revert_mock_agent_resources"]
     Revert --> Cycle2["Watching (outcome: Enacted)"]
@@ -1409,10 +1455,8 @@ flowchart TD
 ```
 
 Neither escalation path touches scheduling once a cycle starts, but `wait_for_escalated` still
-closes the energy window on every reassert: `$PROFILE`'s only configured trigger condition is
-`EnergyThreshold`, which only matches while the window is closed — same dependency beats 3/4
-have, for an unrelated reason (theirs is about the *replacement* pod scheduling; this one is
-about the *trigger* matching at all). Part B's `escalationThreshold` is lowered purely so the
+closes the energy window on every reassert, so `EnergyThreshold` keeps matching — the same
+trigger beat 4 uses. Part B's `escalationThreshold` is lowered purely so the
 demo doesn't take as long: the promotion logic itself lives entirely
 inside `StateWriter.Transition` (see [Escalation — pausing on repeated
 failures](#escalation--pausing-on-repeated-failures)), the same for both paths and for any
@@ -1440,7 +1484,7 @@ each open the window and wait out $APP's rollout before returning, so `cleanup()
 window control back to EAO's real status once nothing is still trying to schedule.
 
 Beat 6 re-asserts the same way, and for the same underlying reason — its trigger condition
-(`EnergyThreshold`) needs the window closed to match, same as beats 3/4, even though nothing
+(`EnergyThreshold`) needs the window closed to match, same as beat 4, even though nothing
 it enacts needs scheduling. It captures `escalationThreshold`'s real pre-demo value the same
 idempotent way
 (`capture_original_escalation_threshold`), and `cleanup()` also unconditionally checks the

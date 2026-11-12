@@ -4,12 +4,12 @@ dependencies:
   version: 0.1.0
 - name: cert-manager
   repository: https://charts.jetstack.io
-  version: v1.21.2
+  version: v1.21.3
 - name: metrics-server
   repository: https://kubernetes-sigs.github.io/metrics-server/
   version: 3.14.0
 - name: kube-prometheus-stack
   repository: https://prometheus-community.github.io/helm-charts
-  version: 92.10.1
-digest: sha256:61b2f715b3d17055f5d259563a1540c5af1626c1935fcc1090a7f5b94d802ddb
-generated: "2026-10-17T03:02:27.812822+02:00"
+  version: 93.2.0
+digest: sha256:80c94031d4f19ef23e2eecf46afcf2d7866e1dc9b799777d2fc802d7619944ae
+generated: "2026-11-11T17:07:10.775541Z"

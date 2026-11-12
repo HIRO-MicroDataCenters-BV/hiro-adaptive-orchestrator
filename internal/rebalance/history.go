@@ -43,6 +43,7 @@ const (
 	ReasonContextError      HistoryReason = "ContextError"
 	ReasonBelowThreshold    HistoryReason = "BelowThreshold"
 	ReasonOutOfBounds       HistoryReason = "OutOfBounds"
+	ReasonUnusableTarget    HistoryReason = "UnusableTarget"
 	ReasonExternallyManaged HistoryReason = "ExternallyManaged"
 	ReasonRateLimited       HistoryReason = "RateLimited"
 	ReasonPDBBlocked        HistoryReason = "PDBBlocked"
@@ -96,6 +97,7 @@ func recordHistory(
 	now time.Time,
 ) []orchestrationv1alpha1.HistoryEntry {
 	entry.Message = truncate(entry.Message, cfg.MessageMax)
+	entry.DecidedBy = truncate(entry.DecidedBy, cfg.MessageMax) // agent-supplied, so bounded too
 	mergeable := entry.Outcome != OutcomeEnacted && entry.Reason != string(ReasonOther)
 	if len(recent) > 0 && mergeable && sameDecision(recent[0], entry) {
 		merged := recent[0]
@@ -132,8 +134,21 @@ func trimHistory(
 	return kept
 }
 
+// latestEntryForTrigger is the trigger's newest entry (history is newest first), or nil if it has none.
+func latestEntryForTrigger(
+	recent []orchestrationv1alpha1.HistoryEntry,
+	trigger orchestrationv1alpha1.TriggerCondition,
+) *orchestrationv1alpha1.HistoryEntry {
+	for i := range recent {
+		if recent[i].Trigger == trigger {
+			return &recent[i]
+		}
+	}
+	return nil
+}
+
 // sameDecision is true when two entries differ only in timing and wording, so merging
-// them loses nothing: same action, outcome, reason and change facts.
+// them loses nothing: same trigger, action, outcome, reason and change facts.
 func sameDecision(a, b orchestrationv1alpha1.HistoryEntry) bool {
 	a.Message, b.Message = "", ""
 	a.Count, b.Count = 0, 0

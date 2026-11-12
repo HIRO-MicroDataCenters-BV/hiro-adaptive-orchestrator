@@ -19,6 +19,7 @@ package rebalance
 import (
 	"context"
 	"testing"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -28,13 +29,22 @@ import (
 // testEnergyAwareProfile mirrors testProfileWithConditions but with energy
 // awareness enabled, since classifyScheduleTimeout checks that first.
 func testEnergyAwareProfile() *orchestrationv1alpha1.OrchestrationProfile {
-	p := testProfileWithConditions(TriggerScheduled)
+	p := testProfileWithConditions(TriggerPeriodicReview)
 	p.Spec.Placement.Awareness.Energy = true
+	return p
+}
+
+// testEnergyTriggerProfile declares EnergyThreshold on an energy-aware profile, as that trigger needs.
+func testEnergyTriggerProfile() *orchestrationv1alpha1.OrchestrationProfile {
+	p := testEnergyAwareProfile()
+	p.Spec.Rebalancing.TriggerConditions = []orchestrationv1alpha1.TriggerCondition{TriggerEnergyThreshold}
 	return p
 }
 
 func TestClassifyScheduleTimeout(t *testing.T) {
 	const timeoutReason = "no scheduled replacement observed within 1m0s"
+	slotAhead := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	slotStarted := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 
 	tests := []struct {
 		name        string
@@ -45,8 +55,8 @@ func TestClassifyScheduleTimeout(t *testing.T) {
 	}{
 		{
 			name:        "energy awareness disabled stays Failed",
-			profile:     testProfileWithConditions(TriggerScheduled), // Awareness.Energy: false
-			objs:        []client.Object{testEAO("Waiting", "demo: closed", new(false))},
+			profile:     testProfileWithConditions(TriggerPeriodicReview),
+			objs:        []client.Object{heldEAO("demo: closed", slotAhead)},
 			wantOutcome: OutcomeFailed,
 			wantReason:  timeoutReason,
 		},
@@ -58,39 +68,47 @@ func TestClassifyScheduleTimeout(t *testing.T) {
 			wantReason:  timeoutReason,
 		},
 		{
-			name:        "sufficient field not populated stays Failed",
+			name:        "Waiting is an EAO failure, not a hold: stays Failed",
 			profile:     testEnergyAwareProfile(),
-			objs:        []client.Object{testEAO("Waiting", "demo: closed", nil)},
+			objs:        []client.Object{testEAO("Waiting", "demo: closed", new(false))},
 			wantOutcome: OutcomeFailed,
 			wantReason:  timeoutReason,
 		},
 		{
-			name:        "sufficient true stays Failed",
+			name:        "DeployImmediately stays Failed even when sufficient is false",
 			profile:     testEnergyAwareProfile(),
-			objs:        []client.Object{testEAO("DeployImmediately", "window open", new(true))},
+			objs:        []client.Object{testEAO("DeployImmediately", "window open", new(false))},
 			wantOutcome: OutcomeFailed,
 			wantReason:  timeoutReason,
 		},
 		{
-			name:        "sufficient false with a decision reason becomes Deferred",
+			name:        "a slot that has started stays Failed",
 			profile:     testEnergyAwareProfile(),
-			objs:        []client.Object{testEAO("Waiting", "demo: energy window closed", new(false))},
-			wantOutcome: OutcomeDeferred,
-			wantReason:  timeoutReason + " (energy gate closed: demo: energy window closed)",
+			objs:        []client.Object{heldEAO("demo: closed", slotStarted)},
+			wantOutcome: OutcomeFailed,
+			wantReason:  timeoutReason,
 		},
 		{
-			name:        "sufficient false with no decision reason falls back to generic text",
+			name:        "a hold becomes Deferred with the EAO's reason and its end",
 			profile:     testEnergyAwareProfile(),
-			objs:        []client.Object{testEAO("Waiting", "", new(false))},
+			objs:        []client.Object{heldEAO("demo: energy window closed", slotAhead)},
 			wantOutcome: OutcomeDeferred,
-			wantReason:  timeoutReason + " (energy gate closed: energy supply reported insufficient)",
+			wantReason:  timeoutReason + " (energy gate: demo: energy window closed; held until 2099-01-01T00:00:00Z)",
+		},
+		{
+			name:        "a hold with no reason or slot falls back to generic text",
+			profile:     testEnergyAwareProfile(),
+			objs:        []client.Object{testEAO("Scheduled", "", new(false))},
+			wantOutcome: OutcomeDeferred,
+			wantReason:  timeoutReason + " (energy gate: EAO holds the workload)",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			evaluator := newTestTriggerEvaluator(t, tt.objs...)
-			outcome, reason := classifyScheduleTimeout(context.Background(), evaluator.client, testEAOGVK, tt.profile, timeoutReason)
+			outcome, reason := classifyScheduleTimeout(context.Background(), evaluator.client, evaluator.eaoSettings,
+				tt.profile, timeoutReason)
 			if outcome != tt.wantOutcome {
 				t.Errorf("outcome = %q, want %q", outcome, tt.wantOutcome)
 			}

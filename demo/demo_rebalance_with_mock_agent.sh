@@ -1,5 +1,5 @@
 #!/bin/bash
-# demo/demo_rebalance.sh
+# demo/demo_rebalance_with_mock_agent.sh
 #
 # Guided, narrated demo of the rebalance engine's decision lifecycle:
 #   Watching -> Triggered -> Evaluating -> Decided -> Enacting -> Watching
@@ -7,6 +7,9 @@
 # See internal/rebalance/README.md#demo-walkthrough for a small flow diagram
 # of what each beat below actually does mechanically (Mermaid doesn't render
 # in a .sh comment, so it lives there, not here).
+#
+# Needs the mock agent, which the beats steer through env vars. Deploy with
+#   USE_MOCK_AGENT=true USE_AI_DECISION_SERVICE=false deploy/scripts/deploy_full_stack_with_helm.sh
 #
 # Drives six beats against a live cluster (the full-stack deploy must
 # already be running — see deploy/scripts/deploy_full_stack.sh), all against the
@@ -30,37 +33,26 @@
 #                   engine auto-escalating after repeated Failed cycles — see
 #                   the "Escalation" section of internal/rebalance/README.md.
 #
-# Beats 3 and 4 both need the energy window CLOSED to fire the trigger
-# (EnergyThreshold only matches on insufficient/Delayed/Waiting) but OPEN for
-# the new/replacement pod to actually pass CheckEnergyGate and schedule — see
-# the energy-gate interaction documented in internal/rebalance/README.md
-# (originally found for Move, confirmed to affect AdjustReplicas the same
-# way when scaling up). Same race as beat 2: a one-shot patch can lose to a
-# NoOp re-arming cooldown or to the external EAO controller's own reconcile
-# reverting it before our watch reacts. So this script re-asserts
-# clear-cooldown+close-window every few seconds until the cycle leaves
-# Watching, then re-asserts the open window throughout the whole Enacting
-# phase instead of patching either side once.
+# Beats 3 and 5 keep the energy window OPEN: under a hold the operator refuses
+# Move and AdjustResources, because the gate would hold the pods they replace.
+# PeriodicReview triggers them instead.
 #
-# Beat 5 plays the same close-then-open dance too, defensively — but unlike
-# 3/4 it doesn't strictly need to: a successful in-place resize touches the
-# already-running pod directly, no eviction, no new pod, no scheduling
-# involved at all. It's only resourceEnactor's fallback path (in-place
-# resize unsupported on this cluster) — which patches the pod template
-# instead, triggering a normal rolling update — that creates a new pod
-# subject to the same energy-gate interaction as beats 3/4. Which path this
-# cluster takes isn't known up front, so the dance runs either way; Pane B
-# shows which one actually happened.
+# Beat 4 still needs the window CLOSED to fire the trigger (EnergyThreshold only
+# matches on an EAO hold: a slot still ahead) but OPEN for the new replica's pod
+# to pass CheckEnergyGate and schedule.
 #
-# Unlike 3/4, beat 5 does NOT poll for the Enacting state to know when to
-# stop closing the window: the fallback path patches the template and
-# returns to Watching in the same reconcile, so Enacting never lingers long
-# enough for a 2s poll to observe it. Polling for Enacting there just kept
-# re-arming the trigger every 2s with the window still closed — a burst of
-# AdjustResources decisions, each starting a new rollout that superseded the
-# last before it could schedule, which is what left a pod stuck Pending.
-# wait_for_resources_applied() below polls the Deployment's actual resource
-# values instead, so it stops the instant the first patch is visible.
+# Same race as beat 2: a one-shot patch can lose to a NoOp re-arming cooldown or
+# to the external EAO controller's own reconcile reverting it before our watch
+# reacts. So this script re-asserts clear-cooldown and the window every few
+# seconds instead of patching once.
+#
+# Beat 5 does NOT poll for the Enacting state: the fallback path patches the
+# template and returns to Watching in the same reconcile, so Enacting never
+# lingers long enough for a 2s poll to observe it. Polling for it just kept
+# re-arming the trigger — a burst of AdjustResources decisions, each starting a
+# new rollout that superseded the last. wait_for_resources_applied() below polls
+# the Deployment's actual resource values instead, so it stops the instant the
+# first patch is visible.
 #
 # This script does NOT stream logs itself — open these in separate terminal
 # panes before you start, so you (the presenter) can narrate over them while
@@ -86,15 +78,15 @@
 #     kubectl logs -f deployment/mock-decision-agent -n hiro-adaptive-orchestrator-system
 #
 # Usage:
-#   demo/demo_rebalance.sh              # numbered menu: pick one beat, all, or cleanup
-#   demo/demo_rebalance.sh all          # run all six beats, in order
-#   demo/demo_rebalance.sh noop         # run a single beat
-#   demo/demo_rebalance.sh retry
-#   demo/demo_rebalance.sh move
-#   demo/demo_rebalance.sh scale
-#   demo/demo_rebalance.sh resources
-#   demo/demo_rebalance.sh escalate
-#   demo/demo_rebalance.sh cleanup      # revert the mock agent + restore
+#   demo/demo_rebalance_with_mock_agent.sh              # numbered menu: pick one beat, all, or cleanup
+#   demo/demo_rebalance_with_mock_agent.sh all          # run all six beats, in order
+#   demo/demo_rebalance_with_mock_agent.sh noop         # run a single beat
+#   demo/demo_rebalance_with_mock_agent.sh retry
+#   demo/demo_rebalance_with_mock_agent.sh move
+#   demo/demo_rebalance_with_mock_agent.sh scale
+#   demo/demo_rebalance_with_mock_agent.sh resources
+#   demo/demo_rebalance_with_mock_agent.sh escalate
+#   demo/demo_rebalance_with_mock_agent.sh cleanup      # revert the mock agent + restore
 #                                       # replica count/resources/escalation,
 #                                       # without running anything else
 #
@@ -107,44 +99,7 @@
 
 set -euo pipefail
 
-NAMESPACE=${NAMESPACE:-hiro-adaptive-orchestrator-system}
-APP_NAMESPACE=${APP_NAMESPACE:-default}
-
-PROFILE=orchestrationprofile-2
-APP=nginx-deployment-2
-EAO=eaoprofile-optional
-
-# ─── Presentation helpers ──────────────────────────────────────────────────
-
-step() { printf '\n\033[36m===>\033[0m %s\n' "$*"; }
-narrate() { printf '\n\033[33m%s\033[0m\n' "$*"; }
-
-# Reads from /dev/tty explicitly rather than plain stdin — if stdin isn't a
-# real controlling terminal (redirected, piped through `tee`, launched by
-# some wrapper), `read` hits EOF immediately and the old `|| true` swallowed
-# that silently, so every beat blew past its pause unattended. Falls back to
-# a no-op notice only if there's truly no terminal available at all.
-pause() {
-  if [ -r /dev/tty ]; then
-    read -rp $'\n\033[2mPress Enter to continue...\033[0m ' _ < /dev/tty || true
-  else
-    printf '\n\033[2m(no TTY available — continuing without pause)\033[0m\n'
-  fi
-}
-
-# Echoes $@ (dimmed, "$ "-prefixed) before executing it, so the presenter and
-# anyone reading captured output see exactly what ran against the cluster.
-# The echo goes to stderr so `x=$(run kubectl get ...)` still works — only
-# the wrapped command's own stdout is captured by callers doing command
-# substitution.
-run() {
-  printf '\033[2m$ %s\033[0m\n' "$*" >&2
-  "$@"
-}
-
-profile_state() {
-  kubectl get orchestrationprofile "$PROFILE" -o jsonpath='{.status.rebalancingStatus.state}' 2>/dev/null
-}
+source "$(dirname "${BASH_SOURCE[0]}")/lib/demo_common.sh"
 
 # ─── Cleanup (always runs on exit, even Ctrl-C) ────────────────────────────
 
@@ -152,20 +107,7 @@ MOCK_AGENT_MOVE_BUMPED=false
 MOCK_AGENT_SCALE_BUMPED=false
 MOCK_AGENT_RESOURCE_BUMPED=false
 MOCK_AGENT_ESCALATE_BUMPED=false
-APP_ORIGINAL_REPLICAS=""
 RETRY_PENDING_POD=""
-EAO_TOUCHED=false
-EAO_ORIG_ACTION=""
-EAO_ORIG_REASON=""
-EAO_ORIG_SUFFICIENT=""
-RESOURCES_TOUCHED=false
-APP_CONTAINER_NAME=""
-APP_ORIGINAL_CPU_REQUEST=""
-APP_ORIGINAL_MEMORY_REQUEST=""
-APP_ORIGINAL_CPU_LIMIT=""
-APP_ORIGINAL_MEMORY_LIMIT=""
-ESCALATION_THRESHOLD_TOUCHED=false
-APP_ORIGINAL_ESCALATION_THRESHOLD=""
 MOCK_AGENT_SCALED_DOWN=false
 
 cleanup() {
@@ -266,123 +208,6 @@ revert_mock_agent_resources() {
   MOCK_AGENT_RESOURCE_BUMPED=false
 }
 
-clear_cooldown() {
-  run kubectl patch orchestrationprofile "$PROFILE" --type=merge --subresource=status \
-    -p '{"status":{"rebalancingStatus":{"cooldownUntil":null}}}' >/dev/null
-}
-
-# $EAO is owned by the external, kopf-based Energy Aware Orchestrator — our
-# window patches below are a demo-only override. Its own reconcile would
-# eventually overwrite them, but on its own schedule (minutes), not ours. So
-# we capture its real pre-demo window state here, once, the first time we're
-# about to touch it — then cleanup() restores exactly that instead of
-# waiting the external controller out. Empty capture means the field was
-# genuinely unset (not just empty string), so revert_eao_window patches it
-# back with JSON null (merge-patch semantics: null removes the key) rather
-# than writing a literal empty string.
-capture_eao_original() {
-  [ "$EAO_TOUCHED" = true ] && return
-  EAO_ORIG_ACTION=$(kubectl get energyawareorchestration "$EAO" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.status.decision.action}' 2>/dev/null)
-  EAO_ORIG_REASON=$(kubectl get energyawareorchestration "$EAO" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.status.decision.reason}' 2>/dev/null)
-  EAO_ORIG_SUFFICIENT=$(kubectl get energyawareorchestration "$EAO" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.status.energyMetrics.sufficient}' 2>/dev/null)
-  EAO_TOUCHED=true
-}
-
-revert_eao_window() {
-  echo "  Restoring $EAO's energy window status to its pre-demo values (not waiting on its own controller)"
-  local action_json reason_json sufficient_json
-  action_json=$([ -n "$EAO_ORIG_ACTION" ] && printf '"%s"' "$EAO_ORIG_ACTION" || echo null)
-  reason_json=$([ -n "$EAO_ORIG_REASON" ] && printf '"%s"' "$EAO_ORIG_REASON" || echo null)
-  sufficient_json=$([ -n "$EAO_ORIG_SUFFICIENT" ] && echo "$EAO_ORIG_SUFFICIENT" || echo null)
-  run kubectl patch energyawareorchestration "$EAO" -n "$APP_NAMESPACE" --type=merge --subresource=status \
-    -p "{\"status\":{\"decision\":{\"action\":${action_json},\"reason\":${reason_json}},\"energyMetrics\":{\"sufficient\":${sufficient_json}}}}" >/dev/null
-}
-
-close_energy_window() {
-  capture_eao_original
-  run kubectl patch energyawareorchestration "$EAO" -n "$APP_NAMESPACE" --type=merge --subresource=status \
-    -p '{"status":{"decision":{"action":"Waiting","reason":"demo: energy window closed"},"energyMetrics":{"sufficient":false}}}' >/dev/null
-}
-
-open_energy_window() {
-  capture_eao_original
-  run kubectl patch energyawareorchestration "$EAO" -n "$APP_NAMESPACE" --type=merge --subresource=status \
-    -p '{"status":{"decision":{"action":"DeployImmediately","reason":"demo: energy window open"},"energyMetrics":{"sufficient":true}}}' >/dev/null
-}
-
-# Shared by revert_replicas/revert_resources below: both can create a
-# brand-new pod (scaling back up, or a template patch) that needs to
-# schedule, and both need to know it's actually Running before cleanup()
-# hands the energy window back to EAO's true pre-demo status — which can
-# itself be closed/insufficient (it is on this cluster). Blocking here,
-# once, is what lets cleanup() do that safely without repeating the wait
-# after each revert.
-await_app_rollout() {
-  run kubectl rollout status deployment "$APP" -n "$APP_NAMESPACE" --timeout=90s || true
-}
-
-# Captures $APP's real pre-demo replica count exactly once, the first time
-# any beat is about to change it — same idempotent-capture pattern as
-# capture_eao_original, so that whichever beat runs first (retry or scale)
-# is the one whose capture sticks, and cleanup() always restores the true
-# original regardless of how many beats touch replica count along the way.
-capture_original_replicas() {
-  [ -n "$APP_ORIGINAL_REPLICAS" ] && return
-  APP_ORIGINAL_REPLICAS=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.spec.replicas}')
-}
-
-# Restores $APP's replica count. Opens the energy window first — scaling
-# back UP (e.g. beat 2/4 left it one higher) can create a new pod that needs
-# to pass CheckEnergyGate — and waits for the scale to settle before
-# returning, so cleanup() can safely revert EAO status after this.
-revert_replicas() {
-  echo "  Restoring $APP to $APP_ORIGINAL_REPLICAS replica(s)"
-  open_energy_window
-  run kubectl scale deployment "$APP" -n "$APP_NAMESPACE" --replicas="$APP_ORIGINAL_REPLICAS"
-  await_app_rollout
-}
-
-# Captures $APP's real pre-demo container name and CPU/Memory resources
-# exactly once, the same idempotent-capture pattern as
-# capture_original_replicas/capture_eao_original — so revert_resources
-# always restores the true original regardless of what the mock agent's
-# fixed RESOURCE_TARGET_CPU/MEMORY happened to be.
-capture_original_resources() {
-  [ "$RESOURCES_TOUCHED" = true ] && return
-  APP_CONTAINER_NAME=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.spec.template.spec.containers[0].name}')
-  APP_ORIGINAL_CPU_REQUEST=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}')
-  APP_ORIGINAL_MEMORY_REQUEST=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.spec.template.spec.containers[0].resources.requests.memory}')
-  APP_ORIGINAL_CPU_LIMIT=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.spec.template.spec.containers[0].resources.limits.cpu}')
-  APP_ORIGINAL_MEMORY_LIMIT=$(run kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
-    -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}')
-  RESOURCES_TOUCHED=true
-}
-
-# kubectl set resources (not a JSON/merge patch) — patches the Deployment's
-# template, which on its own triggers a normal rollout that both restores
-# every pod's resources AND supersedes any pod resourceEnactor resized in
-# place, so this correctly undoes either path it took. Opens the energy
-# window first (the rollout's replacement pod needs to pass CheckEnergyGate
-# same as revert_replicas' does) and waits for it to finish before
-# returning.
-revert_resources() {
-  echo "  Restoring $APP's container resources to their pre-demo values"
-  open_energy_window
-  run kubectl set resources deployment "$APP" -n "$APP_NAMESPACE" \
-    -c="$APP_CONTAINER_NAME" \
-    --requests="cpu=$APP_ORIGINAL_CPU_REQUEST,memory=$APP_ORIGINAL_MEMORY_REQUEST" \
-    --limits="cpu=$APP_ORIGINAL_CPU_LIMIT,memory=$APP_ORIGINAL_MEMORY_LIMIT"
-  await_app_rollout
-}
-
 # ─── Beat 1 — NoOp ──────────────────────────────────────────────────────────
 
 # NoOp arms cooldownSeconds same as any other terminal outcome (see
@@ -466,7 +291,8 @@ re-asserts every few seconds — the echoed patches double as progress."
 
 # ─── Beat 3 — Move ──────────────────────────────────────────────────────────
 
-# Re-asserts clear-cooldown + close-window every 2s (up to 150s), polling
+# Re-asserts clear-cooldown + $1 (open_energy_window or close_energy_window)
+# every 2s (up to 150s), polling
 # directly for Enacting rather than "left Watching": a full NoOp cycle
 # (Watching->Triggered->Evaluating->Watching) completes in under a second,
 # so sampling for "not Watching" would alias right past it. Enacting is the
@@ -477,10 +303,11 @@ re-asserts every few seconds — the echoed patches double as progress."
 # in the same reconcile, so it never holds Enacting long enough for this to
 # catch — beat 5 uses wait_for_resources_applied() instead (see below).
 wait_for_enacting() {
+  local assert_window=$1
   local waited=0
   while [ "$waited" -lt 150 ]; do
     clear_cooldown
-    close_energy_window
+    "$assert_window"
     if [ "$(profile_state)" = "Enacting" ]; then
       echo "  Reached Enacting after ${waited}s — check Pane A/B for the Decided reason."
       return 0
@@ -496,15 +323,15 @@ wait_for_enacting() {
 # Beat 5's counterpart to wait_for_enacting above — see that function's doc
 # comment for why polling for Enacting doesn't work for resourceEnactor's
 # fallback path. Polls the Deployment's actual requests.cpu instead of
-# profile state: race-free, and stops re-triggering (and re-closing the
-# window) the instant the first patch is visible, instead of hammering the
-# trigger every 2s for the full 150s like an Enacting-based poll would.
+# profile state: race-free, and stops re-triggering the instant the first
+# patch is visible, instead of hammering the trigger every 2s for the full
+# 150s like an Enacting-based poll would.
 wait_for_resources_applied() {
   local waited=0
   local cur_cpu
   while [ "$waited" -lt 150 ]; do
     clear_cooldown
-    close_energy_window
+    open_energy_window
     cur_cpu=$(kubectl get deployment "$APP" -n "$APP_NAMESPACE" \
       -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}' 2>/dev/null)
     if [ -n "$cur_cpu" ] && [ "$cur_cpu" != "$APP_ORIGINAL_CPU_REQUEST" ]; then
@@ -544,20 +371,18 @@ keep_window_open() {
 
 move() {
   step "Beat 3 — Move"
-  narrate "Needs the window CLOSED to trigger, OPEN for the replacement to
-schedule — same cooldown/kopf race as beat 2, handled the same way."
+  narrate "Needs the window OPEN: under a hold the operator refuses a Move, since
+the gate would hold the replacement. PeriodicReview triggers the AI."
   pause
 
   step "Forcing a guaranteed above-threshold Move"
   bump_mock_agent
   pause
 
-  step "Closing the energy window and re-asserting until Enacting is observed"
-  wait_for_enacting || return 1
+  step "Opening the energy window and re-asserting until Enacting is observed"
+  wait_for_enacting open_energy_window || return 1
 
-  step "Eviction is in flight — opening the energy window immediately"
-  open_energy_window
-  narrate "Re-asserting the open window for the rest of the enacting window."
+  narrate "Eviction is in flight — re-asserting the open window for the rest of the enacting window."
   pause
   keep_window_open enacting 60
 
@@ -588,8 +413,8 @@ steered to the Move's target node instead of a fresh AI call."
 # even if this beat runs standalone, without retry() having captured it first.
 scale() {
   step "Beat 4 — AdjustReplicas (Scale)"
-  narrate "Same energy-gate interaction as beat 3: needs the window CLOSED to
-trigger, OPEN for the new replica's pod to actually schedule."
+  narrate "Needs the window CLOSED to trigger, OPEN for the new replica's pod to
+actually schedule. Unlike a Move, scaling up removes no running pod, so it isn't refused."
   capture_original_replicas
   pause
 
@@ -598,7 +423,7 @@ trigger, OPEN for the new replica's pod to actually schedule."
   pause
 
   step "Closing the energy window and re-asserting until Enacting is observed"
-  wait_for_enacting || return 1
+  wait_for_enacting close_energy_window || return 1
 
   step "Spec.Replicas is patched — opening the energy window immediately"
   open_energy_window
@@ -621,31 +446,25 @@ trigger, OPEN for the new replica's pod to actually schedule."
 
 # ─── Beat 5 — AdjustResources (Resize) ─────────────────────────────────────
 
-# Unlike beats 3/4, a successful in-place resize touches the ALREADY-RUNNING
-# pod directly (no eviction, no new pod, no scheduling) — this beat only
-# needs the energy-window dance for resourceEnactor's fallback path (in-place
-# resize unsupported on this cluster), which patches the pod template
-# instead and triggers a normal rollout. capture_original_resources runs
-# here (idempotent) so cleanup() restores the true pre-demo values even if
-# this beat runs standalone.
+# The window stays OPEN: under a hold the operator refuses AdjustResources,
+# because the template patch starts a rollout whose new pods the gate would
+# hold. capture_original_resources runs here (idempotent) so cleanup() restores
+# the true pre-demo values even if this beat runs standalone.
 resources() {
   step "Beat 5 — AdjustResources (Resize)"
   capture_original_resources
   narrate "Resizes $APP_CONTAINER_NAME's CPU/Memory. If this cluster supports
-in-place pod resize (K8s 1.27+), the running pod updates immediately with no
-new pod involved at all — the energy-window dance below is only insurance
-for the fallback path (template patch, effective on the next rollout)."
+in-place pod resize (K8s 1.27+), the running pod updates immediately. The
+window stays open, as under a hold the operator refuses this action."
   pause
 
   step "Forcing a guaranteed above-threshold AdjustResources"
   bump_mock_agent_resources
   pause
 
-  step "Closing the energy window and re-asserting until the resize is applied"
+  step "Opening the energy window and re-asserting until the resize is applied"
   wait_for_resources_applied || return 1
 
-  step "Resize applied — opening the energy window immediately"
-  open_energy_window
   narrate "Re-asserting the open window until $APP finishes rolling out (or
 up to 90s) — returns immediately if an in-place resize succeeded, since
 there's no new rollout to wait for."
@@ -674,35 +493,10 @@ effective on next rollout' (a new pod appears below instead)."
 
 # ─── Beat 6 — Escalate ──────────────────────────────────────────────────────
 
-profile_escalated() {
-  kubectl get orchestrationprofile "$PROFILE" -o jsonpath='{.status.rebalancingStatus.escalated}' 2>/dev/null
-}
-
-# The documented unpause (see internal/rebalance/README.md's "Escalation"
-# section) — a plain status patch, nothing operator-specific. Resetting
-# consecutiveFailures alongside escalated avoids an immediate re-escalation
-# off a single subsequent failure.
-clear_escalation() {
-  run kubectl patch orchestrationprofile "$PROFILE" --type=merge --subresource=status \
-    -p '{"status":{"rebalancingStatus":{"escalated":false,"consecutiveFailures":0}}}' >/dev/null
-}
-
-# Safety net called unconditionally from cleanup(), not gated by a
-# beat-scoped flag: escalation is reachable from any beat's own repeated
-# failures, not just this one, so cleanup should never leave the real
-# profile paused regardless of which beat ran or where it was interrupted.
-ensure_not_escalated() {
-  if [ "$(profile_escalated)" = "true" ]; then
-    echo "  $PROFILE is escalated — clearing it so the loop isn't left paused."
-    clear_escalation
-  fi
-}
-
 # Re-asserts clear-cooldown + close-window every 2s (up to 90s) until the
-# profile's escalated flag flips true. $PROFILE's only trigger condition is
-# EnergyThreshold, which only matches while the window is closed — without
-# re-closing it, the external EAO controller can flip it back open between
-# cycles and the streak stalls short of the threshold.
+# profile's escalated flag flips true. EnergyThreshold only matches while the
+# window is closed — without re-closing it, the external EAO controller can flip
+# it back open between cycles and the streak stalls short of the threshold.
 wait_for_escalated() {
   local waited=0
   while [ "$waited" -lt 90 ]; do
@@ -749,31 +543,6 @@ restore_mock_agent_replicas() {
   run kubectl scale deployment mock-decision-agent -n "$NAMESPACE" --replicas=1
   run kubectl rollout status deployment mock-decision-agent -n "$NAMESPACE" --timeout=60s || true
   MOCK_AGENT_SCALED_DOWN=false
-}
-
-# Captures $PROFILE's real pre-demo escalationThreshold exactly once, same
-# idempotent-capture pattern as capture_original_replicas/capture_eao_original.
-# Empty capture means the field was genuinely unset (uses
-# DefaultEscalationThreshold), so revert_escalation_threshold patches it back
-# with JSON null rather than a literal value.
-capture_original_escalation_threshold() {
-  [ "$ESCALATION_THRESHOLD_TOUCHED" = true ] && return
-  APP_ORIGINAL_ESCALATION_THRESHOLD=$(kubectl get orchestrationprofile "$PROFILE" \
-    -o jsonpath='{.spec.rebalancing.escalationThreshold}' 2>/dev/null)
-  ESCALATION_THRESHOLD_TOUCHED=true
-}
-
-set_escalation_threshold() {
-  run kubectl patch orchestrationprofile "$PROFILE" --type=merge \
-    -p "{\"spec\":{\"rebalancing\":{\"escalationThreshold\":$1}}}" >/dev/null
-}
-
-revert_escalation_threshold() {
-  echo "  Restoring escalationThreshold to its pre-demo value"
-  local val_json
-  val_json=$([ -n "$APP_ORIGINAL_ESCALATION_THRESHOLD" ] && echo "$APP_ORIGINAL_ESCALATION_THRESHOLD" || echo null)
-  run kubectl patch orchestrationprofile "$PROFILE" --type=merge \
-    -p "{\"spec\":{\"rebalancing\":{\"escalationThreshold\":${val_json}}}}" >/dev/null
 }
 
 # Two independent ways the loop pauses itself, demoed back to back: Part A
@@ -892,6 +661,14 @@ main() {
     fi
     beat=$(menu)
   fi
+
+  case "$beat" in quit|-h|--help) ;; *)
+    if ! kubectl get deployment mock-decision-agent -n "$NAMESPACE" >/dev/null 2>&1; then
+      echo "mock-decision-agent not found in $NAMESPACE. Deploy it first:" >&2
+      echo "  USE_MOCK_AGENT=true USE_AI_DECISION_SERVICE=false deploy/scripts/deploy_full_stack_with_helm.sh" >&2
+      trap - EXIT; exit 1
+    fi
+  esac
 
   case "$beat" in
     quit) trap - EXIT; exit 0 ;;

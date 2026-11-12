@@ -60,8 +60,8 @@ type DecisionRequest struct {
 	// nil when energy awareness is disabled or E.A.O data is unavailable.
 	EAOProfile *EAOProfileContext `json:"eaoProfile,omitempty"`
 
-	// NodeStats is the candidate list: one entry per node the decider may pick
-	// (scheduler-filtered for placement, Ready and tolerated for rebalance).
+	// NodeStats lists every candidate node; rebalance also adds the app's other nodes
+	// (e.g. NotReady) with candidate=false. Only candidates may be picked.
 	NodeStats []NodeStat `json:"nodeStats"`
 
 	// RebalanceContext is populated only for rebalance evaluations (the
@@ -127,7 +127,7 @@ type RebalanceState struct {
 // RebalanceTrigger is the trigger condition that started this evaluation.
 type RebalanceTrigger struct {
 	// Type is the profile's TriggerCondition that matched (CPUThreshold,
-	// MemoryThreshold, EnergyThreshold, NodeFailure, Scheduled).
+	// MemoryThreshold, EnergyThreshold, NodeFailure, PeriodicReview).
 	Type string `json:"type"`
 
 	// Node is the node the condition was observed on, for node-scoped triggers.
@@ -160,10 +160,14 @@ type RebalancePDB struct {
 	AllowedDisruptions int32  `json:"allowedDisruptions"`
 }
 
-// NodeStat is a compact, decision-relevant view of one candidate node.
+// NodeStat is a compact, decision-relevant view of one node.
 // Null pointer fields mean unknown, never zero.
 type NodeStat struct {
-	Name   string            `json:"name"`
+	Name string `json:"name"`
+
+	// Candidate means the node may be picked; its health is in Conditions.
+	Candidate bool `json:"candidate"`
+
 	Labels map[string]string `json:"labels,omitempty"`
 
 	Taints        []corev1.Taint    `json:"taints,omitempty"`
@@ -386,7 +390,22 @@ type EAOProfileContext struct {
 	// LastUpdated is the EAO's last reconcile time (RFC 3339) — the field to
 	// judge freshness by, not Decision.NextEvaluationTime.
 	LastUpdated string `json:"lastUpdated,omitempty"`
+
+	// Verdict is Decision.Action in this repo's terms.
+	Verdict EAOVerdict `json:"verdict"`
+
+	// HoldUntil is when a Hold ends (the slot start); nil when unknown.
+	HoldUntil *metav1.Time `json:"holdUntil,omitempty"`
 }
+
+// EAOVerdict is what the EAO's decision means for running the workload now.
+type EAOVerdict string
+
+const (
+	EAOVerdictRunNow  EAOVerdict = "RunNow"  // may run now
+	EAOVerdictHold    EAOVerdict = "Hold"    // no energy now; wait until HoldUntil
+	EAOVerdictUnknown EAOVerdict = "Unknown" // no usable decision: missing, an EAO failure, or an unmapped value
+)
 
 // EAODecision is the scheduling decision from the EnergyAwareOrchestrator.
 type EAODecision struct {

@@ -19,8 +19,8 @@ package rebalance
 import (
 	"context"
 	"fmt"
+	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -34,20 +34,13 @@ import (
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=delete
 
-// retryPendingSchedule enacts ActionRetryPendingSchedule: deletes any
-// Pending, unscheduled pod belonging to the profile's application, forcing
-// its owning controller (Deployment/StatefulSet/Job) to create a
-// replacement — a Pod CREATE event, which goes through full scheduling
-// immediately rather than waiting on kube-scheduler's own backoff to
-// eventually retry the stuck pod.
-//
-// Safe because a Pending, unscheduled pod was never Ready — deleting it has
-// no availability/PDB implications the way evicting a running pod would, so
-// this uses a plain Delete rather than the Eviction API.
+// retryPendingSchedule deletes the pods the gate held, so their replacements schedule now instead of after kube-scheduler's backoff.
+// A plain Delete is safe: these pods were never Ready.
 func retryPendingSchedule(
 	ctx context.Context,
 	c client.Client,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
+	minPendingPodAge time.Duration,
 ) error {
 	pods, err := utils.FindPodsForApplication(ctx, c, profile.Spec.ApplicationRef)
 	if err != nil {
@@ -57,8 +50,8 @@ func retryPendingSchedule(
 	deleted := 0
 	for i := range pods {
 		pod := &pods[i]
-		if pod.Status.Phase != corev1.PodPending || pod.Spec.NodeName != "" {
-			continue // only unscheduled Pending pods are candidates
+		if !heldByEnergyGate(pod, minPendingPodAge) {
+			continue
 		}
 		if err := c.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("deleting pending pod %s: %w", pod.Name, err)
@@ -67,7 +60,7 @@ func retryPendingSchedule(
 	}
 
 	if deleted == 0 {
-		return fmt.Errorf("no pending, unscheduled pod found to retry for %s/%s",
+		return fmt.Errorf("no pod held by the energy gate found to retry for %s/%s",
 			profile.Spec.ApplicationRef.Namespace, profile.Spec.ApplicationRef.Name)
 	}
 	return nil

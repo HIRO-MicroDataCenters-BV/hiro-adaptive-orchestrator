@@ -18,6 +18,7 @@ package rebalance
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +33,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
 
 var testEAOGVK = schema.GroupVersionKind{Group: "eas.hiro.io", Version: "v1", Kind: "EnergyAwareOrchestration"}
@@ -79,6 +82,20 @@ func testPod(name, nodeName string, phase corev1.PodPhase) *corev1.Pod {
 	}
 }
 
+// unschedulablePod is a Pending pod kube-scheduler turned away with this message.
+func unschedulablePod(name, message string) *corev1.Pod {
+	pod := testPod(name, "", corev1.PodPending)
+	pod.Status.Conditions = []corev1.PodCondition{{
+		Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable, Message: message,
+	}}
+	return pod
+}
+
+// energyHeldPod is a pod the energy gate turned away.
+func energyHeldPod(name string) *corev1.Pod {
+	return unschedulablePod(name, "0/3 nodes are available: 3 HIROScore: "+placement.EnergyGateReasonPrefix+"no energy.")
+}
+
 func testEAO(action, reason string, sufficient *bool) *unstructured.Unstructured {
 	eao := &unstructured.Unstructured{}
 	eao.SetGroupVersionKind(testEAOGVK)
@@ -92,6 +109,14 @@ func testEAO(action, reason string, sufficient *bool) *unstructured.Unstructured
 	if sufficient != nil {
 		_ = unstructured.SetNestedField(eao.Object, *sufficient, "status", "energyMetrics", "sufficient")
 	}
+	return eao
+}
+
+// heldEAO is a Scheduled EAO with no energy now whose slot starts at slotStart: a Hold while it's ahead.
+func heldEAO(reason string, slotStart time.Time) *unstructured.Unstructured {
+	eao := testEAO("Scheduled", reason, new(false))
+	_ = unstructured.SetNestedField(eao.Object, slotStart.UTC().Format(time.RFC3339),
+		"status", "decision", "scheduledSlot", "slotStart")
 	return eao
 }
 
@@ -128,12 +153,12 @@ func newTestTriggerEvaluator(t *testing.T, objs ...client.Object) *TriggerEvalua
 
 	metricsClient := metricsfake.NewSimpleClientset() //nolint:staticcheck // see pressure_test.go
 	pressure := NewNodePressureEvaluator(c, metricsClient, 0.90)
-	return NewTriggerEvaluator(c, testEAOGVK, pressure)
+	return NewTriggerEvaluator(c, placementserver.NewEAOSettings(testEAOGVK), pressure, DefaultMinPendingPodAge)
 }
 
-func TestTriggerEvaluator_EnergyInsufficient(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
-	eao := testEAO("DeployImmediately", "", new(false))
+func TestTriggerEvaluator_EnergyHold(t *testing.T) {
+	profile := testEnergyTriggerProfile()
+	eao := heldEAO("optional: scheduled for a later slot", time.Now().Add(time.Hour))
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao)
 
 	matched, result, err := evaluator.Evaluate(context.Background(), profile)
@@ -143,16 +168,16 @@ func TestTriggerEvaluator_EnergyInsufficient(t *testing.T) {
 	if !matched || result.Condition != TriggerEnergyThreshold {
 		t.Fatalf("matched=%v condition=%q, want true/%q", matched, result.Condition, TriggerEnergyThreshold)
 	}
-	if result.Reason == "" {
-		t.Error("expected non-empty reason")
+	if !strings.Contains(result.Reason, "optional: scheduled for a later slot; held until ") {
+		t.Errorf("reason = %q, want the EAO's reason and when the hold ends", result.Reason)
 	}
 	if result.BypassAction != "" {
-		t.Errorf("BypassAction = %q, want empty — insufficient energy is a genuine problem signal, needs AI", result.BypassAction)
+		t.Errorf("BypassAction = %q, want empty — a hold is a genuine problem signal, needs AI", result.BypassAction)
 	}
 }
 
 func TestTriggerEvaluator_EnergyDelayed(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	eao := testEAO("Delayed", "waiting for cheaper slot", nil)
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao)
 
@@ -168,10 +193,67 @@ func TestTriggerEvaluator_EnergyDelayed(t *testing.T) {
 	}
 }
 
+func TestTriggerEvaluator_EnergyVerdicts(t *testing.T) {
+	pending := func() *corev1.Pod { return energyHeldPod("app-a-pending") }
+	cases := []struct {
+		name        string
+		eao         *unstructured.Unstructured
+		holdActions []string // nil keeps the default mapping
+		wantMatch   bool
+		wantBypass  string
+	}{
+		{name: "slot ahead: the pending pod is not retried early",
+			eao: heldEAO("", time.Now().Add(time.Hour)), wantMatch: true},
+		{name: "slot started: the pending pod is retried",
+			eao: heldEAO("", time.Now().Add(-time.Minute)), wantMatch: true, wantBypass: ActionRetryPendingSchedule},
+		{name: "Waiting is an EAO failure, not an energy signal",
+			eao: testEAO("Waiting", "eao failed", new(false))},
+		{name: "DeployImmediately runs even when sufficient is false",
+			eao: testEAO("DeployImmediately", "", new(false)), wantMatch: true, wantBypass: ActionRetryPendingSchedule},
+		{name: "a renamed hold action is a setting change",
+			eao: testEAO("Paused", "", nil), holdActions: []string{"Paused"}, wantMatch: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			evaluator := newTestTriggerEvaluator(t, testDeployment(), tc.eao, pending())
+			if tc.holdActions != nil {
+				evaluator.eaoSettings.VerdictConfig.HoldActions = tc.holdActions
+			}
+			matched, result, err := evaluator.Evaluate(context.Background(), testEnergyTriggerProfile())
+			if err != nil {
+				t.Fatalf("Evaluate: %v", err)
+			}
+			if matched != tc.wantMatch || result.BypassAction != tc.wantBypass {
+				t.Errorf("matched=%v bypass=%q, want %v/%q", matched, result.BypassAction, tc.wantMatch, tc.wantBypass)
+			}
+		})
+	}
+}
+
+func TestTriggerEvaluator_EnergyAwarenessOffNoMatch(t *testing.T) {
+	cases := map[string]*unstructured.Unstructured{
+		"hold":                  heldEAO("", time.Now().Add(time.Hour)),
+		"run now with held pod": testEAO("DeployImmediately", "", new(true)),
+	}
+	for name, eao := range cases {
+		t.Run(name, func(t *testing.T) {
+			evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, energyHeldPod("app-a-pending"))
+
+			matched, _, err := evaluator.Evaluate(context.Background(), testProfileWithConditions(TriggerEnergyThreshold))
+			if err != nil {
+				t.Fatalf("Evaluate: %v", err)
+			}
+			if matched {
+				t.Error("matched = true, want false — energy awareness is off")
+			}
+		})
+	}
+}
+
 func TestTriggerEvaluator_EnergyWindowReachedWithPendingPod(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	eao := testEAO("DeployImmediately", "", new(true))
-	pending := testPod("app-a-pending", "", corev1.PodPending)
+	pending := energyHeldPod("app-a-pending")
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, pending)
 
 	matched, result, err := evaluator.Evaluate(context.Background(), profile)
@@ -190,18 +272,11 @@ func TestTriggerEvaluator_EnergyWindowReachedWithPendingPod(t *testing.T) {
 	}
 }
 
-// TestTriggerEvaluator_FreshPendingPodNotYetRetryEligible covers the fix for
-// a live-observed regression: once Reconcile stopped gating the
-// RetryPendingSchedule bypass on cooldown, a retry's own deletion produced a
-// brand-new replacement pod that was itself briefly Pending — which
-// immediately re-matched this same case and retried again before the
-// replacement ever got a real chance to schedule, live-locking in a tight
-// loop (93 transitions observed in ~1-2s). A pod younger than
-// MinPendingPodAge must not be considered retry-eligible yet.
+// A replacement must get a chance to schedule first: without the age floor, retries live-locked in a tight loop.
 func TestTriggerEvaluator_FreshPendingPodNotYetRetryEligible(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	eao := testEAO("DeployImmediately", "", new(true))
-	pending := testPod("app-a-pending", "", corev1.PodPending)
+	pending := energyHeldPod("app-a-pending")
 	pending.CreationTimestamp = metav1.NewTime(time.Now())
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, pending)
 
@@ -210,21 +285,18 @@ func TestTriggerEvaluator_FreshPendingPodNotYetRetryEligible(t *testing.T) {
 		t.Fatalf("Evaluate: %v", err)
 	}
 	if matched {
-		t.Error("matched = true, want false — a pod pending for under MinPendingPodAge should not retry yet")
+		t.Error("matched = true, want false — a pod younger than the minimum age should not retry yet")
 	}
 }
 
 // TestTriggerEvaluator_ScheduledPendingPodNotRetryEligible covers a second
 // live-observed regression: a pod that's Pending but already has a
 // NodeName (scheduled, just hasn't started its container yet — ordinary
-// startup latency, unrelated to the energy gate) was still matching
-// hasPendingPod, but retryPendingSchedule's own selection (retry_enactor.go)
-// requires NodeName == "" and finds nothing — so the bypass fired
-// repeatedly and unproductively (cooldown-exempt) until the pod left
-// Pending on its own. hasPendingPod must require the same "truly
-// unscheduled" criteria retryPendingSchedule actually acts on.
+// startup latency, unrelated to the energy gate) must not match, or the
+// bypass fires repeatedly and unproductively (cooldown-exempt) until the pod
+// leaves Pending on its own.
 func TestTriggerEvaluator_ScheduledPendingPodNotRetryEligible(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	eao := testEAO("DeployImmediately", "", new(true))
 	pending := testPod("app-a-pending", "node-a", corev1.PodPending)
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, pending)
@@ -238,8 +310,31 @@ func TestTriggerEvaluator_ScheduledPendingPodNotRetryEligible(t *testing.T) {
 	}
 }
 
+// A pod the gate didn't hold is left to kube-scheduler: deleting it would only loop, as its replacement stays stuck too.
+func TestTriggerEvaluator_PodNotHeldByGateNotRetried(t *testing.T) {
+	cases := map[string]*corev1.Pod{
+		"stuck on resources":   unschedulablePod("app-a-pending", "0/3 nodes are available: 3 Insufficient cpu."),
+		"not tried yet":        testPod("app-a-pending", "", corev1.PodPending),
+		"mentions energy only": unschedulablePod("app-a-pending", "0/3 nodes are available: 3 low energy label."),
+	}
+	for name, pod := range cases {
+		t.Run(name, func(t *testing.T) {
+			eao := testEAO("DeployImmediately", "", new(true))
+			evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, pod)
+
+			matched, _, err := evaluator.Evaluate(context.Background(), testEnergyTriggerProfile())
+			if err != nil {
+				t.Fatalf("Evaluate: %v", err)
+			}
+			if matched {
+				t.Error("matched = true, want false — only a pod the gate held is retried")
+			}
+		})
+	}
+}
+
 func TestTriggerEvaluator_EnergyOKNoPendingPod(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	eao := testEAO("DeployImmediately", "", new(true))
 	running := testPod("app-a-1", "node-a", corev1.PodRunning)
 	evaluator := newTestTriggerEvaluator(t, testDeployment(), eao, running)
@@ -254,7 +349,7 @@ func TestTriggerEvaluator_EnergyOKNoPendingPod(t *testing.T) {
 }
 
 func TestTriggerEvaluator_EAOUnavailableSoftFails(t *testing.T) {
-	profile := testProfileWithConditions(TriggerEnergyThreshold)
+	profile := testEnergyTriggerProfile()
 	evaluator := newTestTriggerEvaluator(t, testDeployment()) // no EAO seeded
 
 	matched, _, err := evaluator.Evaluate(context.Background(), profile)
@@ -291,6 +386,40 @@ func TestTriggerEvaluator_NodeFailure(t *testing.T) {
 	}
 }
 
+func TestTriggerEvaluator_NodeFailureIgnoresTerminatingPod(t *testing.T) {
+	profile := testProfileWithConditions(TriggerNodeFailure)
+	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
+	pod.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	pod.Finalizers = []string{"test/keep"} // the fake client needs one to hold a deleting object
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeReady, Status: corev1.ConditionUnknown},
+			},
+		},
+	}
+	evaluator := newTestTriggerEvaluator(t, testDeployment(), pod, node)
+
+	matched, _, err := evaluator.Evaluate(context.Background(), profile)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if matched {
+		t.Error("matched = true, want false: the only pod on the dead node is already being deleted")
+	}
+}
+
+// notReadySince is a node that went NotReady at since.
+func notReadySince(name string, since time.Time) *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+			Type: corev1.NodeReady, Status: corev1.ConditionUnknown, LastTransitionTime: metav1.NewTime(since),
+		}}},
+	}
+}
+
 func TestTriggerEvaluator_NodeHealthyNoMatch(t *testing.T) {
 	profile := testProfileWithConditions(TriggerNodeFailure)
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
@@ -313,16 +442,16 @@ func TestTriggerEvaluator_NodeHealthyNoMatch(t *testing.T) {
 	}
 }
 
-func TestTriggerEvaluator_Scheduled(t *testing.T) {
-	profile := testProfileWithConditions(TriggerScheduled)
+func TestTriggerEvaluator_PeriodicReview(t *testing.T) {
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	evaluator := newTestTriggerEvaluator(t, testDeployment())
 
 	matched, result, err := evaluator.Evaluate(context.Background(), profile)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if !matched || result.Condition != TriggerScheduled {
-		t.Fatalf("matched=%v condition=%q, want true/%q", matched, result.Condition, TriggerScheduled)
+	if !matched || result.Condition != TriggerPeriodicReview {
+		t.Fatalf("matched=%v condition=%q, want true/%q", matched, result.Condition, TriggerPeriodicReview)
 	}
 }
 
@@ -340,9 +469,9 @@ func TestTriggerEvaluator_NoConditionsDeclaredNoMatch(t *testing.T) {
 }
 
 func TestTriggerEvaluator_FirstMatchWins(t *testing.T) {
-	// NodeFailure declared before Scheduled; NodeFailure doesn't match
-	// (node healthy) so Scheduled (always true) should be the one returned.
-	profile := testProfileWithConditions(TriggerNodeFailure, TriggerScheduled)
+	// NodeFailure declared before PeriodicReview; NodeFailure doesn't match
+	// (node healthy) so PeriodicReview (always true) should be the one returned.
+	profile := testProfileWithConditions(TriggerNodeFailure, TriggerPeriodicReview)
 	pod := testPod("app-a-1", "node-a", corev1.PodRunning)
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
@@ -358,8 +487,8 @@ func TestTriggerEvaluator_FirstMatchWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if !matched || result.Condition != TriggerScheduled {
-		t.Fatalf("matched=%v condition=%q, want true/%q (NodeFailure shouldn't match, Scheduled should)",
-			matched, result.Condition, TriggerScheduled)
+	if !matched || result.Condition != TriggerPeriodicReview {
+		t.Fatalf("matched=%v condition=%q, want true/%q (NodeFailure shouldn't match, PeriodicReview should)",
+			matched, result.Condition, TriggerPeriodicReview)
 	}
 }

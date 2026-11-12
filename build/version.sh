@@ -11,7 +11,7 @@
 #   2. If none exists yet, this is the first-ever release: print v1.0.0
 #      directly, with no bump applied.
 #   3. Otherwise, scan commit messages since that tag for Conventional Commits:
-#        "BREAKING CHANGE" or "!:"  -> major bump
+#        "BREAKING" or "!:"  -> major bump
 #        "feat:"                   -> minor bump
 #        anything else (fix:, chore:, plain messages, ...) -> patch bump
 #   4. Print the resulting vX.Y.Z.
@@ -33,7 +33,7 @@ RANGE="${LAST_TAG}..${SHA}"
 COMMITS="$(git log "$RANGE" --pretty=%B 2>/dev/null || true)"
 
 BUMP="patch"
-if echo "$COMMITS" | grep -qE 'BREAKING CHANGE|^[a-zA-Z]+(\([^)]*\))?!:'; then
+if echo "$COMMITS" | grep -qE 'BREAKING|^[a-zA-Z]+(\([^)]*\))?!:'; then
   BUMP="major"
 elif echo "$COMMITS" | grep -qE '^feat(\([^)]*\))?:'; then
   BUMP="minor"

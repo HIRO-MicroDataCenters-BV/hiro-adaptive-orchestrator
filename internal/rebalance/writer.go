@@ -54,6 +54,9 @@ type TransitionOptions struct {
 	// improvement score, dry-run marker).
 	Details string
 
+	// Trigger is the condition that started the cycle; read only when to == StateTriggered.
+	Trigger orchestrationv1alpha1.TriggerCondition
+
 	// Outcome is required whenever to == StateWatching — it is how the
 	// cycle that just ended is recorded in history. Ignored on
 	// every other transition.
@@ -65,6 +68,9 @@ type TransitionOptions struct {
 
 	// Reason is the history code for a terminal transition; empty records ReasonOther.
 	Reason HistoryReason
+
+	// DecidedBy is who answered the decision request; empty when no agent was asked.
+	DecidedBy string
 
 	// Change carries the facts of what the cycle changed (Move/AdjustReplicas/AdjustResources
 	// fields); only those fields are read, the writer fills the rest of the history entry.
@@ -109,6 +115,30 @@ func NewStateWriter(c client.Client, reader client.Reader, recorder record.Event
 // HistoryConfig returns the effective history bounds, for building request summaries.
 func (w *StateWriter) HistoryConfig() HistoryConfig {
 	return w.history
+}
+
+// SetUndeclaredAutoscaler records the autoscaler check; an empty message means none is undeclared.
+func (w *StateWriter) SetUndeclaredAutoscaler(ctx context.Context, key types.NamespacedName, message string) error {
+	status, reason := metav1.ConditionFalse, "NoUndeclaredAutoscaler"
+	if message != "" {
+		status, reason = metav1.ConditionTrue, "UndeclaredAutoscaler"
+	}
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		profile := &orchestrationv1alpha1.OrchestrationProfile{}
+		if err := w.reader.Get(ctx, key, profile); err != nil {
+			return fmt.Errorf("rebalance writer: fetching profile %s: %w", key.Name, err)
+		}
+		changed := apimeta.SetStatusCondition(&profile.Status.Conditions, metav1.Condition{
+			Type:    orchestrationv1alpha1.ConditionUndeclaredAutoscaler,
+			Status:  status,
+			Reason:  reason,
+			Message: message,
+		})
+		if !changed {
+			return nil
+		}
+		return w.client.Status().Update(ctx, profile)
+	})
 }
 
 // Transition moves the OrchestrationProfile identified by key from its
@@ -158,6 +188,7 @@ func (w *StateWriter) Transition(
 			rs.StartedAt = now
 			rs.Action = ""
 			rs.Details = ""
+			rs.Trigger = opts.Trigger
 		}
 
 		rs.State = to
@@ -215,9 +246,11 @@ func (w *StateWriter) Transition(
 				}
 				entry := opts.Change
 				entry.Action = rs.Action
+				entry.Trigger = rs.Trigger
 				entry.Outcome = effectiveOutcome
 				entry.Reason = string(historyReason)
 				entry.Message = reason
+				entry.DecidedBy = opts.DecidedBy
 				entry.At = now
 				rs.History = recordHistory(rs.History, entry, w.history, now.Time)
 			}

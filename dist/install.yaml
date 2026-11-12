@@ -141,7 +141,7 @@ spec:
                       - MemoryThreshold
                       - EnergyThreshold
                       - NodeFailure
-                      - Scheduled
+                      - PeriodicReview
                       type: string
                     type: array
                 required:
@@ -325,6 +325,10 @@ spec:
                             row this entry stands for; unset means 1.
                           format: int32
                           type: integer
+                        decidedBy:
+                          description: decidedBy is who answered (e.g. mock, rules,
+                            model); empty when no agent was asked.
+                          type: string
                         firstAt:
                           description: firstAt is when the first of the merged decisions
                             ended; at is the latest.
@@ -370,6 +374,16 @@ spec:
                         toReplicas:
                           format: int32
                           type: integer
+                        trigger:
+                          description: trigger is the condition that started the cycle,
+                            so each trigger can read its own tries.
+                          enum:
+                          - CPUThreshold
+                          - MemoryThreshold
+                          - EnergyThreshold
+                          - NodeFailure
+                          - PeriodicReview
+                          type: string
                       required:
                       - action
                       - at
@@ -398,6 +412,16 @@ spec:
                     - Evaluating
                     - Decided
                     - Enacting
+                    type: string
+                  trigger:
+                    description: trigger is the trigger condition that started the
+                      current cycle.
+                    enum:
+                    - CPUThreshold
+                    - MemoryThreshold
+                    - EnergyThreshold
+                    - NodeFailure
+                    - PeriodicReview
                     type: string
                 type: object
               status:
@@ -536,6 +560,13 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - autoscaling.k8s.io
+  resources:
+  - verticalpodautoscalers
+  verbs:
+  - get
+  - list
 - apiGroups:
   - batch
   resources:
@@ -861,6 +892,8 @@ spec:
           value: 2Gi
         - name: REBALANCE_WATCHDOG_STALE_THRESHOLD
           value: 15m
+        - name: REBALANCE_MIN_PENDING_POD_AGE
+          value: 10s
         - name: ENABLE_WEBHOOKS
           value: "false"
         - name: HIRO_SCHEDULER_NAME

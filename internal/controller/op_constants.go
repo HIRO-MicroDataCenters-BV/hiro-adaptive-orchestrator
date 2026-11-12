@@ -90,7 +90,7 @@ var validTriggerConditions = map[orchestrationv1alpha1.TriggerCondition]bool{
 	orchestrationv1alpha1.TriggerConditionMemoryThreshold: true,
 	orchestrationv1alpha1.TriggerConditionEnergyThreshold: true,
 	orchestrationv1alpha1.TriggerConditionNodeFailure:     true,
-	orchestrationv1alpha1.TriggerConditionScheduled:       true,
+	orchestrationv1alpha1.TriggerConditionPeriodicReview:  true,
 }
 
 // supportedAppKinds defines the workload kinds the controller can resolve

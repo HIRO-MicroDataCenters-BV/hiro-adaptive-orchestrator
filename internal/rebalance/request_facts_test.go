@@ -104,7 +104,7 @@ func TestReconciler_SendsRebalanceFactsToAgent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Spec.Rebalancing.ResourcesExternallyManaged = true
 	r, _ := newTestReconcilerWithAgent(t, server.URL, testScalableDeployment(1),
 		testPod("app-a-1", "node-a", corev1.PodRunning), profile)
@@ -114,8 +114,8 @@ func TestReconciler_SendsRebalanceFactsToAgent(t *testing.T) {
 	}
 
 	rc := got.RebalanceContext
-	if rc == nil || rc.Trigger == nil || rc.Trigger.Type != string(TriggerScheduled) {
-		t.Fatalf("rebalanceContext = %+v, want trigger Scheduled", rc)
+	if rc == nil || rc.Trigger == nil || rc.Trigger.Type != string(TriggerPeriodicReview) {
+		t.Fatalf("rebalanceContext = %+v, want trigger PeriodicReview", rc)
 	}
 	if rc.Workload == nil || rc.Workload.Replicas != 1 {
 		t.Errorf("workload = %+v, want replicas 1", rc.Workload)
@@ -135,7 +135,7 @@ func TestReconciler_ResourceDefersWhenResourcesExternallyManaged(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Spec.Rebalancing.ResourcesExternallyManaged = true
 	r, c := newTestReconcilerWithAgent(t, server.URL, testResizableDeployment(true), testRunningPod("app-a-2"), profile)
 

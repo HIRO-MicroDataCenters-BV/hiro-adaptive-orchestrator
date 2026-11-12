@@ -18,63 +18,52 @@ package rebalance
 
 import (
 	"context"
+	"time"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
+	placementserver "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/placement-server"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
 
-// classifyScheduleTimeout decides how an enactor should report a timeout
-// waiting for a scheduling-dependent end-state (a replacement pod scheduled,
-// a target ReadyReplicas count) to appear: outcome Failed (genuinely
-// unexplained — needs investigation) or Deferred (very likely explained by
-// this operator's own energy gate being closed right now, which will
-// self-resolve once it opens). Only meaningful for a timeout that involves
-// real pod scheduling — the energy gate is a scheduler extender, so it can
-// never explain a timeout that doesn't involve the scheduler at all (e.g.
-// an in-place resize, which never goes through scheduling).
-//
-// Checked fresh, right here, rather than reusing any energy snapshot taken
-// earlier in the cycle (e.g. the one sent to the AI during Evaluating) — the
-// gate can flip open/closed well within an enactor's own timeout window, so
-// only a read taken at the moment of timeout is trustworthy.
-//
-// Mirrors CheckEnergyGate's own gating precisely (internal/placement-server/
-// builder.go): checks profile.Spec.Placement.Awareness.Energy first, same as
-// the gate itself does, so a workload the gate would never have blocked in
-// the first place isn't misclassified just because some unrelated EAO
-// happens to exist and happens to be insufficient. Every "can't confirm"
-// case (awareness off, no matching EAO, lookup error, sufficient field not
-// yet populated) falls back to the original Failed classification — this
-// only ever reclassifies toward Deferred on a positive, direct signal, never
-// guesses.
+// classifyScheduleTimeout labels a scheduling timeout Deferred if the energy gate holds right now, else Failed.
 func classifyScheduleTimeout(
 	ctx context.Context,
 	c client.Client,
-	eaoGVK schema.GroupVersionKind,
+	eaoSettings placementserver.EAOSettings,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
 	timeoutReason string,
 ) (orchestrationv1alpha1.RebalanceOutcome, string) {
+	// Read fresh: the gate can flip within the enactor's own timeout.
+	hold := energyGateHold(ctx, c, eaoSettings, profile)
+	if hold == "" {
+		return OutcomeFailed, timeoutReason
+	}
+	return OutcomeDeferred, timeoutReason + " (" + hold + ")"
+}
+
+// energyGateHold says why the energy gate would hold the profile's new pods now, or "" if that can't be confirmed.
+func energyGateHold(
+	ctx context.Context,
+	c client.Client,
+	eaoSettings placementserver.EAOSettings,
+	profile *orchestrationv1alpha1.OrchestrationProfile,
+) string {
+	// Same order as CheckEnergyGate, so a workload the gate never blocks isn't held by an unrelated EAO.
 	if !profile.Spec.Placement.Awareness.Energy {
-		return OutcomeFailed, timeoutReason
+		return ""
 	}
 
-	eao, err := utils.FindEAOForApp(ctx, c, eaoGVK, profile.Spec.ApplicationRef)
+	eao, err := utils.FindEAOForApp(ctx, c, eaoSettings.GVK, profile.Spec.ApplicationRef)
 	if err != nil || eao == nil {
-		return OutcomeFailed, timeoutReason
+		return ""
 	}
 
-	sufficient, found, _ := unstructured.NestedBool(eao.Object, "status", "energyMetrics", "sufficient")
-	if !found || sufficient {
-		return OutcomeFailed, timeoutReason
+	eaoCtx := placementserver.NewEAOContext(eao, eaoSettings.VerdictConfig, time.Now())
+	if eaoCtx.Verdict != placement.EAOVerdictHold {
+		return ""
 	}
-
-	reason, _, _ := unstructured.NestedString(eao.Object, "status", "decision", "reason")
-	if reason == "" {
-		reason = "energy supply reported insufficient"
-	}
-	return OutcomeDeferred, timeoutReason + " (energy gate closed: " + reason + ")"
+	return placementserver.HoldReason(eaoCtx)
 }

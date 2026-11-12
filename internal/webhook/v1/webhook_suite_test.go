@@ -114,7 +114,7 @@ var _ = BeforeSuite(func() {
 	contextBuilder := placementserver.NewDecisionContextBuilder(
 		mgr.GetClient(),
 		".spec.applicationRef.namespacedName",
-		schema.GroupVersionKind{},
+		placementserver.NewEAOSettings(schema.GroupVersionKind{}),
 	)
 	err = SetupPodWebhookWithManager(mgr, contextBuilder, DefaultSchedulerName)
 	Expect(err).NotTo(HaveOccurred())

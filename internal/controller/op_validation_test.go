@@ -209,7 +209,7 @@ var _ = Describe("Profile Validation", func() {
 			Entry("MemoryThreshold", orchestrationv1alpha1.TriggerConditionMemoryThreshold),
 			Entry("EnergyThreshold", orchestrationv1alpha1.TriggerConditionEnergyThreshold),
 			Entry("NodeFailure", orchestrationv1alpha1.TriggerConditionNodeFailure),
-			Entry("Scheduled", orchestrationv1alpha1.TriggerConditionScheduled),
+			Entry("PeriodicReview", orchestrationv1alpha1.TriggerConditionPeriodicReview),
 		)
 	})
 })

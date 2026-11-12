@@ -98,7 +98,7 @@ func TestReconciler_ScaleAboveThresholdReachesEnacted(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	deploy := testScalableDeployment(3) // already reports 3 ready — fake client, no real rollout
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile)
 
@@ -143,7 +143,7 @@ func TestReconciler_ScaleTimeoutWithClosedEnergyGateIsDeferred(t *testing.T) {
 
 	profile := testEnergyAwareProfile()
 	deploy := testScalableDeployment(0) // never reaches 3 ready — fake client, no real rollout
-	eao := testEAO("Waiting", "demo: energy window closed", new(false))
+	eao := heldEAO("demo: energy window closed", time.Now().Add(time.Hour))
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile, eao)
 	r.ScaleActionTimeout = 50 * time.Millisecond
 
@@ -156,7 +156,7 @@ func TestReconciler_ScaleTimeoutWithClosedEnergyGateIsDeferred(t *testing.T) {
 	if len(rs.History) != 1 || rs.History[0].Outcome != OutcomeDeferred {
 		t.Fatalf("history = %+v, want one Deferred-outcome entry", rs.History)
 	}
-	if !strings.Contains(rs.History[0].Message, "energy gate closed") {
+	if !strings.Contains(rs.History[0].Message, "energy gate: ") {
 		t.Errorf("reason = %q, want it to mention the energy gate", rs.History[0].Message)
 	}
 }
@@ -172,9 +172,9 @@ func TestReconciler_ScaleTimeoutWithoutEnergyAwarenessStaysFailed(t *testing.T) 
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled) // Awareness.Energy: false
+	profile := testProfileWithConditions(TriggerPeriodicReview) // Awareness.Energy: false
 	deploy := testScalableDeployment(0)
-	eao := testEAO("Waiting", "demo: energy window closed", new(false))
+	eao := heldEAO("demo: energy window closed", time.Now().Add(time.Hour))
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile, eao)
 	r.ScaleActionTimeout = 50 * time.Millisecond
 
@@ -224,7 +224,7 @@ func TestReconciler_ScaleBelowThresholdRejected(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	deploy := testScalableDeployment(1)
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile)
 
@@ -245,7 +245,7 @@ func TestReconciler_ScaleMalformedTargetReplicasFails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	deploy := testScalableDeployment(1)
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile)
 
@@ -269,7 +269,7 @@ func TestReconciler_ScaleOutsideDefaultBoundsRejected(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	deploy := testScalableDeployment(1)
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile)
 
@@ -296,7 +296,7 @@ func TestReconciler_ScaleHonoursHPABounds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	deploy := testScalableDeployment(15)
 	hpa := testHPA("app-a-hpa", 2, 20)
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, hpa, profile)
@@ -321,7 +321,7 @@ func TestReconciler_ScaleDefersWhenReplicasExternallyManaged(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Spec.Rebalancing.ReplicasExternallyManaged = true
 	deploy := testScalableDeployment(1)
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile)
@@ -357,7 +357,7 @@ func TestReconciler_ScaleDryRunSkipsSideEffects(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := testProfileWithConditions(TriggerScheduled)
+	profile := testProfileWithConditions(TriggerPeriodicReview)
 	profile.Spec.Rebalancing.DryRun = true
 	deploy := testScalableDeployment(1)
 	r, c := newTestReconcilerWithAgent(t, server.URL, deploy, profile)

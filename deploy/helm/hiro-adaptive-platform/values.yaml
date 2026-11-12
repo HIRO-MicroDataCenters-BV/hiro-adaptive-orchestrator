@@ -73,9 +73,8 @@ hiro-operator:
   ## ENABLE_WEBHOOKS and HIRO_SCHEDULER_NAME are not here: they are derived
   ## from webhook.enable and scheduler.plugin.schedulerName.
   config:
-    # Defaults to the bundled mock agent (mockAgent below). Not
-    # auto-derived from mockAgent.serviceName/.port — values.yaml can't
-    # template itself. Update this by hand if you change those.
+    # Used only when neither mockAgent nor aiDecisionService is enabled (an external agent);
+    # otherwise the chart sets it from the enabled one's serviceName/port.
     DECISION_AGENT_URL: http://mock-decision-agent:8080
     DECISION_AGENT_PATH: /api/v1/agent/placement/decision
     # PlacementServer — this operator's scoring endpoint, called by the
@@ -97,6 +96,10 @@ hiro-operator:
     EAO_GROUP: eas.hiro.io
     EAO_VERSION: v1
     EAO_KIND: EnergyAwareOrchestration
+    # Which EAO decision.action values mean run now / hold (comma-separated);
+    # anything else (e.g. Waiting, an EAO failure) is an Unknown verdict.
+    EAO_RUN_NOW_ACTIONS: DeployImmediately
+    EAO_HOLD_ACTIONS: Scheduled,Delayed
     # Scheduler extender HTTP paths.
     EXTENDER_FILTER_PATH: /extender/filter
     EXTENDER_PRIORITIZE_PATH: /extender/prioritize
@@ -112,6 +115,7 @@ hiro-operator:
     REBALANCE_DETECTION_INTERVAL: 30s
     REBALANCE_NODE_PRESSURE_THRESHOLD: "0.90"
     REBALANCE_WATCHDOG_STALE_THRESHOLD: 15m
+    REBALANCE_MIN_PENDING_POD_AGE: 10s
 
     # AI call: how long to wait, and the minimum improvement worth acting on.
     REBALANCE_DECISION_TIMEOUT: 5s
@@ -287,7 +291,7 @@ observability:
 ## ║  MOCK AGENT · demo decision agent                                   ║
 ## ╚═════════════════════════════════════════════════════════════════════╝
 ## Mock decision agent — opt-in demo/eval only. Off by default; when on,
-## hiro-operator's DECISION_AGENT_URL already points at it by default.
+## the operator is pointed at it automatically.
 mockAgent:
   enable: false
   serviceName: mock-decision-agent
@@ -303,5 +307,51 @@ mockAgent:
       cpu: 200m
       memory: 128Mi
 
-## Sample profiles and nginx apps are not part of this chart: other repos create the
-## same objects. Apply them after install with `kubectl apply -k config/samples/`.
+## ╔═════════════════════════════════════════════════════════════════════╗
+## ║  AI DECISION SERVICE · actual decision agent                        ║
+## ╚═════════════════════════════════════════════════════════════════════╝
+## AI Decision Service — replaces the mock agent when enabled. Off by default.
+## The operator is pointed at it automatically.
+
+aiDecisionService:
+  enable: false
+  serviceName: ai-decision-service
+  port: 8080
+  image:
+    repository: ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/ai-decision-service
+    tag: v0.1.0
+    pullPolicy: IfNotPresent
+  # Extra AI_DECISION_SERVICE_* settings; the port is set from `port` above.
+  config:
+    # Log level: debug, info, warn or error. debug adds the full request body.
+    AI_DECISION_SERVICE_LOG_LEVEL: debug
+
+    AI_DECISION_SERVICE_READ_TIMEOUT: 5s
+    AI_DECISION_SERVICE_MAX_BODY_BYTES: "5242880"
+
+    # Scorer settings: tune how the AI decision service evaluates nodes and zones.
+    AI_DECISION_SERVICE_SCORER_PACKED_MAX_UTIL: "0.85"
+    AI_DECISION_SERVICE_SCORER_IMBALANCE_PENALTY: "0.2"
+    AI_DECISION_SERVICE_SCORER_SPREAD_ZONE_WEIGHT: "0.6"
+    AI_DECISION_SERVICE_SCORER_SPREAD_NODE_WEIGHT: "0.3"
+    AI_DECISION_SERVICE_SCORER_SPREAD_BALANCED_WEIGHT: "0.1"
+    AI_DECISION_SERVICE_SCORER_ZONE_LABEL: topology.kubernetes.io/zone
+    AI_DECISION_SERVICE_SCORER_UNKNOWN_SCORE: "50"
+
+    # Model for placement: provider "" = off (the scorer answers), "kev" = Kev's System One API.
+    AI_DECISION_SERVICE_MODEL_PROVIDER: "kev"
+    AI_DECISION_SERVICE_MODEL_BASE_URL: http://host.docker.internal:8009
+    AI_DECISION_SERVICE_MODEL_PATH: /v1/systemone
+    AI_DECISION_SERVICE_MODEL_NAME: kev-latest
+    AI_DECISION_SERVICE_MODEL_TIMEOUT: 5000ms
+
+    # Rebalance rules: EAO data older than this is ignored.
+    AI_DECISION_SERVICE_REBALANCE_EAO_STALE_AFTER: 5m
+    AI_DECISION_SERVICE_REBALANCE_FLIP_MOVE_ACTION_WINDOW: 30m
+    # Node conditions that mark a Ready node at risk (comma-separated).
+    AI_DECISION_SERVICE_REBALANCE_RISK_CONDITIONS: MemoryPressure,DiskPressure,PIDPressure,NetworkUnavailable
+
+  resources:
+    requests: { cpu: 50m, memory: 32Mi }
+    limits:   { cpu: 200m, memory: 128Mi }
+

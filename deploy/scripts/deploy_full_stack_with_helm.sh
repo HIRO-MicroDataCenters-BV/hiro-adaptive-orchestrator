@@ -3,7 +3,7 @@
 #
 # Local verification for deploy/helm/hiro-adaptive-platform: regenerates
 # manifests/code (same as deploy/scripts/deploy_operator.sh), creates (or reuses) a
-# Kind cluster, builds the operator + scheduler-plugin images, loads them
+# Kind cluster, builds the operator, scheduler-plugin and AI Decision Service images, loads them
 # straight into the cluster (no registry needed — fine for local testing,
 # see deploy/helm/hiro-adaptive-platform/README.md), deploys the full stack, and
 # checks it came up healthy.
@@ -30,7 +30,12 @@
 #                                    to call the PlacementServer over HTTP; no
 #                                    scheduler pod and no webhook.
 #                         none     — operator only.
-#   USE_MOCK_AGENT        Bundled mock decision agent         (default: true)
+#   USE_MOCK_AGENT        Bundled mock decision agent         (default: false)
+#   USE_AI_DECISION_SERVICE
+#                         Bundled AI Decision Service         (default: true)
+#                         Set only one of the two to true; the chart points the
+#                         operator at it. Both false: an external agent at
+#                         hiro-operator.config.DECISION_AGENT_URL.
 #   DEPLOY_SAMPLES        nginx + OrchestrationProfile samples from config/samples/,
 #                         applied with kubectl after Helm, never Helm-owned (default: true)
 #   DEPLOY_PROMETHEUS     Bundle kube-prometheus-stack and turn on both
@@ -88,7 +93,16 @@ SCHED_REPO="hiro-scheduler"
 SCHED_TAG="verify-k8s${SCHED_K8S_VERSION}"
 SCHED_NAME=${SCHED_NAME:-hiro-scheduler}
 
-USE_MOCK_AGENT=${USE_MOCK_AGENT:-true}
+MOCK_AGENT_SERVICE_NAME=${MOCK_AGENT_SERVICE_NAME:-mock-decision-agent}
+MOCK_AGENT_PORT=${MOCK_AGENT_PORT:-8080}
+
+AI_DS_REPO="ai-decision-service"
+AI_DS_TAG="v0.1.0"
+AI_DS_SERVICE_NAME=${AI_DS_SERVICE_NAME:-ai-decision-service}
+AI_DS_PORT=${AI_DS_PORT:-8080}
+
+USE_MOCK_AGENT=${USE_MOCK_AGENT:-false}
+USE_AI_DECISION_SERVICE=${USE_AI_DECISION_SERVICE:-true}
 DEPLOY_SAMPLES=${DEPLOY_SAMPLES:-true}
 DEPLOY_PROMETHEUS=${DEPLOY_PROMETHEUS:-false}
 OTLP_ENDPOINT=${OTLP_ENDPOINT:-}
@@ -102,6 +116,7 @@ PLACEMENT_SERVER_LABEL_SELECTOR="app.kubernetes.io/component=placement-server"
 SCHEDULER_METRICS_LABEL_SELECTOR="app.kubernetes.io/component=scheduler-metrics"
 OPERATOR_LABEL_SELECTOR="control-plane=controller-manager"
 SCHEDULER_LABEL_SELECTOR="app.kubernetes.io/name=hiro-scheduler"
+AI_DS_LABEL_SELECTOR="app.kubernetes.io/name=ai-decision-service"
 
 # Both are sent to Helm below, so these are the single source of truth rather
 # than a guess at what the chart defaulted to.
@@ -154,14 +169,15 @@ print_config() {
   echo " hiro-adaptive-platform — Kind verification ($ACTION)"
   echo "========================================================"
   echo "Kind cluster        : $KIND_CLUSTER_NAME"
-  echo "Namespace            : $HELM_NAMESPACE"
-  echo "Helm release         : $HELM_PLATFORM_RELEASE"
-  echo "Operator image       : ${OPERATOR_REPO}:${OPERATOR_TAG}"
-  echo "Scheduler mode       : $SCHEDULER_MODE"
+  echo "Namespace           : $HELM_NAMESPACE"
+  echo "Helm release        : $HELM_PLATFORM_RELEASE"
+  echo "Operator image      : ${OPERATOR_REPO}:${OPERATOR_TAG}"
+  echo "Scheduler mode      : $SCHEDULER_MODE"
   if [ "$SCHEDULER_MODE" = "plugin" ]; then
     echo "Scheduler image      : ${SCHED_REPO}:${SCHED_TAG}"
   fi
   echo "Mock agent           : $USE_MOCK_AGENT"
+  echo "AI Decision Service  : $USE_AI_DECISION_SERVICE"
   echo "Samples              : $DEPLOY_SAMPLES"
   echo "Prometheus           : $DEPLOY_PROMETHEUS"
   echo "Tracing endpoint     : ${OTLP_ENDPOINT:-<none>}"
@@ -178,6 +194,11 @@ check_prerequisites() {
     command -v "$cmd" >/dev/null || { echo "ERROR: '$cmd' not found in PATH." >&2; exit 1; }
     echo "  [ok] $cmd -> $(command -v "$cmd")"
   done
+  # The chart fails on this too; checking here saves the image builds.
+  if [ "$USE_MOCK_AGENT" = "true" ] && [ "$USE_AI_DECISION_SERVICE" = "true" ]; then
+    echo "ERROR: set only one of USE_MOCK_AGENT and USE_AI_DECISION_SERVICE to true." >&2
+    exit 1
+  fi
 }
 
 # Same as deploy/scripts/deploy_operator.sh's generate_code_and_manifests(), minus
@@ -245,6 +266,16 @@ ensure_kind_cluster() {
   echo "  Kubeconfig: $KIND_KUBECONFIG_PATH"
 }
 
+build_ai_decision_service_image() {
+  if [ "$USE_AI_DECISION_SERVICE" != "true" ]; then
+    step "Skipping AI Decision Service image (USE_AI_DECISION_SERVICE=false)"
+    return
+  fi
+  step "Building AI Decision Service image: ${AI_DS_REPO}:${AI_DS_TAG}"
+  make -C "$REPO_ROOT" docker-build-ai-decision-service \
+    AI_DS_IMG="$AI_DS_REPO" AI_DS_VERSION="$AI_DS_TAG"
+}
+
 build_operator_image() {
   step "Building operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
   make -C "$REPO_ROOT" docker-build IMG="${OPERATOR_REPO}:${OPERATOR_TAG}"
@@ -268,6 +299,9 @@ load_images_into_kind() {
   if [ "$SCHEDULER_MODE" = "plugin" ]; then
     kind load docker-image "${SCHED_REPO}:${SCHED_TAG}" --name "$KIND_CLUSTER_NAME"
   fi
+  if [ "$USE_AI_DECISION_SERVICE" = "true" ]; then
+    kind load docker-image "${AI_DS_REPO}:${AI_DS_TAG}" --name "$KIND_CLUSTER_NAME"
+  fi
 }
 
 # One install: operator, scheduler (plugin or extender), webhook and the rest
@@ -278,15 +312,14 @@ load_images_into_kind() {
 deploy_stack() {
   step "Deploying deploy/helm/hiro-adaptive-platform (single helm run)"
 
-  local operator_args scheduler_args="" tracing_args="" reader_args=""
+  local operator_args scheduler_args="" tracing_args="" reader_args="" mock_agent_args="" ai_ds_args=""
   operator_args="\
       --set hiro-operator.manager.image.repository=${OPERATOR_REPO} \
       --set hiro-operator.manager.image.tag=${OPERATOR_TAG} \
       --set hiro-operator.manager.image.pullPolicy=IfNotPresent \
       --set hiro-operator.metrics.port=${OPERATOR_METRICS_PORT} \
       --set prerequisites.prometheus.enable=${DEPLOY_PROMETHEUS} \
-      --set hiro-operator.prometheus.enabled=${DEPLOY_PROMETHEUS} \
-      --set mockAgent.enable=${USE_MOCK_AGENT}"
+      --set hiro-operator.prometheus.enabled=${DEPLOY_PROMETHEUS}"
 
   # Settings are keys of one map, so a single --set changes one of them.
   if [ -n "$OTLP_ENDPOINT" ]; then
@@ -315,6 +348,26 @@ deploy_stack() {
       ;;
   esac
 
+  if [ "$USE_MOCK_AGENT" = "true" ]; then
+    mock_agent_args="--set mockAgent.enable=true \
+      --set mockAgent.serviceName=${MOCK_AGENT_SERVICE_NAME} \
+      --set mockAgent.port=${MOCK_AGENT_PORT}"
+  else
+    mock_agent_args="--set mockAgent.enable=false"
+  fi
+
+  if [ "$USE_AI_DECISION_SERVICE" = "true" ]; then
+    ai_ds_args="\
+      --set aiDecisionService.enable=true \
+      --set aiDecisionService.image.repository=${AI_DS_REPO} \
+      --set aiDecisionService.image.tag=${AI_DS_TAG} \
+      --set aiDecisionService.image.pullPolicy=IfNotPresent \
+      --set aiDecisionService.serviceName=${AI_DS_SERVICE_NAME} \
+      --set aiDecisionService.port=${AI_DS_PORT}"
+  else
+    ai_ds_args="--set aiDecisionService.enable=false"
+  fi
+
   # {a,b} replaces the whole list, where [0]= would merge into index 0 and
   # leave any other entries behind. Quote-free on purpose: HELM_EXTRA_ARGS is
   # re-parsed by the shell in the Makefile recipe, which would eat the quotes
@@ -328,15 +381,15 @@ deploy_stack() {
   make -C "$REPO_ROOT" helm-platform-deploy \
     HELM_NAMESPACE="$HELM_NAMESPACE" \
     HELM_PLATFORM_RELEASE="$HELM_PLATFORM_RELEASE" \
-    HELM_EXTRA_ARGS="${operator_args} ${scheduler_args} ${tracing_args} ${reader_args}"
+    HELM_EXTRA_ARGS="${operator_args} ${scheduler_args} ${tracing_args} ${reader_args} ${mock_agent_args} ${ai_ds_args}"
 }
 
 # Image tags are fixed and pullPolicy is IfNotPresent, so helm sees no spec change on a
 # rebuild and the old pods would keep running the old image. Restart to pick up the new build.
-restart_operator_and_scheduler() {
-  step "Restarting operator and scheduler to run the images just built"
+restart_built_images() {
+  step "Restarting operator, scheduler and AI Decision Service to run the images just built"
   local sel deploy
-  for sel in "$OPERATOR_LABEL_SELECTOR" "$SCHEDULER_LABEL_SELECTOR"; do
+  for sel in "$OPERATOR_LABEL_SELECTOR" "$SCHEDULER_LABEL_SELECTOR" "$AI_DS_LABEL_SELECTOR"; do
     for deploy in $(kubectl -n "$HELM_NAMESPACE" get deploy \
       -l "$sel,app.kubernetes.io/instance=$HELM_PLATFORM_RELEASE" -o name); do
       kubectl -n "$HELM_NAMESPACE" rollout restart "$deploy"
@@ -463,7 +516,16 @@ print_summary() {
   if [ "$USE_MOCK_AGENT" = "true" ]; then
     echo -e "\033[32m    Mock agent        : deployed  (mock-decision-agent.$HELM_NAMESPACE)\033[0m"
   else
-    echo -e "\033[33m    Mock agent        : not deployed  (using real agent)\033[0m"
+    echo -e "\033[33m    Mock agent        : not deployed\033[0m"
+  fi
+  if [ "$USE_AI_DECISION_SERVICE" = "true" ]; then
+    echo -e "\033[32m    AI Decision Service: deployed  (service/$AI_DS_SERVICE_NAME:$AI_DS_PORT)\033[0m"
+    echo -e "\033[32m      └─ decision log: kubectl logs -n $HELM_NAMESPACE deploy/$AI_DS_SERVICE_NAME -f\033[0m"
+  else
+    echo -e "\033[33m    AI Decision Service: not deployed\033[0m"
+  fi
+  if [ "$USE_MOCK_AGENT" != "true" ] && [ "$USE_AI_DECISION_SERVICE" != "true" ]; then
+    echo -e "\033[33m    Decision agent    : external  (hiro-operator.config.DECISION_AGENT_URL)\033[0m"
   fi
   if [ "$DEPLOY_SAMPLES" = "true" ]; then
     echo -e "\033[32m    Samples           : applied with kubectl  (config/samples/)\033[0m"
@@ -507,12 +569,15 @@ print_port_forward_guide() {
   [ -n "$operator_metrics_svc" ] && echo "  pkill -f 'port-forward.*svc/$operator_metrics_svc' || true"
   [ -n "$scheduler_metrics_svc" ] && echo "  pkill -f 'port-forward.*svc/$scheduler_metrics_svc' || true"
   [ "$USE_MOCK_AGENT" = "true" ] && echo "  pkill -f 'port-forward.*svc/mock-decision-agent' || true"
+  [ "$USE_AI_DECISION_SERVICE" = "true" ] && echo "  pkill -f 'port-forward.*svc/$AI_DS_SERVICE_NAME' || true"
   echo ""
   echo "  # 2. Start the port-forwards:"
   [ -n "$placement_svc" ] && echo "  kubectl port-forward -n $HELM_NAMESPACE svc/$placement_svc 18090:8090 &"
   [ -n "$operator_metrics_svc" ] && echo "  kubectl port-forward -n $HELM_NAMESPACE svc/$operator_metrics_svc 18443:${OPERATOR_METRICS_PORT} &"
   [ -n "$scheduler_metrics_svc" ] && echo "  kubectl port-forward -n $HELM_NAMESPACE svc/$scheduler_metrics_svc 20259:${SCHEDULER_METRICS_PORT} &"
   [ "$USE_MOCK_AGENT" = "true" ] && echo "  kubectl port-forward -n $HELM_NAMESPACE svc/mock-decision-agent 18080:8080 &"
+  [ "$USE_AI_DECISION_SERVICE" = "true" ] && \
+    echo "  kubectl port-forward -n $HELM_NAMESPACE svc/$AI_DS_SERVICE_NAME 18080:${AI_DS_PORT} &"
   echo ""
 }
 
@@ -528,6 +593,9 @@ print_access_urls() {
   printf "      %-24s %s\n" "PlacementServer health" "http://localhost:18090/healthz"
   if [ "$USE_MOCK_AGENT" = "true" ]; then
     printf "      %-24s %s\n" "Mock decision agent" "http://localhost:18080"
+  fi
+  if [ "$USE_AI_DECISION_SERVICE" = "true" ]; then
+    printf "      %-24s %s\n" "AI Decision Service" "http://localhost:18080/healthz"
   fi
 
   print_subhead "Metrics — HTTPS, bearer token required"
@@ -638,10 +706,11 @@ run_deploy() {
   ensure_kind_cluster
   build_operator_image
   build_scheduler_image
+  build_ai_decision_service_image
   load_images_into_kind
   resolve_metrics_reader
   deploy_stack
-  restart_operator_and_scheduler
+  restart_built_images
   resolve_placement_server_url
   if [ "$GRANT_OPERATOR_SA" = "true" ]; then
     METRICS_READER="${HELM_NAMESPACE}:$(operator_sa_name)"

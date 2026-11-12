@@ -116,7 +116,7 @@ and none of them report an error:
 | `caller` | What happens without the EAO |
 |---|---|
 | `score` | Energy data is dropped from the AI request |
-| `filter` | The gate allows the pod — and `filter_requests_total` counts it as `allowed="true"`, identical to "energy checked and sufficient" |
+| `filter` | The gate allows the pod — and `filter_requests_total` counts it as `allowed="true"`, identical to "energy checked and the EAO lets it run" |
 | `rebalance` | Energy data is dropped from the rebalance AI request |
 
 `hiro_placement_eao_fetch_total{result="not_found"|"error"}` is the only signal that energy-aware
@@ -131,9 +131,9 @@ placement is running blind. It isn't counted at all when a profile has energy aw
 | `action` | `improvement_score`, `guardrail_rejections_total`, `enactment_*` | `Move`, `AdjustReplicas`, `AdjustResources` |
 | `action` | `rate_limit_exhausted_total` | `Move` — the rate limiter applies to Moves only |
 | `outcome` | `transitions_total` | `Enacted`, `NoOp`, `Rejected`, `Deferred`, `Failed`, `Escalated`, or `""` while non-terminal |
-| `condition` | `trigger_*` | `CPUThreshold`, `MemoryThreshold`, `EnergyThreshold`, `NodeFailure`, `Scheduled` |
+| `condition` | `trigger_*` | `CPUThreshold`, `MemoryThreshold`, `EnergyThreshold`, `NodeFailure`, `PeriodicReview` |
 | `fired` | `trigger_evaluations_total` | `true`, `false` |
-| `guardrail` | `guardrail_rejections_total` | `threshold`, `bounds` |
+| `guardrail` | `guardrail_rejections_total` | `threshold`, `bounds`, `target`, `energy` |
 | `stage` | `enactment_failures_total` | `evict`, `patch`, `wait_replacement` |
 | `result` | `ai_requests_total` | `success`, `context_error`, `ai_error` |
 | `result` | `pressure_queries_total` | `success`, `unavailable` |
