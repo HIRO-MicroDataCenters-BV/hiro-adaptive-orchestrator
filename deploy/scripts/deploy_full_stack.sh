@@ -27,6 +27,7 @@
 #   PLACEMENT_SCORE_PATH     decision endpoint path      (default: /api/v1/placement/score)
 #   PLACEMENT_SERVER_HEALTH_PATH  health endpoint path    (default: /healthz)
 #   PLACEMENT_TIMEOUT_SECS    scheduler→server timeout    (default: 8)
+#   PLACEMENT_SERVER_REQUEST_TIMEOUT  one placement request limit (default: 10s; > DECISION_AGENT_TIMEOUT)
 #
 # ─── Operator — Decision Agent ───────────────────────────────────────────────
 #   USE_MOCK_AGENT            true|false                  (default: true)
@@ -34,6 +35,7 @@
 #                             and sets DECISION_AGENT_URL automatically.
 #   DECISION_AGENT_URL        required when USE_MOCK_AGENT=false
 #   DECISION_AGENT_PATH       agent API path              (default: /api/v1/agent/placement/decision)
+#   DECISION_AGENT_TIMEOUT    limit on every agent call   (default: 8s)
 #
 # ─── Operator — Extender paths ───────────────────────────────────────────────
 #   EXTENDER_FILTER_PATH      extender filter path        (default: /extender/filter)
@@ -177,6 +179,7 @@ export PLACEMENT_SCORE_PATH=${PLACEMENT_SCORE_PATH:-/api/v1/placement/score}
 export PLACEMENT_FILTER_PATH=${PLACEMENT_FILTER_PATH:-/api/v1/placement/filter}
 export PLACEMENT_SERVER_HEALTH_PATH=${PLACEMENT_SERVER_HEALTH_PATH:-/healthz}
 export PLACEMENT_TIMEOUT_SECS=${PLACEMENT_TIMEOUT_SECS:-8}
+export PLACEMENT_SERVER_REQUEST_TIMEOUT=${PLACEMENT_SERVER_REQUEST_TIMEOUT:-10s}
 
 # ---------------------------------------------------------------------------
 # Decision Agent
@@ -190,6 +193,7 @@ if [ "$USE_MOCK_AGENT" = "false" ]; then
   export DECISION_AGENT_URL
 fi
 export DECISION_AGENT_PATH=${DECISION_AGENT_PATH:-/api/v1/agent/placement/decision}
+export DECISION_AGENT_TIMEOUT=${DECISION_AGENT_TIMEOUT:-8s}
 
 # ---------------------------------------------------------------------------
 # Extender paths
@@ -351,6 +355,7 @@ print_config() {
   echo "    Decision Path          : $PLACEMENT_SCORE_PATH"
   echo "    Health Path            : $PLACEMENT_SERVER_HEALTH_PATH"
   echo "    Scheduler Timeout (s)  : $PLACEMENT_TIMEOUT_SECS"
+  echo "    Request Timeout        : $PLACEMENT_SERVER_REQUEST_TIMEOUT"
   echo ""
   echo "  ── Decision Agent ────────────────────────────────────────"
   if [ "$USE_MOCK_AGENT" = "true" ]; then
@@ -360,6 +365,7 @@ print_config() {
   echo "    URL                    : $DECISION_AGENT_URL"
   fi
   echo "    Agent Path             : $DECISION_AGENT_PATH"
+  echo "    Agent Timeout          : $DECISION_AGENT_TIMEOUT"
   echo ""
   echo "  ── Extender Paths ────────────────────────────────────────"
   echo "    Filter                 : $EXTENDER_FILTER_PATH"
