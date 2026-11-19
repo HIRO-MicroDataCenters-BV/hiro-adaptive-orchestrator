@@ -2,6 +2,7 @@ package rebalance
 
 import (
 	"testing"
+	"time"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
@@ -27,6 +28,8 @@ func TestValidate(t *testing.T) {
 	resources := orchestrationv1alpha1.RebalanceActionAdjustResources
 	type resp = placement.RebalanceDecisionResponse
 	mv := func(pod, target string) resp { return resp{Action: move, PodName: pod, TargetNode: target} }
+	hold := eao(placement.EAOVerdictHold, time.Minute, nil)
+	underHold := func(r *placement.DecisionRequest) { r.EAOProfile = hold }
 
 	cases := []struct {
 		name  string
@@ -53,8 +56,25 @@ func TestValidate(t *testing.T) {
 			setup: func(r *placement.DecisionRequest) { r.RebalanceContext.PDB = &placement.RebalancePDB{Name: "web"} },
 			want:  "PDB web does not allow disruptions",
 		},
+		{
+			name: "move off a down node skips the gates",
+			resp: mv("p1", "n2"),
+			setup: func(r *placement.DecisionRequest) {
+				r.RebalanceContext.CooldownUntil = at(5 * time.Minute)
+				r.EAOProfile = hold
+				r.NodeStats[0] = stat("n1", "False", true)
+			},
+		},
+		{name: "move under an EAO hold", resp: mv("p1", "n2"), setup: underHold, want: "EAO holds"},
 
 		{name: "replicas", resp: resp{Action: replicas, TargetReplicas: 4}},
+		{
+			name:  "scale up under an EAO hold",
+			resp:  resp{Action: replicas, TargetReplicas: 4},
+			setup: underHold,
+			want:  "EAO holds",
+		},
+		{name: "scale down under an EAO hold", resp: resp{Action: replicas, TargetReplicas: 2}, setup: underHold},
 		{
 			name:  "replicas managed",
 			resp:  resp{Action: replicas, TargetReplicas: 4},
@@ -73,6 +93,12 @@ func TestValidate(t *testing.T) {
 
 		{name: "resources cpu", resp: resp{Action: resources, ContainerName: "app", TargetCPU: "500m"}},
 		{name: "resources memory", resp: resp{Action: resources, ContainerName: "app", TargetMemory: "256Mi"}},
+		{
+			name:  "resources under an EAO hold",
+			resp:  resp{Action: resources, ContainerName: "app", TargetCPU: "500m"},
+			setup: underHold,
+			want:  "EAO holds",
+		},
 		{
 			name:  "resources managed",
 			resp:  resp{Action: resources, ContainerName: "app", TargetCPU: "500m"},
@@ -103,8 +129,8 @@ func TestValidate(t *testing.T) {
 				c.setup(&req)
 			}
 			cfg := DefaultConfig()
-			g := applyGates(req, testNow, cfg)
-			if got := validate(c.resp, req, g, classifyNodes(req, cfg)); !matches(got, c.want) {
+			classes := classifyNodes(req, cfg)
+			if got := validate(c.resp, req, applyGates(req, testNow, cfg, classes), classes); !matches(got, c.want) {
 				t.Errorf("got %q, want %q", got, c.want)
 			}
 		})

@@ -52,7 +52,8 @@ It decides from facts in the request (node conditions, history, PDB, EAO), not f
 1. **Gates** block what isn't safe now:
    - Cooldown blocks every change.
    - Externally managed replicas or resources block that action.
-   - A PDB with no disruptions left, or a fresh EAO `Hold`, blocks Move.
+   - A PDB with no disruptions left blocks Move.
+   - A fresh EAO `Hold` blocks anything that starts new pods (Move, resize, scale-up), since those pods would sit Pending. Scale-down is still allowed.
    - A recent Move blocks taking a pod off the node it filled (unless that node is now at risk), and blocks moving one back to the node it emptied.
 2. **Rule:** a pod on a down node (`Ready` not `True`) moves to the best healthy candidate. Leaving a down node skips the gates; the eviction API still enforces the PDB.
 3. **Validate** checks the answer against the request and the gates. A failed check sends `NoOp` with `decidedBy: fallback`.

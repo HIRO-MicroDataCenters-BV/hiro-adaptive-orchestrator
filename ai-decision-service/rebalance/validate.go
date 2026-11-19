@@ -10,27 +10,24 @@ import (
 
 // validate says why an answer breaks a limit, or "" when it can be sent; it checks every answer.
 func validate(resp placement.RebalanceDecisionResponse, req placement.DecisionRequest,
-	g gateResult, classes map[string]nodeClass) string {
-	rc := req.RebalanceContext
-	switch resp.Action {
-	case orchestrationv1alpha1.RebalanceActionNoOp,
-		orchestrationv1alpha1.RebalanceActionDefer,
-		orchestrationv1alpha1.RebalanceActionReject,
-		orchestrationv1alpha1.RebalanceActionEscalate:
+	g gates, classes map[string]nodeClass) string {
+	if isNoChange(resp.Action) {
 		return ""
+	}
+	switch resp.Action {
 	case orchestrationv1alpha1.RebalanceActionMove:
 		return validateMove(resp, req, g, classes)
 	case orchestrationv1alpha1.RebalanceActionAdjustReplicas:
-		return validateReplicas(resp, rc.Workload, g)
+		return validateReplicas(resp, req, g)
 	case orchestrationv1alpha1.RebalanceActionAdjustResources:
-		return validateResources(resp, rc.CurrentPlacements, g)
+		return validateResources(resp, req, g)
 	}
 	return fmt.Sprintf("unknown action %q", resp.Action)
 }
 
-// validateMove checks the pod, the target and the move guards.
+// validateMove checks the pod, the target and the gates.
 func validateMove(resp placement.RebalanceDecisionResponse, req placement.DecisionRequest,
-	g gateResult, classes map[string]nodeClass) string {
+	g gates, classes map[string]nodeClass) string {
 	pod, ok := findPod(req.RebalanceContext.CurrentPlacements, resp.PodName)
 	if !ok {
 		return fmt.Sprintf("pod %q is not in the request", resp.PodName)
@@ -47,14 +44,18 @@ func validateMove(resp placement.RebalanceDecisionResponse, req placement.Decisi
 	if classes[resp.TargetNode] != classHealthy {
 		return fmt.Sprintf("target %q is not healthy", resp.TargetNode)
 	}
-	return g.moveBlocked(pod.NodeName, resp.TargetNode, classes)
+	if classes[pod.NodeName] == classDown {
+		return "" // leaving a dead node is a must-do; the operator still enforces the PDB and the energy hold
+	}
+	return g.blocks(changeOf(resp, req))
 }
 
-// validateReplicas checks the gate and that the target is a real change within the bounds.
-func validateReplicas(resp placement.RebalanceDecisionResponse, w *placement.RebalanceWorkload, g gateResult) string {
-	if a := orchestrationv1alpha1.RebalanceActionAdjustReplicas; !g.isAllowed(a) {
-		return g.reasonFor(a)
+// validateReplicas checks the gates and that the target is a real change within the bounds.
+func validateReplicas(resp placement.RebalanceDecisionResponse, req placement.DecisionRequest, g gates) string {
+	if why := g.blocks(changeOf(resp, req)); why != "" {
+		return why
 	}
+	w := req.RebalanceContext.Workload
 	if w == nil {
 		return "no workload in the request"
 	}
@@ -67,12 +68,12 @@ func validateReplicas(resp placement.RebalanceDecisionResponse, w *placement.Reb
 	return ""
 }
 
-// validateResources checks the gate, the container and that each target is a positive quantity.
-func validateResources(resp placement.RebalanceDecisionResponse, pods []placement.PodPlacement, g gateResult) string {
-	if a := orchestrationv1alpha1.RebalanceActionAdjustResources; !g.isAllowed(a) {
-		return g.reasonFor(a)
+// validateResources checks the gates, the container and that each target is a positive quantity.
+func validateResources(resp placement.RebalanceDecisionResponse, req placement.DecisionRequest, g gates) string {
+	if why := g.blocks(changeOf(resp, req)); why != "" {
+		return why
 	}
-	if !hasContainer(pods, resp.ContainerName) {
+	if !hasContainer(req.RebalanceContext.CurrentPlacements, resp.ContainerName) {
 		return fmt.Sprintf("container %q is not in the request", resp.ContainerName)
 	}
 	if resp.TargetCPU == "" && resp.TargetMemory == "" {

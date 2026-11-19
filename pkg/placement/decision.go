@@ -152,6 +152,10 @@ type RebalanceWorkload struct {
 	// must stay within: the HPA's when one exists, else operator defaults.
 	MinReplicas int32 `json:"minReplicas"`
 	MaxReplicas int32 `json:"maxReplicas"`
+
+	// ImprovementThreshold is the smallest Improvement the operator enacts; a lower answer is Rejected.
+	// 0 means unknown (an older operator).
+	ImprovementThreshold float64 `json:"improvementThreshold"`
 }
 
 // RebalancePDB is the disruption budget that limits evictions for a Move.

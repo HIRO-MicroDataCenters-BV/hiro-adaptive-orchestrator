@@ -75,7 +75,7 @@ func (r *Reconciler) rebalanceFacts(
 	return facts
 }
 
-// workloadFacts reports the workload's replicas and AdjustReplicas bounds.
+// workloadFacts reports the workload's replicas, AdjustReplicas bounds and the improvement this operator enacts.
 func (r *Reconciler) workloadFacts(
 	ctx context.Context,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
@@ -84,12 +84,13 @@ func (r *Reconciler) workloadFacts(
 	bounds := resolveReplicaBounds(ctx, r.Client, profile, r.MinReplicas, r.MaxReplicas)
 
 	return &placement.RebalanceWorkload{
-		Kind:        string(ref.Kind),
-		Name:        ref.Name,
-		Namespace:   ref.Namespace,
-		Replicas:    workloadReplicas(ctx, r.Client, ref),
-		MinReplicas: bounds.Min,
-		MaxReplicas: bounds.Max,
+		Kind:                 string(ref.Kind),
+		Name:                 ref.Name,
+		Namespace:            ref.Namespace,
+		Replicas:             workloadReplicas(ctx, r.Client, ref),
+		MinReplicas:          bounds.Min,
+		MaxReplicas:          bounds.Max,
+		ImprovementThreshold: r.ImprovementThreshold,
 	}
 }
 

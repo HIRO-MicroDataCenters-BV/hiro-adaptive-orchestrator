@@ -46,7 +46,7 @@ func TestDecide(t *testing.T) {
 			nodes:      []placement.NodeStat{sized("n1", 50), sized("n2", 20)},
 			setup:      cooldown,
 			wantAction: orchestrationv1alpha1.RebalanceActionNoOp,
-			wantReason: "blocked: Move: cooldown until",
+			wantReason: "blocked: cooldown until",
 		},
 		{
 			name:       "down node moves to the best healthy node",
