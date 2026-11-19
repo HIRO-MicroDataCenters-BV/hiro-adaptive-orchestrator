@@ -836,8 +836,12 @@ spec:
           value: http://mock-decision-agent:8080
         - name: DECISION_AGENT_PATH
           value: /api/v1/agent/placement/decision
+        - name: DECISION_AGENT_TIMEOUT
+          value: 8s
         - name: PLACEMENT_SERVER_PORT
           value: :8090
+        - name: PLACEMENT_SERVER_REQUEST_TIMEOUT
+          value: 10s
         - name: PLACEMENT_SCORE_PATH
           value: /api/v1/placement/score
         - name: PLACEMENT_FILTER_PATH
