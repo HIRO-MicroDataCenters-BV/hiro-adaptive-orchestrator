@@ -447,10 +447,21 @@ func main() {
 	setupLog.Info("EAO action mapping configured",
 		"runNow", eaoSettings.VerdictConfig.RunNowActions, "hold", eaoSettings.VerdictConfig.HoldActions)
 
+	// metricsClient talks to metrics-server (metrics.k8s.io) for the
+	// CPUThreshold/MemoryThreshold trigger conditions and the live usage in
+	// each decision request. metrics-server is an optional cluster component —
+	// both soft-fail when it's unavailable, so this client is safe to construct unconditionally.
+	metricsClient, err := metricsclientset.NewForConfig(restConfig)
+	if err != nil {
+		setupLog.Error(err, "unable to create metrics-server client")
+		os.Exit(1)
+	}
+
 	contextBuilder := placementserver.NewDecisionContextBuilder(
 		mgr.GetClient(),
 		controller.ProfileByAppRefIndex,
 		eaoSettings,
+		metricsClient,
 	)
 
 	// Register the pod scheduler MutatingAdmissionWebhook.
@@ -624,15 +635,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// metricsClient talks to metrics-server (metrics.k8s.io) for the
-	// CPUThreshold/MemoryThreshold trigger conditions. metrics-server is an
-	// optional cluster component — NodePressureEvaluator soft-fails per node
-	// when it's unavailable, so this client is safe to construct unconditionally.
-	metricsClient, err := metricsclientset.NewForConfig(restConfig)
-	if err != nil {
-		setupLog.Error(err, "unable to create metrics-server client")
-		os.Exit(1)
-	}
 	pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, rebalanceNodePressureThreshold)
 	triggerEvaluator := rebalance.NewTriggerEvaluator(
 		mgr.GetClient(), eaoSettings, pressureEvaluator, rebalanceMinPendingPodAge,

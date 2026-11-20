@@ -202,7 +202,7 @@ type NodeResource struct {
 	// Requested sums non-terminated pods' requests, excluding the pod being placed.
 	Requested *int64 `json:"requested"`
 
-	// Used is live usage; null until a metrics source is wired in.
+	// Used is live usage from metrics-server (CPU and memory only); null when unknown.
 	Used *int64 `json:"used"`
 }
 
@@ -353,6 +353,10 @@ type ContainerInfo struct {
 	MemoryRequest string `json:"memoryRequest,omitempty"`
 	CPULimit      string `json:"cpuLimit,omitempty"`
 	MemoryLimit   string `json:"memoryLimit,omitempty"`
+
+	// CPUUsed and MemoryUsed are live usage from metrics-server; empty when unknown.
+	CPUUsed    string `json:"cpuUsed,omitempty"`
+	MemoryUsed string `json:"memoryUsed,omitempty"`
 }
 
 // RebalancingConfig carries the rebalancing configuration from the profile.

@@ -736,8 +736,9 @@ flowchart TD
 Unlike Move and AdjustReplicas, the AI doesn't get to pick *which* container implicitly — a
 workload can have any number of containers, so `RebalanceDecisionResponse.ContainerName` names
 the exact one, matched by name (not position) in `resourceEnactor`
-([`resource_enactor.go`](resource_enactor.go)). The AI sees each pod's container names and
-current CPU/Memory (`RebalanceContext.CurrentPlacements[].Containers`, built by
+([`resource_enactor.go`](resource_enactor.go)). The AI sees each pod's container names,
+current CPU/Memory and, when metrics-server is running, live usage (`cpuUsed`/`memoryUsed`)
+(`RebalanceContext.CurrentPlacements[].Containers`, built by
 `buildContainerInfo` in `internal/placement-server/builder.go`) specifically so it can name one
 back and reason about its current values instead of proposing a change blind.
 

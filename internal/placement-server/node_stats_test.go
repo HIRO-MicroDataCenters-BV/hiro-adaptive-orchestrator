@@ -102,7 +102,7 @@ func TestBuildNodeStats_DescribesNodeAndUsage(t *testing.T) {
 		t.Errorf("appPods = %v, want 1", a.AppPods)
 	}
 	if a.Energy != nil || a.Resources["cpu"].Used != nil {
-		t.Errorf("energy/used should stay null until a source exists")
+		t.Errorf("energy/used should stay null without an energy source or metrics-server")
 	}
 	if got := requested(t, stats[1], "cpu"); got != 0 {
 		t.Errorf("node-b cpu requested = %d, want 0", got)

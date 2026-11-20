@@ -23,10 +23,13 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
+	metricsfake "k8s.io/metrics/pkg/client/clientset/versioned/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -129,7 +132,7 @@ func newTestBuilder(t *testing.T, objs ...client.Object) *DecisionContextBuilder
 		WithIndex(&corev1.Pod{}, PodNodeNameIndex, PodNodeNameIndexFunc).
 		Build()
 
-	return NewDecisionContextBuilder(c, testProfileIndexField, NewEAOSettings(testEAOGVK))
+	return NewDecisionContextBuilder(c, testProfileIndexField, NewEAOSettings(testEAOGVK), nil)
 }
 
 func TestBuildRebalanceContext_AssemblesPlacementsAndCandidateNodes(t *testing.T) {
@@ -217,6 +220,69 @@ func TestBuildRebalanceContext_AssemblesPlacementsAndCandidateNodes(t *testing.T
 		if _, ok := wire[key]; !ok {
 			t.Errorf("rebalanceContext JSON has no top-level %q: %s", key, raw)
 		}
+	}
+}
+
+// fakeMetrics seeds metrics under their real resource names ("nodes", "pods");
+// NewSimpleClientset's own pluralisation files them where List never looks.
+func fakeMetrics(t *testing.T, objs ...runtime.Object) *metricsfake.Clientset {
+	t.Helper()
+	c := metricsfake.NewSimpleClientset() //nolint:staticcheck // NewClientset isn't generated for this package
+	for _, obj := range objs {
+		gvr, ns := metricsv1beta1.SchemeGroupVersion.WithResource("nodes"), ""
+		if pm, ok := obj.(*metricsv1beta1.PodMetrics); ok {
+			gvr, ns = metricsv1beta1.SchemeGroupVersion.WithResource("pods"), pm.Namespace
+		}
+		if err := c.Tracker().Create(gvr, obj, ns); err != nil {
+			t.Fatalf("seeding metrics: %v", err)
+		}
+	}
+	return c
+}
+
+func TestBuildRebalanceContext_LiveUsageFromMetricsServer(t *testing.T) {
+	nodeA, nodeB := sizedNode("node-a", nil), sizedNode("node-b", nil)
+	pod := withRequests(testAppPod("app-a-1", "node-a", corev1.PodRunning), "uid-1", "500m", "256Mi")
+	b := newTestBuilder(t, testAppDeployment(), nodeA, nodeB, pod)
+	b.metricsClient = fakeMetrics(t,
+		&metricsv1beta1.NodeMetrics{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+			Usage: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("1500m"), corev1.ResourceMemory: resource.MustParse("2Gi"),
+			},
+		},
+		&metricsv1beta1.PodMetrics{
+			ObjectMeta: metav1.ObjectMeta{Name: "app-a-1", Namespace: "default"},
+			Containers: []metricsv1beta1.ContainerMetrics{{Name: "app", Usage: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("420m"), corev1.ResourceMemory: resource.MustParse("200Mi"),
+			}}},
+		},
+	)
+
+	req, err := b.BuildRebalanceContext(context.Background(), testRebalanceProfile(false), testDecisionID, "",
+		RebalanceFacts{})
+	if err != nil {
+		t.Fatalf("BuildRebalanceContext: %v", err)
+	}
+
+	stats := map[string]NodeStat{}
+	for _, s := range req.NodeStats {
+		stats[s.Name] = s
+	}
+	a := stats["node-a"].Resources
+	if a["cpu"].Used == nil || *a["cpu"].Used != 1500 || a["memory"].Used == nil || *a["memory"].Used != 2<<30 {
+		t.Errorf("node-a used = cpu %v memory %v, want 1500m and 2Gi", a["cpu"].Used, a["memory"].Used)
+	}
+	if a[testGPU].Used != nil {
+		t.Errorf("node-a GPU used = %d, want null (metrics-server doesn't measure it)", *a[testGPU].Used)
+	}
+	if nb := stats["node-b"].Resources; nb["cpu"].Used != nil {
+		t.Errorf("node-b cpu used = %d, want null (no metrics for it)", *nb["cpu"].Used)
+	}
+
+	c := req.RebalanceContext.CurrentPlacements[0].Containers[0]
+	if c.CPUUsed != "420m" || c.MemoryUsed != "200Mi" {
+		t.Errorf("container used = cpu %q memory %q, want 420m and 200Mi", c.CPUUsed, c.MemoryUsed)
 	}
 }
 

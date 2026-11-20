@@ -60,6 +60,7 @@ always matches what was deployed:
 | `USE_AI_DECISION_SERVICE` | `true` | Deploy the bundled AI Decision Service (needed by `demo/demo_rebalance_with_ai_decision_service.sh`). Set only one of the two agents to `true`; the chart points the operator at it. Both `false`: an external agent at `hiro-operator.config.DECISION_AGENT_URL` |
 | `DEPLOY_SAMPLES` | `true` | Apply the nginx + `OrchestrationProfile` samples from `config/samples/` with kubectl after Helm. `clean` deletes only the sample profiles, not the shared nginx apps |
 | `DEPLOY_PROMETHEUS` | `false` | Bundle kube-prometheus-stack and turn on both ServiceMonitors, so the `hiro_*` metrics are scraped rather than just exposed |
+| `DEPLOY_METRICS_SERVER` | `true` | Bundle metrics-server, which gives the CPU/Memory triggers and each decision request live node and pod usage. Set `false` if the cluster already runs one |
 | `OTLP_ENDPOINT` | *(empty)* | OTLP gRPC collector for traces, e.g. `alloy.observability.svc:4317`. Empty disables tracing entirely |
 
 ```bash
