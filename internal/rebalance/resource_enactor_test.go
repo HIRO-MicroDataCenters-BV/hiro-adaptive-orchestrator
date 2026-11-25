@@ -127,6 +127,95 @@ func TestContainerResourcesConverged(t *testing.T) {
 	}
 }
 
+func TestApplyTargetResources(t *testing.T) {
+	list := func(cpu, mem string) corev1.ResourceList {
+		l := corev1.ResourceList{}
+		if cpu != "" {
+			l[corev1.ResourceCPU] = resource.MustParse(cpu)
+		}
+		if mem != "" {
+			l[corev1.ResourceMemory] = resource.MustParse(mem)
+		}
+		return l
+	}
+
+	tests := []struct {
+		name                     string
+		requests, limits         corev1.ResourceList
+		targetCPU, targetMemory  string
+		wantRequests, wantLimits corev1.ResourceList
+	}{
+		{
+			name:     "limit twice the request stays twice the request",
+			requests: list("50m", "64Mi"), limits: list("100m", "128Mi"),
+			targetCPU: "75m", targetMemory: "96Mi",
+			wantRequests: list("75m", "96Mi"), wantLimits: list("150m", "192Mi"),
+		},
+		{
+			name:     "limit equal to the request stays equal (Guaranteed)",
+			requests: list("100m", "128Mi"), limits: list("100m", "128Mi"),
+			targetCPU: "200m", targetMemory: "256Mi",
+			wantRequests: list("200m", "256Mi"), wantLimits: list("200m", "256Mi"),
+		},
+		{
+			name:     "no limit stays no limit",
+			requests: list("50m", "64Mi"), limits: nil,
+			targetCPU: "75m", targetMemory: "96Mi",
+			wantRequests: list("75m", "96Mi"), wantLimits: nil,
+		},
+		{
+			name:     "limit without a request is treated as request equal to limit",
+			requests: nil, limits: list("100m", ""),
+			targetCPU:    "150m",
+			wantRequests: list("150m", ""), wantLimits: list("150m", ""),
+		},
+		{
+			name:     "only cpu targeted, memory untouched",
+			requests: list("50m", "64Mi"), limits: list("100m", "128Mi"),
+			targetCPU:    "75m",
+			wantRequests: list("75m", "64Mi"), wantLimits: list("150m", "128Mi"),
+		},
+		{
+			name:     "uneven ratio rounds the limit up, never below the request",
+			requests: list("30m", ""), limits: list("100m", ""),
+			targetCPU:    "40m",
+			wantRequests: list("40m", ""), wantLimits: list("134m", ""),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := &corev1.Container{Resources: corev1.ResourceRequirements{Requests: tt.requests, Limits: tt.limits}}
+			var cpu, mem resource.Quantity
+			if tt.targetCPU != "" {
+				cpu = resource.MustParse(tt.targetCPU)
+			}
+			if tt.targetMemory != "" {
+				mem = resource.MustParse(tt.targetMemory)
+			}
+
+			applyTargetResources(container, cpu, mem)
+
+			for _, check := range []struct {
+				what      string
+				got, want corev1.ResourceList
+			}{
+				{"requests", container.Resources.Requests, tt.wantRequests},
+				{"limits", container.Resources.Limits, tt.wantLimits},
+			} {
+				if len(check.got) != len(check.want) {
+					t.Fatalf("%s = %v, want %v", check.what, check.got, check.want)
+				}
+				for name, want := range check.want {
+					if got := check.got[name]; got.Cmp(want) != 0 {
+						t.Errorf("%s[%s] = %s, want %s", check.what, name, got.String(), want.String())
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestResizeRejectedReason(t *testing.T) {
 	tests := []struct {
 		name         string

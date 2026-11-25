@@ -19,6 +19,7 @@ package rebalance
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -234,9 +235,10 @@ func parseTargetResources(cpu, memory string) (targetCPU, targetMemory resource.
 }
 
 // resourceEnactor patches profile's workload (Deployment or StatefulSet) so
-// its named container's CPU and/or Memory requests+limits match
+// its named container's CPU and/or Memory requests match
 // targetCPU/targetMemory (either may be zero to leave that resource
-// unchanged), then best-effort resizes any already-running pods in place.
+// unchanged), with each limit keeping its ratio to its request, then
+// best-effort resizes any already-running pods in place.
 // containerName is matched by name, not position — the AI names the exact
 // container in its response (see RebalanceDecisionResponse.ContainerName),
 // so this works for a workload with any number of containers.
@@ -335,24 +337,44 @@ func resourceEnactor(
 	}, nil
 }
 
-// applyTargetResources sets container's CPU and/or Memory requests+limits to
+// applyTargetResources sets container's CPU and/or Memory request to
 // whichever of targetCPU/targetMemory is non-zero, leaving the other
 // resource's existing values untouched.
+// Each limit keeps its ratio to its request, so the QoS class (which an in-place resize may not change) stays the same.
 func applyTargetResources(container *corev1.Container, targetCPU, targetMemory resource.Quantity) {
 	if container.Resources.Requests == nil {
 		container.Resources.Requests = corev1.ResourceList{}
 	}
-	if container.Resources.Limits == nil {
-		container.Resources.Limits = corev1.ResourceList{}
+	setRequestKeepingLimitRatio(&container.Resources, corev1.ResourceCPU, targetCPU)
+	setRequestKeepingLimitRatio(&container.Resources, corev1.ResourceMemory, targetMemory)
+}
+
+// setRequestKeepingLimitRatio sets name's request to target and scales an existing limit by the same factor.
+// A zero target leaves both alone, and a missing limit stays missing.
+func setRequestKeepingLimitRatio(res *corev1.ResourceRequirements, name corev1.ResourceName, target resource.Quantity) {
+	if target.IsZero() {
+		return
 	}
-	if !targetCPU.IsZero() {
-		container.Resources.Requests[corev1.ResourceCPU] = targetCPU
-		container.Resources.Limits[corev1.ResourceCPU] = targetCPU
+	if limit, ok := res.Limits[name]; ok {
+		oldRequest, ok := res.Requests[name]
+		if !ok || oldRequest.IsZero() {
+			oldRequest = limit // Kubernetes defaults a missing request to the limit
+		}
+		res.Limits[name] = scaledLimit(name, limit, oldRequest, target)
 	}
-	if !targetMemory.IsZero() {
-		container.Resources.Requests[corev1.ResourceMemory] = targetMemory
-		container.Resources.Limits[corev1.ResourceMemory] = targetMemory
+	res.Requests[name] = target
+}
+
+// scaledLimit returns limit × newRequest / oldRequest, rounded up so it never ends below newRequest.
+func scaledLimit(name corev1.ResourceName, limit, oldRequest, newRequest resource.Quantity) resource.Quantity {
+	if limit.Cmp(oldRequest) == 0 {
+		return newRequest.DeepCopy() // equal stays exactly equal, so a Guaranteed pod stays Guaranteed
 	}
+	milli := math.Ceil(float64(limit.MilliValue()) * float64(newRequest.MilliValue()) / float64(oldRequest.MilliValue()))
+	if name == corev1.ResourceMemory {
+		return *resource.NewQuantity(int64(math.Ceil(milli/1000)), resource.BinarySI)
+	}
+	return *resource.NewMilliQuantity(int64(milli), resource.DecimalSI)
 }
 
 // resizeRunningPods lists the pods currently matching selector in namespace

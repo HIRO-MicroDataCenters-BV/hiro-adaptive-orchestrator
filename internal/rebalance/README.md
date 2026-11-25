@@ -757,6 +757,12 @@ the externally-managed check above.
 is consulted. A workload whose CPU/Memory is owned by a VPA (or anything else) is marked with
 `resourcesExternallyManaged` instead of being detected.
 
+**The target sets the request; each limit keeps its ratio to the request.** A container at
+request `50m` / limit `100m` resized to `75m` becomes `75m` / `150m`; a limit equal to its request
+stays equal, and a missing limit stays missing. Only the request is reserved on the node, so the
+bounds above apply to it. Keeping the ratio also keeps the pod's QoS class, which Kubernetes does
+not let an in-place resize change, and never breaks a namespace `LimitRange` ratio rule.
+
 **In-place resize is best-effort, not guaranteed.** `resourceEnactor` always patches the
 workload's pod template first — that alone guarantees the target resources apply eventually (the
 next rollout), regardless of cluster support. It then attempts the Kubernetes 1.27+
