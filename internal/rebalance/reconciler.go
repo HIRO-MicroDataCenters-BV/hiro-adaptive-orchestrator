@@ -51,7 +51,8 @@ const DefaultDetectionInterval = 30 * time.Second
 // DefaultDecisionTimeout bounds how long evaluateWithAI waits for the
 // External AI Agent to answer a rebalance decision request before treating
 // it as failed.
-const DefaultDecisionTimeout = 5 * time.Second
+// Long enough for a model to review an app's pods one by one; size it for the largest app.
+const DefaultDecisionTimeout = 60 * time.Second
 
 // DefaultImprovementThreshold is the minimum Improvement score (see
 // placementserver.RebalanceDecisionResponse) a Move recommendation must

@@ -41,7 +41,7 @@
 #   USE_MOCK_AGENT            true|false                  (default: true)
 #   DECISION_AGENT_URL        required when USE_MOCK_AGENT=false
 #   DECISION_AGENT_PATH       agent API path              (default: /api/v1/agent/placement/decision)
-#   DECISION_AGENT_TIMEOUT    limit on every agent call   (default: 8s)
+#   DECISION_AGENT_TIMEOUT    limit on each placement call (default: 8s)
 #
 # ─── Extender paths ──────────────────────────────────────────────────────────
 #   EXTENDER_FILTER_PATH      extender filter path        (default: /extender/filter)
@@ -63,7 +63,7 @@
 #   REBALANCE_HISTORY_MAX_ENTRIES       max history entries per profile      (default: 20)
 #   REBALANCE_HISTORY_MESSAGE_MAX       max characters per history message   (default: 200)
 #   REBALANCE_DETECTION_INTERVAL        periodic detection tick, Go duration (default: 30s)
-#   REBALANCE_DECISION_TIMEOUT          AI-consultation timeout, Go duration (default: 5s)
+#   REBALANCE_DECISION_TIMEOUT          AI-consultation timeout, Go duration (default: 60s)
 #   REBALANCE_NODE_PRESSURE_THRESHOLD   CPU/Memory pressure fraction         (default: 0.90)
 #   REBALANCE_IMPROVEMENT_THRESHOLD     min Move improvement score to enact  (default: 20)
 #   REBALANCE_DECISION_STORE_TTL        how long a Move decision biases scoring, Go duration (default: 60s)
@@ -141,7 +141,7 @@ export REBALANCE_HISTORY_WINDOW="${REBALANCE_HISTORY_WINDOW:-1h}"
 export REBALANCE_HISTORY_MAX_ENTRIES="${REBALANCE_HISTORY_MAX_ENTRIES:-20}"
 export REBALANCE_HISTORY_MESSAGE_MAX="${REBALANCE_HISTORY_MESSAGE_MAX:-200}"
 export REBALANCE_DETECTION_INTERVAL="${REBALANCE_DETECTION_INTERVAL:-30s}"
-export REBALANCE_DECISION_TIMEOUT="${REBALANCE_DECISION_TIMEOUT:-5s}"
+export REBALANCE_DECISION_TIMEOUT="${REBALANCE_DECISION_TIMEOUT:-60s}"
 export REBALANCE_NODE_PRESSURE_THRESHOLD="${REBALANCE_NODE_PRESSURE_THRESHOLD:-0.90}"
 export REBALANCE_IMPROVEMENT_THRESHOLD="${REBALANCE_IMPROVEMENT_THRESHOLD:-20}"
 export REBALANCE_DECISION_STORE_TTL="${REBALANCE_DECISION_STORE_TTL:-60s}"

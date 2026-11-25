@@ -50,7 +50,7 @@ import (
 // 	DefaultDecisionAgentPath = "/api/v1/agent/placement/decision"
 // )
 
-// DefaultDecisionAgentTimeout limits every call to the decision agent, placement and rebalance alike.
+// DefaultDecisionAgentTimeout limits each placement call to the decision agent; rebalance calls follow their caller's deadline.
 const DefaultDecisionAgentTimeout = 8 * time.Second
 
 // DecisionClient sends a per-pod DecisionRequest to the External Decision/AI
@@ -64,26 +64,31 @@ type DecisionClient struct {
 	// Configurable via DECISION_AGENT_PATH env var.
 	agentPath string
 
-	// httpClient is the underlying HTTP client.
-	// Timeout is set at construction — it applies per-request.
+	// httpClient has no timeout of its own, so a rebalance call can outlast a placement call.
 	httpClient *http.Client
+
+	// placementTimeout limits each RequestDecision call.
+	placementTimeout time.Duration
 }
 
 // NewDecisionClient creates a new DecisionClient.
 //
 // agentURL:  base URL of the External Decision/AI Agent.
 // agentPath: HTTP path on the agent (e.g. "/api/v1/agent/placement/decision").
-// timeout:   per-request timeout. Recommended: 5–30s depending on AI agent SLA.
+// timeout:   limit on each placement call; <= 0 uses DefaultDecisionAgentTimeout. Rebalance calls use the caller's deadline.
 func NewDecisionClient(agentURL, agentPath string, timeout time.Duration) *DecisionClient {
+	if timeout <= 0 {
+		timeout = DefaultDecisionAgentTimeout
+	}
 	return &DecisionClient{
 		agentURL:  agentURL,
 		agentPath: agentPath,
 		httpClient: &http.Client{
-			Timeout: timeout,
 			// Continues the caller's trace into the AI agent call, so the
 			// agent's share of latency is visible as its own span.
 			Transport: otelhttp.NewTransport(http.DefaultTransport),
 		},
+		placementTimeout: timeout,
 	}
 }
 
@@ -99,10 +104,14 @@ func NewDecisionClient(agentURL, agentPath string, timeout time.Duration) *Decis
 //
 // The caller's context is forwarded so cancellation propagates to the
 // HTTP call — if the scheduler times out, the request is cancelled.
+// The call stops at placementTimeout or the caller's deadline, whichever comes first.
 func (c *DecisionClient) RequestDecision(
 	ctx context.Context,
 	req *DecisionRequest,
 ) (*DecisionResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.placementTimeout)
+	defer cancel()
+
 	logger := logf.FromContext(ctx)
 
 	// Assign a request ID if not already set by the builder
@@ -192,6 +201,7 @@ func (c *DecisionClient) RequestDecision(
 // httpClient — same configured agent, same "no parallel HTTP path" — this is
 // the "richer conversation" the rebalance engine design calls for, not a
 // second decision path.
+// Its limit is the caller's deadline (REBALANCE_DECISION_TIMEOUT), not placementTimeout.
 func (c *DecisionClient) RequestRebalanceDecision(
 	ctx context.Context,
 	req *DecisionRequest,

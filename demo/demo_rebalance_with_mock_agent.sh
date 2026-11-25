@@ -526,9 +526,9 @@ revert_mock_agent_escalate() {
 }
 
 # Simulates "the AI agent is unreachable" for the auto-escalation half of
-# this beat — scaling to 0 makes every consult fail fast (bounded by
-# DecisionTimeout, default 5s) rather than waiting out a much longer enactor
-# timeout, so the Failed streak needed to auto-escalate builds quickly.
+# this beat — scaling to 0 makes every consult fail fast (a Service with no
+# endpoints refuses the call at once) rather than waiting out a much longer
+# enactor timeout, so the Failed streak needed to auto-escalate builds quickly.
 scale_mock_agent_down() {
   step "Scaling mock-decision-agent to 0 (simulating the AI agent being unreachable)"
   narrate "This also briefly affects initial placement scoring, which shares

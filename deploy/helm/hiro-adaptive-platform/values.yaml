@@ -77,8 +77,9 @@ hiro-operator:
     # otherwise the chart sets it from the enabled one's serviceName/port.
     DECISION_AGENT_URL: http://mock-decision-agent:8080
     DECISION_AGENT_PATH: /api/v1/agent/placement/decision
-    # Limit on every AI agent call, placement and rebalance; must be less than
+    # Limit on each placement call to the AI agent; must be less than
     # PLACEMENT_SERVER_REQUEST_TIMEOUT, or the operator won't start.
+    # Rebalance calls use REBALANCE_DECISION_TIMEOUT instead.
     DECISION_AGENT_TIMEOUT: 8s
     # PlacementServer — this operator's scoring endpoint, called by the
     # scheduler plugin/extender (see scheduler: below). The Service is
@@ -123,7 +124,8 @@ hiro-operator:
     REBALANCE_MIN_PENDING_POD_AGE: 10s
 
     # AI call: how long to wait, and the minimum improvement worth acting on.
-    REBALANCE_DECISION_TIMEOUT: 5s
+    # The wait covers the model reviewing every pod, so size it for the largest app.
+    REBALANCE_DECISION_TIMEOUT: 60s
     REBALANCE_IMPROVEMENT_THRESHOLD: "20"
 
     # Move: placement-bias lifetime, replacement-pod wait, cluster-wide moves per minute.

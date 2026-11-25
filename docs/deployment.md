@@ -282,7 +282,7 @@ Every parameter can be set as an environment variable before calling any deploy 
 | `USE_MOCK_AGENT` | `true` | Deploy and use the in-cluster mock agent (Phase 5 of `deploy_full_stack.sh`) |
 | `DECISION_AGENT_URL` | `http://mock-decision-agent:8080` (mock) | Base URL of the AI agent. **Required when `USE_MOCK_AGENT=false`.** |
 | `DECISION_AGENT_PATH` | `/api/v1/agent/placement/decision` | HTTP path on the AI agent |
-| `DECISION_AGENT_TIMEOUT` | `8s` | Limit on every AI agent call, placement and rebalance (Go duration). It also caps `REBALANCE_DECISION_TIMEOUT` |
+| `DECISION_AGENT_TIMEOUT` | `8s` | Limit on each placement call to the AI agent (Go duration). Rebalance calls use `REBALANCE_DECISION_TIMEOUT` instead |
 
 #### Operator — Extender Paths
 
@@ -310,7 +310,7 @@ Every parameter can be set as an environment variable before calling any deploy 
 | `REBALANCE_HISTORY_MESSAGE_MAX` | `200` | Max characters of a history entry's message |
 | `REBALANCE_DETECTION_INTERVAL` | `30s` | Periodic detection tick (Go duration) |
 | `REBALANCE_MIN_PENDING_POD_AGE` | `10s` | How long a pod the energy gate held must exist before it's retried (Go duration) |
-| `REBALANCE_DECISION_TIMEOUT` | `5s` | AI-consultation timeout (Go duration) |
+| `REBALANCE_DECISION_TIMEOUT` | `60s` | AI-consultation timeout (Go duration). It covers the model reviewing every pod, so size it for the largest app |
 | `REBALANCE_NODE_PRESSURE_THRESHOLD` | `0.90` | CPU/Memory pressure fraction that triggers `CPUThreshold`/`MemoryThreshold` |
 | `REBALANCE_IMPROVEMENT_THRESHOLD` | `20` | Minimum `Improvement` score a `Move` recommendation must clear to be enacted |
 | `REBALANCE_DECISION_STORE_TTL` | `60s` | How long a `Move` decision biases `PlacementServer` scoring (Go duration) |

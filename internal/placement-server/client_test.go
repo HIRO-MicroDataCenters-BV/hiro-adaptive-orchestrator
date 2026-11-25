@@ -19,11 +19,13 @@ package placementserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
@@ -123,5 +125,45 @@ func TestRequestRebalanceDecision_ContextTimeout(t *testing.T) {
 	_, err := c.RequestRebalanceDecision(ctx, testRebalanceDecisionRequest())
 	if err == nil {
 		t.Fatal("expected an error when the context deadline is exceeded, got nil")
+	}
+}
+
+func testPlacementDecisionRequest() *DecisionRequest {
+	return &DecisionRequest{
+		RequestID: testDecisionID,
+		Timestamp: metav1.Now(),
+		Pod:       testAppPod("app-a-1", "", corev1.PodPending),
+		AOProfile: &AOProfileContext{ProfileName: "profile-a", Strategy: "Balanced"},
+	}
+}
+
+// slowAgent answers every call with an empty JSON body after delay.
+func slowAgent(t *testing.T, delay time.Duration) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(delay)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestRequestDecision_StopsAtPlacementTimeout(t *testing.T) {
+	c := NewDecisionClient(slowAgent(t, 200*time.Millisecond).URL, "", 20*time.Millisecond)
+
+	_, err := c.RequestDecision(context.Background(), testPlacementDecisionRequest())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func TestRequestRebalanceDecision_OutlastsPlacementTimeout(t *testing.T) {
+	c := NewDecisionClient(slowAgent(t, 100*time.Millisecond).URL, "", 20*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if _, err := c.RequestRebalanceDecision(ctx, testRebalanceDecisionRequest()); err != nil {
+		t.Fatalf("RequestRebalanceDecision: %v, want success past the placement timeout", err)
 	}
 }

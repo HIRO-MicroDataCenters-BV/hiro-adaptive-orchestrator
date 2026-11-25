@@ -869,7 +869,7 @@ spec:
         - name: REBALANCE_DETECTION_INTERVAL
           value: 30s
         - name: REBALANCE_DECISION_TIMEOUT
-          value: 5s
+          value: 60s
         - name: REBALANCE_NODE_PRESSURE_THRESHOLD
           value: "0.90"
         - name: REBALANCE_IMPROVEMENT_THRESHOLD

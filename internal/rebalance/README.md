@@ -342,7 +342,7 @@ initial-placement scoring, not a second HTTP path:
    awareness/rebalancing config, optional EAO energy data, the trigger, workload, PDB, and the
    history summary (see [Rebalance history](#rebalance-history)).
 3. `DecisionClient.RequestRebalanceDecision` POSTs that request under a configurable timeout
-   (`Reconciler.DecisionTimeout`, default 5s) and decodes a `RebalanceDecisionResponse`:
+   (`Reconciler.DecisionTimeout`, default 60s) and decodes a `RebalanceDecisionResponse`:
    `Action` (`orchestrationv1alpha1.RebalanceAction` — `Move`, `NoOp`, and other values defined
    there for later stories; a named type so Go call sites get compile-time-checked comparisons
    even though the wire format is a plain JSON string), `PodName` (which pod from
@@ -1086,7 +1086,7 @@ flowchart LR
 
     Resolve -->|"unset → DefaultHistoryWindow (1h)<br/>MaxEntries (20) / MessageMax (200)"| SW["StateWriter<br/>history bounds"]
     Resolve -->|"unset → DefaultDetectionInterval (30s)"| Recon1["Reconciler<br/>periodic detection tick"]
-    Resolve -->|"unset → DefaultDecisionTimeout (5s)"| Recon2["Reconciler<br/>AI-consultation timeout"]
+    Resolve -->|"unset → DefaultDecisionTimeout (60s)"| Recon2["Reconciler<br/>AI-consultation timeout"]
     Resolve -->|"unset → DefaultNodePressureThreshold (0.90)"| NPE["NodePressureEvaluator<br/>CPU/Memory pressure fraction"]
     Resolve -->|"unset → DefaultImprovementThreshold (20)"| Disp["dispatchMove / dispatchScale<br/>guardrail"]
     Resolve -->|"unset → DefaultDecisionStoreTTL (60s)"| DS["DecisionStore<br/>Move-bias TTL"]
@@ -1105,7 +1105,7 @@ flowchart LR
 | `REBALANCE_HISTORY_MAX_ENTRIES` | Max `history` entries per profile | `DefaultHistoryMaxEntries` (20) |
 | `REBALANCE_HISTORY_MESSAGE_MAX` | Max characters of an entry's `message` | `DefaultHistoryMessageMax` (200) |
 | `REBALANCE_DETECTION_INTERVAL` | `Reconciler`'s periodic detection tick (Go duration, e.g. `30s`) | `DefaultDetectionInterval` (30s) |
-| `REBALANCE_DECISION_TIMEOUT` | `Reconciler`'s AI-consultation timeout (Go duration, e.g. `5s`) | `DefaultDecisionTimeout` (5s) |
+| `REBALANCE_DECISION_TIMEOUT` | `Reconciler`'s AI-consultation timeout (Go duration, e.g. `60s`); not capped by `DECISION_AGENT_TIMEOUT` | `DefaultDecisionTimeout` (60s) |
 | `REBALANCE_NODE_PRESSURE_THRESHOLD` | `NodePressureEvaluator`'s CPU/Memory pressure fraction (e.g. `0.90`) | `DefaultNodePressureThreshold` (0.90) |
 | `REBALANCE_IMPROVEMENT_THRESHOLD` | `dispatchMove`/`dispatchScale`'s guardrail — minimum `Improvement` to enact | `DefaultImprovementThreshold` (20) |
 | `REBALANCE_DECISION_STORE_TTL` | How long a `Move` decision biases `PlacementServer.score` (Go duration) | `placementserver.DefaultDecisionStoreTTL` (60s) |
@@ -1463,7 +1463,7 @@ inside `StateWriter.Transition` (see [Escalation — pausing on repeated
 failures](#escalation--pausing-on-repeated-failures)), the same for both paths and for any
 value of the threshold. Simulating "the AI is unreachable" (scaling `mock-decision-agent` to 0)
 rather than forcing real Move/Scale timeouts is what keeps Part B's Failed streak fast —
-bounded by `DecisionTimeout` (~5s) instead of a 60s enactor timeout.
+a Service with no endpoints refuses the call at once, instead of a 60s enactor timeout.
 
 Beat 5 can't poll for Enacting the way beats 3/4 do: resourceEnactor's fallback (template-
 patch) path patches and returns to Watching in the same reconcile, so Enacting never lingers

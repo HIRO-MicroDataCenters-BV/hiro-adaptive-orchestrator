@@ -315,7 +315,7 @@ func main() {
 	//                             e.g. "http://ai-agent.hiro-system.svc:8080"
 	//   DECISION_AGENT_PATH     — HTTP path on the AI agent (optional)
 	//                             default: "/api/v1/agent/placement/decision"
-	//   DECISION_AGENT_TIMEOUT  — limit on every AI agent call, placement and rebalance (optional)
+	//   DECISION_AGENT_TIMEOUT  — limit on each placement call; rebalance uses REBALANCE_DECISION_TIMEOUT (optional)
 	//                             default: "8s"; must be < PLACEMENT_SERVER_REQUEST_TIMEOUT
 	//   PLACEMENT_SERVER_PORT   — listening address (optional, default ":8090")
 	//   PLACEMENT_SERVER_REQUEST_TIMEOUT — limit on one placement request (optional)
@@ -501,7 +501,7 @@ func main() {
 	//   REBALANCE_HISTORY_MAX_ENTRIES      — max history entries kept per profile, e.g. "20"
 	//   REBALANCE_HISTORY_MESSAGE_MAX      — max characters of a history entry's message, e.g. "200"
 	//   REBALANCE_DETECTION_INTERVAL       — periodic detection tick, e.g. "30s"
-	//   REBALANCE_DECISION_TIMEOUT         — AI consultation timeout, e.g. "5s"
+	//   REBALANCE_DECISION_TIMEOUT         — AI consultation timeout, sized for the largest app, e.g. "60s"
 	//   REBALANCE_NODE_PRESSURE_THRESHOLD  — CPU/Memory pressure fraction, e.g. "0.90"
 	//   REBALANCE_IMPROVEMENT_THRESHOLD    — minimum Move improvement score to enact, e.g. "20"
 	//   REBALANCE_DECISION_STORE_TTL       — how long a Move decision biases scoring, e.g. "60s"
