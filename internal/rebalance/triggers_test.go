@@ -492,3 +492,19 @@ func TestTriggerEvaluator_FirstMatchWins(t *testing.T) {
 			matched, result.Condition, TriggerPeriodicReview)
 	}
 }
+
+// PeriodicReview declared first must not hide a real problem: triggerPriority decides the order, not the profile.
+func TestTriggerEvaluator_PriorityBeatsDeclaredOrder(t *testing.T) {
+	profile := testProfileWithConditions(TriggerPeriodicReview, TriggerNodeFailure)
+	pod := testPod("app-a-1", "node-b", corev1.PodRunning)
+	evaluator := newTestTriggerEvaluator(t, testDeployment(), pod, notReadySince("node-b", time.Now().Add(-time.Minute)))
+
+	matched, result, err := evaluator.Evaluate(context.Background(), profile)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if !matched || result.Condition != TriggerNodeFailure {
+		t.Fatalf("matched=%v condition=%q, want true/%q despite PeriodicReview being declared first",
+			matched, result.Condition, TriggerNodeFailure)
+	}
+}

@@ -19,6 +19,8 @@ package rebalance
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +45,15 @@ const (
 	TriggerNodeFailure     = orchestrationv1alpha1.TriggerConditionNodeFailure
 	TriggerPeriodicReview  = orchestrationv1alpha1.TriggerConditionPeriodicReview
 )
+
+// triggerPriority ranks the triggers Evaluate checks, 1 first; the profile only switches each one on.
+var triggerPriority = map[int]orchestrationv1alpha1.TriggerCondition{
+	1: TriggerNodeFailure,     // pods are down
+	2: TriggerEnergyThreshold, // a pod held by the energy gate can start
+	3: TriggerMemoryThreshold, // memory pressure: OOM kills, evictions
+	4: TriggerCPUThreshold,    // CPU pressure: throttling only
+	5: TriggerPeriodicReview,  // always matches, so it must be last
+}
 
 // ActionRetryPendingSchedule is NOT a trigger condition — it never appears
 // in spec.rebalancing.triggerConditions and is never validated against
@@ -122,9 +133,9 @@ func NewTriggerEvaluator(
 }
 
 // Evaluate checks every trigger condition declared on the profile, in
-// order, and returns the first one that currently matches. matched=false
-// means none of the declared conditions currently hold — not an error, just
-// nothing to do this cycle.
+// triggerPriority order (not the declared order), and returns the first one
+// that currently matches. matched=false means none of the declared
+// conditions currently hold — not an error, just nothing to do this cycle.
 func (e *TriggerEvaluator) Evaluate(
 	ctx context.Context,
 	profile *orchestrationv1alpha1.OrchestrationProfile,
@@ -134,7 +145,12 @@ func (e *TriggerEvaluator) Evaluate(
 		return false, TriggerResult{}, fmt.Errorf("finding pods for trigger evaluation: %w", err)
 	}
 
-	for _, cond := range profile.Spec.Rebalancing.TriggerConditions {
+	sortedTriggerPriority := slices.Sorted(maps.Keys(triggerPriority))
+	for _, rank := range sortedTriggerPriority {
+		cond := triggerPriority[rank]
+		if !slices.Contains(profile.Spec.Rebalancing.TriggerConditions, cond) {
+			continue // not switched on by this profile
+		}
 		var (
 			ok     bool
 			r      string
@@ -154,7 +170,7 @@ func (e *TriggerEvaluator) Evaluate(
 		case TriggerPeriodicReview:
 			ok, r = true, "periodic review due"
 		default:
-			continue // unrecognized condition — spec validation should have already caught this
+			continue // unrecognized condition - a condition missing from triggerPriority is never reached
 		}
 
 		metrics.RebalanceTriggerEvaluationsTotal.

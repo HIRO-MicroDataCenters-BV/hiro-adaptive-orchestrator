@@ -204,29 +204,35 @@ checked, just only on the periodic tick instead of instantly.
 
 ```mermaid
 flowchart TD
-    Start(["Evaluate(profile)"]) --> C1{"EnergyThreshold declared<br/>and energy awareness on?"}
-    C1 -- yes --> E1{"EAO verdict Hold?<br/>(slot still ahead)"}
-    E1 -- yes --> Match(["matched — needs AI<br/>(no bypass)"])
+    Start(["Evaluate(profile)"]) --> C1{"NodeFailure<br/>declared?"}
+    C1 -- yes --> N{"hosting node<br/>NotReady?"}
+    N -- yes --> Match(["matched — needs AI<br/>(no bypass)"])
+    N -- no --> C2
+    C1 -- no --> C2{"EnergyThreshold declared<br/>and energy awareness on?"}
+    C2 -- yes --> E1{"EAO verdict Hold?<br/>(slot still ahead)"}
+    E1 -- yes --> Match
     E1 -- no --> E2{"verdict RunNow<br/>AND the gate held a pod?"}
     E2 -- yes --> Bypass(["matched — BypassAction set<br/>(no AI needed)"])
-    E2 -- no --> C2
-    C1 -- no --> C2{"CPU/MemoryThreshold<br/>declared?"}
-    C2 -- yes --> P{"NodePressureEvaluator<br/>over threshold?"}
+    E2 -- no --> C3
+    C2 -- no --> C3{"MemoryThreshold<br/>declared?"}
+    C3 -- yes --> M{"node memory<br/>over threshold?"}
+    M -- yes --> Match
+    M -- no --> C4
+    C3 -- no --> C4{"CPUThreshold<br/>declared?"}
+    C4 -- yes --> P{"node CPU<br/>over threshold?"}
     P -- yes --> Match
-    P -- no --> C3
-    C2 -- no --> C3{"NodeFailure<br/>declared?"}
-    C3 -- yes --> N{"hosting node<br/>NotReady?"}
-    N -- yes --> Match
-    N -- no --> C4
-    C3 -- no --> C4{"PeriodicReview<br/>declared?"}
-    C4 -- yes --> Match
-    C4 -- no --> None(["no match this cycle"])
+    P -- no --> C5
+    C4 -- no --> C5{"PeriodicReview<br/>declared?"}
+    C5 -- yes --> Match
+    C5 -- no --> None(["no match this cycle"])
 ```
 
-`TriggerEvaluator.Evaluate` (in [`triggers.go`](triggers.go)) walks
-`profile.Spec.Rebalancing.TriggerConditions` in the order the user declared them and returns
-the **first** one that currently matches. If nothing matches, that's not an error — it's just
-nothing to do this cycle. `NodeFailure` is checked before this walk (see its row).
+`TriggerEvaluator.Evaluate` (in [`triggers.go`](triggers.go)) walks a fixed priority,
+`triggerPriority`: `NodeFailure`, `EnergyThreshold`, `MemoryThreshold`, `CPUThreshold`,
+`PeriodicReview`. It checks only the conditions the profile declares, and returns the **first**
+one that currently matches. The declared order doesn't matter, so `PeriodicReview`, which always
+matches, can never hide a real problem. If nothing matches, that's not an error — it's just
+nothing to do this cycle. `NodeFailure` is also checked before this walk (see its row).
 
 | Condition | How it's checked |
 |---|---|
