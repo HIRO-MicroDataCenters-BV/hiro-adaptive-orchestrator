@@ -50,6 +50,9 @@ import (
 // 	DefaultDecisionAgentPath = "/api/v1/agent/placement/decision"
 // )
 
+// DefaultDecisionAgentTimeout limits every call to the decision agent, placement and rebalance alike.
+const DefaultDecisionAgentTimeout = 8 * time.Second
+
 // DecisionClient sends a per-pod DecisionRequest to the External Decision/AI
 // Agent and returns the scored node list.
 type DecisionClient struct {

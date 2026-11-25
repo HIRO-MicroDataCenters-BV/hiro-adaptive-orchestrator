@@ -77,6 +77,9 @@ hiro-operator:
     # otherwise the chart sets it from the enabled one's serviceName/port.
     DECISION_AGENT_URL: http://mock-decision-agent:8080
     DECISION_AGENT_PATH: /api/v1/agent/placement/decision
+    # Limit on every AI agent call, placement and rebalance; must be less than
+    # PLACEMENT_SERVER_REQUEST_TIMEOUT, or the operator won't start.
+    DECISION_AGENT_TIMEOUT: 8s
     # PlacementServer — this operator's scoring endpoint, called by the
     # scheduler plugin/extender (see scheduler: below). The Service is
     # generated with port 8090, so the port is fixed; only the paths vary.
@@ -84,6 +87,8 @@ hiro-operator:
     PLACEMENT_SCORE_PATH: /api/v1/placement/score
     PLACEMENT_FILTER_PATH: /api/v1/placement/filter
     PLACEMENT_SERVER_HEALTH_PATH: /healthz
+    # Limit on one placement request; must be greater than DECISION_AGENT_TIMEOUT.
+    PLACEMENT_SERVER_REQUEST_TIMEOUT: 10s
     # Tracing (OpenTelemetry). Empty endpoint = off, and nothing is
     # exported. Set it to an OTLP gRPC collector, e.g. Grafana Alloy or
     # Tempo at otel-collector.observability.svc.cluster.local:4317.

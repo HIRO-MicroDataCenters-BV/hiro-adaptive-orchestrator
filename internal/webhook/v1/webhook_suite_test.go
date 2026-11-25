@@ -115,6 +115,7 @@ var _ = BeforeSuite(func() {
 		mgr.GetClient(),
 		".spec.applicationRef.namespacedName",
 		placementserver.NewEAOSettings(schema.GroupVersionKind{}),
+		nil,
 	)
 	err = SetupPodWebhookWithManager(mgr, contextBuilder, DefaultSchedulerName)
 	Expect(err).NotTo(HaveOccurred())

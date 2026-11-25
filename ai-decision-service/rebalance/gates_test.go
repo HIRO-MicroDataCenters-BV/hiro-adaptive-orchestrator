@@ -1,6 +1,7 @@
 package rebalance
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -55,30 +56,59 @@ func managed(replicas, resources bool) func(*placement.DecisionRequest) {
 	}
 }
 
-func TestApplyGates(t *testing.T) {
+// gatesFor applies the gates to req as Decide does: facts first.
+func gatesFor(req placement.DecisionRequest) gates {
+	cfg := DefaultConfig()
+	return applyGates(req, testNow, cfg, classifyNodes(req, cfg))
+}
+
+// TestBlocks runs one answer of each kind through the gates (the request is validateRequest's: p1 on n1, 3 replicas).
+func TestBlocks(t *testing.T) {
+	type resp = placement.RebalanceDecisionResponse
+	answers := map[string]resp{
+		"move":       {Action: orchestrationv1alpha1.RebalanceActionMove, PodName: "p1", TargetNode: "n2"},
+		"scale up":   {Action: orchestrationv1alpha1.RebalanceActionAdjustReplicas, TargetReplicas: 4},
+		"scale down": {Action: orchestrationv1alpha1.RebalanceActionAdjustReplicas, TargetReplicas: 2},
+		"resize":     {Action: orchestrationv1alpha1.RebalanceActionAdjustResources, ContainerName: "app", TargetCPU: "500m"},
+		"noop":       {Action: orchestrationv1alpha1.RebalanceActionNoOp},
+	}
+	history := func(entries ...orchestrationv1alpha1.HistoryEntry) func(*placement.DecisionRequest) {
+		return func(r *placement.DecisionRequest) { r.RebalanceContext.History = entries }
+	}
 	cases := []struct {
-		name                      string
-		setup                     func(req *placement.DecisionRequest)
-		move, replicas, resources string // "" means allowed, else part of the reason
+		name  string
+		setup func(req *placement.DecisionRequest)
+		want  map[string]string // answer → part of the reason; a missing answer must pass
 	}{
 		{name: "nothing set"},
 		{
-			name:      "cooldown ahead blocks everything",
-			setup:     func(r *placement.DecisionRequest) { r.RebalanceContext.CooldownUntil = at(5 * time.Minute) },
-			move:      "cooldown until 2026-10-30T12:05:00Z",
-			replicas:  "cooldown until",
-			resources: "cooldown until",
+			name:  "cooldown ahead blocks every change, not NoOp",
+			setup: func(r *placement.DecisionRequest) { r.RebalanceContext.CooldownUntil = at(5 * time.Minute) },
+			want: map[string]string{
+				"move": "cooldown until 2026-10-30T12:05:00Z", "scale up": "cooldown until",
+				"scale down": "cooldown until", "resize": "cooldown until",
+			},
 		},
 		{
 			name:  "cooldown over",
 			setup: func(r *placement.DecisionRequest) { r.RebalanceContext.CooldownUntil = at(-time.Minute) },
 		},
-		{name: "replicas managed", setup: managed(true, false), replicas: "replicas are externally managed"},
-		{name: "resources managed", setup: managed(false, true), resources: "resources are externally managed"},
+		{
+			name:  "replicas managed",
+			setup: managed(true, false),
+			want: map[string]string{
+				"scale up": "replicas are externally managed", "scale down": "replicas are externally managed",
+			},
+		},
+		{
+			name:  "resources managed",
+			setup: managed(false, true),
+			want:  map[string]string{"resize": "resources are externally managed"},
+		},
 		{
 			name:  "PDB allows no disruption",
 			setup: func(r *placement.DecisionRequest) { r.RebalanceContext.PDB = &placement.RebalancePDB{Name: "web"} },
-			move:  "PDB web does not allow disruptions",
+			want:  map[string]string{"move": "PDB web does not allow disruptions"},
 		},
 		{
 			name: "PDB allows one",
@@ -87,26 +117,41 @@ func TestApplyGates(t *testing.T) {
 			},
 		},
 		{
-			name: "first reason is kept",
+			name: "cooldown wins over the PDB",
 			setup: func(r *placement.DecisionRequest) {
 				r.RebalanceContext.CooldownUntil = at(5 * time.Minute)
 				r.RebalanceContext.PDB = &placement.RebalancePDB{Name: "web"}
 			},
-			move:      "cooldown until",
-			replicas:  "cooldown until",
-			resources: "cooldown until",
+			want: map[string]string{
+				"move": "cooldown until", "scale up": "cooldown until",
+				"scale down": "cooldown until", "resize": "cooldown until",
+			},
 		},
 		{
-			name: "fresh EAO hold with a slot",
+			name: "fresh EAO hold stops new pods, not a scale-down",
 			setup: func(r *placement.DecisionRequest) {
 				r.EAOProfile = eao(placement.EAOVerdictHold, time.Minute, at(10*time.Minute))
 			},
-			move: "EAO holds until 2026-10-30T12:10:00Z",
+			want: map[string]string{
+				"move": "EAO holds until 2026-10-30T12:10:00Z", "scale up": "EAO holds until",
+				"resize": "EAO holds until",
+			},
 		},
 		{
 			name:  "fresh EAO hold without a slot",
 			setup: func(r *placement.DecisionRequest) { r.EAOProfile = eao(placement.EAOVerdictHold, time.Minute, nil) },
-			move:  "EAO holds the workload for lack of energy",
+			want: map[string]string{
+				"move": "EAO holds the workload for lack of energy", "scale up": "for lack of energy",
+				"resize": "for lack of energy",
+			},
+		},
+		{
+			name: "PDB wins over the hold for a move",
+			setup: func(r *placement.DecisionRequest) {
+				r.RebalanceContext.PDB = &placement.RebalancePDB{Name: "web"}
+				r.EAOProfile = eao(placement.EAOVerdictHold, time.Minute, nil)
+			},
+			want: map[string]string{"move": "PDB web", "scale up": "EAO holds", "resize": "EAO holds"},
 		},
 		{
 			name:  "stale EAO hold",
@@ -122,115 +167,107 @@ func TestApplyGates(t *testing.T) {
 			name:  "EAO run now",
 			setup: func(r *placement.DecisionRequest) { r.EAOProfile = eao(placement.EAOVerdictRunNow, time.Minute, nil) },
 		},
+		{
+			name:  "churn: a recent move filled the source",
+			setup: history(moved("n0", "n1", 5*time.Minute)),
+			want:  map[string]string{"move": "a recent move put a pod on n1"},
+		},
+		{
+			name: "churn: an at-risk source may still move",
+			setup: func(r *placement.DecisionRequest) {
+				r.RebalanceContext.History = []orchestrationv1alpha1.HistoryEntry{moved("n0", "n1", 5*time.Minute)}
+				r.NodeStats[0].Unschedulable = true // n1 is now at risk
+			},
+		},
+		{
+			name:  "ping-pong: a recent move emptied the target",
+			setup: history(moved("n2", "n3", 5*time.Minute)),
+			want:  map[string]string{"move": "a recent move took a pod off n2"},
+		},
+		{name: "move older than the window", setup: history(moved("n2", "n1", 40*time.Minute))},
+		{name: "move without a replacement pod", setup: history(moved("n2", "", 5*time.Minute))},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			req := request(nil)
+			req := validateRequest()
 			if c.setup != nil {
 				c.setup(&req)
 			}
-			g := applyGates(req, testNow, DefaultConfig())
-			want := map[orchestrationv1alpha1.RebalanceAction]string{
-				orchestrationv1alpha1.RebalanceActionMove:            c.move,
-				orchestrationv1alpha1.RebalanceActionAdjustReplicas:  c.replicas,
-				orchestrationv1alpha1.RebalanceActionAdjustResources: c.resources,
-			}
-			for a, w := range want {
-				if got := g.reasonFor(a); !matches(got, w) {
-					t.Errorf("%s: got %q, want %q", a, got, w)
+			g := gatesFor(req)
+			for name, answer := range answers {
+				if got := g.blocks(changeOf(answer, req)); !matches(got, c.want[name]) {
+					t.Errorf("%s: got %q, want %q", name, got, c.want[name])
 				}
 			}
 		})
 	}
 }
 
-func TestIsAllowed(t *testing.T) {
-	g := applyGates(request(nil), testNow, DefaultConfig())
-	g.block(orchestrationv1alpha1.RebalanceActionMove, "test")
-	cases := map[orchestrationv1alpha1.RebalanceAction]bool{
-		orchestrationv1alpha1.RebalanceActionNoOp:           true,
-		orchestrationv1alpha1.RebalanceActionDefer:          true,
-		orchestrationv1alpha1.RebalanceActionReject:         true,
-		orchestrationv1alpha1.RebalanceActionEscalate:       true,
-		orchestrationv1alpha1.RebalanceActionAdjustReplicas: true,
-		orchestrationv1alpha1.RebalanceActionMove:           false,
-		"Teleport": false,
-	}
-	for a, want := range cases {
-		if got := g.isAllowed(a); got != want {
-			t.Errorf("isAllowed(%s) = %v, want %v", a, got, want)
-		}
-	}
-}
-
-func TestMoveBlocked(t *testing.T) {
-	healthy := map[string]nodeClass{"n1": classHealthy, "n2": classHealthy}
+func TestChangeOf(t *testing.T) {
+	req := validateRequest()
+	type resp = placement.RebalanceDecisionResponse
 	cases := []struct {
-		name    string
-		setup   func(req *placement.DecisionRequest)
-		classes map[string]nodeClass
-		want    string // "" means allowed, else part of the reason
+		name string
+		resp resp
+		want change
 	}{
-		{name: "free move", classes: healthy},
 		{
-			name:    "cooldown blocks a healthy source",
-			setup:   func(r *placement.DecisionRequest) { r.RebalanceContext.CooldownUntil = at(5 * time.Minute) },
-			classes: healthy,
-			want:    "cooldown until",
+			name: "move",
+			resp: resp{Action: orchestrationv1alpha1.RebalanceActionMove, PodName: "p1", TargetNode: "n2"},
+			want: change{action: orchestrationv1alpha1.RebalanceActionMove, addsPods: true, source: "n1", target: "n2"},
 		},
 		{
-			name:    "down source skips cooldown",
-			setup:   func(r *placement.DecisionRequest) { r.RebalanceContext.CooldownUntil = at(5 * time.Minute) },
-			classes: map[string]nodeClass{"n1": classDown, "n2": classHealthy},
+			name: "scale up",
+			resp: resp{Action: orchestrationv1alpha1.RebalanceActionAdjustReplicas, TargetReplicas: 4},
+			want: change{action: orchestrationv1alpha1.RebalanceActionAdjustReplicas, addsPods: true},
 		},
 		{
-			name: "churn: a recent move filled the source",
-			setup: func(r *placement.DecisionRequest) {
-				r.RebalanceContext.History = []orchestrationv1alpha1.HistoryEntry{moved("n0", "n1", 5*time.Minute)}
-			},
-			classes: healthy,
-			want:    "a recent move put a pod on n1",
+			name: "scale down",
+			resp: resp{Action: orchestrationv1alpha1.RebalanceActionAdjustReplicas, TargetReplicas: 2},
+			want: change{action: orchestrationv1alpha1.RebalanceActionAdjustReplicas},
 		},
 		{
-			name: "churn: an at-risk source may still move",
-			setup: func(r *placement.DecisionRequest) {
-				r.RebalanceContext.History = []orchestrationv1alpha1.HistoryEntry{moved("n0", "n1", 5*time.Minute)}
-			},
-			classes: map[string]nodeClass{"n1": classAtRisk, "n2": classHealthy},
+			name: "resize",
+			resp: resp{Action: orchestrationv1alpha1.RebalanceActionAdjustResources, ContainerName: "app"},
+			want: change{action: orchestrationv1alpha1.RebalanceActionAdjustResources, addsPods: true},
 		},
 		{
-			name: "ping-pong: a recent move emptied the target",
-			setup: func(r *placement.DecisionRequest) {
-				r.RebalanceContext.History = []orchestrationv1alpha1.HistoryEntry{moved("n2", "n3", 5*time.Minute)}
-			},
-			classes: healthy,
-			want:    "a recent move took a pod off n2",
+			name: "NoOp",
+			resp: resp{Action: orchestrationv1alpha1.RebalanceActionNoOp},
+			want: change{action: orchestrationv1alpha1.RebalanceActionNoOp},
 		},
 		{
-			name: "move older than the window",
-			setup: func(r *placement.DecisionRequest) {
-				r.RebalanceContext.History = []orchestrationv1alpha1.HistoryEntry{moved("n2", "n1", 40*time.Minute)}
-			},
-			classes: healthy,
-		},
-		{
-			name: "move without a replacement pod",
-			setup: func(r *placement.DecisionRequest) {
-				r.RebalanceContext.History = []orchestrationv1alpha1.HistoryEntry{moved("n2", "", 5*time.Minute)}
-			},
-			classes: healthy,
+			name: "unknown action is assumed to add pods",
+			resp: resp{Action: "Teleport"},
+			want: change{action: "Teleport", addsPods: true},
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			req := request(nil)
-			if c.setup != nil {
-				c.setup(&req)
-			}
-			g := applyGates(req, testNow, DefaultConfig())
-			if got := g.moveBlocked("n1", "n2", c.classes); !matches(got, c.want) {
-				t.Errorf("got %q, want %q", got, c.want)
+			if got := changeOf(c.resp, req); got != c.want {
+				t.Errorf("got %+v, want %+v", got, c.want)
 			}
 		})
+	}
+}
+
+func TestBlockedReasons(t *testing.T) {
+	req := validateRequest()
+	req.RebalanceContext.CooldownUntil = at(5 * time.Minute)
+	req.RebalanceContext.PDB = &placement.RebalancePDB{Name: "web"}
+	req.EAOProfile = eao(placement.EAOVerdictHold, time.Minute, nil)
+	managed(true, false)(&req)
+
+	want := []string{
+		"cooldown until 2026-10-30T12:05:00Z",
+		"AdjustReplicas: replicas are externally managed",
+		"Move: PDB web does not allow disruptions",
+		"new pods: EAO holds the workload for lack of energy",
+	}
+	if got := gatesFor(req).blockedReasons(); !slices.Equal(got, want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if got := gatesFor(validateRequest()).blockedReasons(); len(got) != 0 {
+		t.Errorf("got %q, want nothing blocked", got)
 	}
 }

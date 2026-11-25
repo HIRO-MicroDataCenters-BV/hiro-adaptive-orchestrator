@@ -15,12 +15,12 @@ const (
 	evacuationImprovement = 100
 )
 
-// Decide answers one rebalance request: gates, then the first rule that matches, checked by validate.
+// Decide answers one rebalance request: facts, gates, then the first rule that matches, checked by validate.
 func Decide(req placement.DecisionRequest,
 	now time.Time, rebalanceCfg Config,
 	scoreConfig scorer.Config) placement.RebalanceDecisionResponse {
-	g := applyGates(req, now, rebalanceCfg)
 	classes := classifyNodes(req, rebalanceCfg)
+	g := applyGates(req, now, rebalanceCfg, classes)
 
 	answer, matched := evacuateDownNode(req, classes, scoreConfig)
 	if !matched {
@@ -79,7 +79,7 @@ func evacuateDownNode(req placement.DecisionRequest, classes map[string]nodeClas
 }
 
 // noOp is the safe answer when no rule matched; it lists what the gates blocked.
-func noOp(req placement.DecisionRequest, g gateResult) placement.RebalanceDecisionResponse {
+func noOp(req placement.DecisionRequest, g gates) placement.RebalanceDecisionResponse {
 	reason := "no rule matched"
 	if reasons := g.blockedReasons(); len(reasons) > 0 {
 		reason += "; blocked: " + strings.Join(reasons, "; ")

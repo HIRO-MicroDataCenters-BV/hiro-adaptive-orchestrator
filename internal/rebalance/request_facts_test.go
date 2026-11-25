@@ -62,6 +62,13 @@ func TestRebalanceFacts_TriggerWorkloadAndPDB(t *testing.T) {
 	if w == nil || w.Replicas != 1 || w.MinReplicas != 2 || w.MaxReplicas != 6 {
 		t.Fatalf("workload = %+v, want replicas 1 and HPA bounds [2, 6]", w)
 	}
+	if w.ImprovementThreshold != DefaultImprovementThreshold {
+		t.Errorf("improvement threshold = %v, want the default %v", w.ImprovementThreshold, DefaultImprovementThreshold)
+	}
+	r.ImprovementThreshold = 35
+	if got := r.workloadFacts(context.Background(), profile).ImprovementThreshold; got != 35 {
+		t.Errorf("improvement threshold = %v, want the configured 35", got)
+	}
 	if facts.PDB == nil || facts.PDB.Name != "app-a-pdb" || facts.PDB.AllowedDisruptions != 0 {
 		t.Errorf("pdb = %+v, want app-a-pdb with 0 allowed disruptions", facts.PDB)
 	}

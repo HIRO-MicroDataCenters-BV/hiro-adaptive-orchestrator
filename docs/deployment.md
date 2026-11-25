@@ -60,6 +60,7 @@ always matches what was deployed:
 | `USE_AI_DECISION_SERVICE` | `true` | Deploy the bundled AI Decision Service (needed by `demo/demo_rebalance_with_ai_decision_service.sh`). Set only one of the two agents to `true`; the chart points the operator at it. Both `false`: an external agent at `hiro-operator.config.DECISION_AGENT_URL` |
 | `DEPLOY_SAMPLES` | `true` | Apply the nginx + `OrchestrationProfile` samples from `config/samples/` with kubectl after Helm. `clean` deletes only the sample profiles, not the shared nginx apps |
 | `DEPLOY_PROMETHEUS` | `false` | Bundle kube-prometheus-stack and turn on both ServiceMonitors, so the `hiro_*` metrics are scraped rather than just exposed |
+| `DEPLOY_METRICS_SERVER` | `true` | Bundle metrics-server, which gives the CPU/Memory triggers and each decision request live node and pod usage. Set `false` if the cluster already runs one |
 | `OTLP_ENDPOINT` | *(empty)* | OTLP gRPC collector for traces, e.g. `alloy.observability.svc:4317`. Empty disables tracing entirely |
 
 ```bash
@@ -272,6 +273,7 @@ Every parameter can be set as an environment variable before calling any deploy 
 | `PLACEMENT_FILTER_PATH` | `/api/v1/placement/filter` | HTTP path for the energy-gate filter check |
 | `PLACEMENT_SERVER_HEALTH_PATH` | `/healthz` | HTTP path for health probes |
 | `PLACEMENT_TIMEOUT_SECS` | `8` | Scheduler plugin → PlacementServer request timeout (seconds) |
+| `PLACEMENT_SERVER_REQUEST_TIMEOUT` | `10s` | Limit on one placement request inside the PlacementServer (Go duration). Must be greater than `DECISION_AGENT_TIMEOUT`, or the operator won't start |
 
 #### Operator — Decision Agent
 
@@ -280,6 +282,7 @@ Every parameter can be set as an environment variable before calling any deploy 
 | `USE_MOCK_AGENT` | `true` | Deploy and use the in-cluster mock agent (Phase 5 of `deploy_full_stack.sh`) |
 | `DECISION_AGENT_URL` | `http://mock-decision-agent:8080` (mock) | Base URL of the AI agent. **Required when `USE_MOCK_AGENT=false`.** |
 | `DECISION_AGENT_PATH` | `/api/v1/agent/placement/decision` | HTTP path on the AI agent |
+| `DECISION_AGENT_TIMEOUT` | `8s` | Limit on every AI agent call, placement and rebalance (Go duration). It also caps `REBALANCE_DECISION_TIMEOUT` |
 
 #### Operator — Extender Paths
 
@@ -391,7 +394,9 @@ The operator pod reads configuration exclusively from environment variables — 
 |----------|---------|---------|
 | `DECISION_AGENT_URL` | `http://mock-decision-agent:8080` | `decision.NewDecisionClient` |
 | `DECISION_AGENT_PATH` | `/api/v1/agent/placement/decision` | `decision.NewDecisionClient` |
+| `DECISION_AGENT_TIMEOUT` | `8s` | `decision.NewDecisionClient` |
 | `PLACEMENT_SERVER_PORT` | `:8090` | `decision.NewPlacementServer` |
+| `PLACEMENT_SERVER_REQUEST_TIMEOUT` | `10s` | `decision.NewPlacementServer` |
 | `PLACEMENT_SCORE_PATH` | `/api/v1/placement/score` | `decision.NewPlacementServer` |
 | `PLACEMENT_FILTER_PATH` | `/api/v1/placement/filter` | `decision.NewPlacementServer` |
 | `PLACEMENT_SERVER_HEALTH_PATH` | `/healthz` | `decision.NewPlacementServer` |

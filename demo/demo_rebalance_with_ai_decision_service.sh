@@ -216,6 +216,12 @@ ai_decision_found() {
   [ -n "$AI_LINE" ]
 }
 
+# Empty when the placement model is off, so the scorer decides.
+placement_model_provider() {
+  kubectl get deployment "$AI_DEPLOYMENT" -n "$NAMESPACE" \
+    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="AI_DECISION_SERVICE_MODEL_PROVIDER")].value}' 2>/dev/null || true
+}
+
 show_ai_decision() {
   local line
   line=$(ai_decision_line "\"flow\":\"$1\"")
@@ -705,8 +711,9 @@ scenario_healthy() {
 }
 
 scenario_placement() {
-  local strategy before uid
-  narrate "Each strategy scores a new pod. The service logs its answer under the pod's UID."
+  local strategy before uid provider
+  provider=$(placement_model_provider)
+  narrate "Each strategy scores a new pod. The service logs its answer under the pod's UID. Placement model: ${provider:-off}."
   pause
   disable_energy_awareness
   capture_original_replicas
@@ -722,7 +729,16 @@ scenario_placement() {
     uid=$(kubectl get pod "$NEW_POD" -n "$APP_NAMESPACE" -o jsonpath='{.metadata.uid}')
     if wait_until 20 "the service's decision for $NEW_POD" ai_decision_found "\"requestId\":\"$uid\""; then
       expect_contains "$strategy: placement flow" "$AI_LINE" '"flow":"placement"'
-      expect_contains "$strategy: the scorer decided" "$AI_LINE" '"decidedBy":"scorer"'
+      if [ -z "$provider" ]; then
+        expect_contains "$strategy: the scorer decided" "$AI_LINE" '"decidedBy":"scorer"'
+      else
+        # A fallback is designed behaviour, e.g. a cold or slow model, so it passes too.
+        case "$AI_LINE" in
+          *'"decidedBy":"model"'*) pass "$strategy: the $provider model decided" ;;
+          *'"decidedBy":"fallback"'*) pass "$strategy: the $provider model failed, so the scorer answered" ;;
+          *) fail "$strategy: the $provider model is on, but decidedBy is neither model nor fallback" ;;
+        esac
+      fi
       expect_contains "$strategy: the reason names the strategy" "$AI_LINE" "\"reason\":\"$strategy:"
       printf '       %s\n' "$(printf '%s' "$AI_LINE" | sed 's/.*"response"://' | cut -c1-200)"
     else
@@ -1117,7 +1133,7 @@ EOF
 }
 
 preflight() {
-  local ready url triggers trigger age
+  local ready url triggers trigger age provider
   step "Preflight"
   kubectl get deployment "$AI_DEPLOYMENT" -n "$NAMESPACE" >/dev/null 2>&1 \
     || die "$AI_DEPLOYMENT not found in $NAMESPACE. Deploy it: USE_AI_DECISION_SERVICE=true deploy/scripts/deploy_full_stack_with_helm.sh"
@@ -1138,6 +1154,8 @@ preflight() {
     "") echo "  Couldn't read the operator's DECISION_AGENT_URL; continuing." ;;
     *) die "The operator calls $url, not $AI_DEPLOYMENT." ;;
   esac
+  provider=$(placement_model_provider)
+  echo "  Placement model: ${provider:-off (the scorer decides)}"
 
   kubectl get orchestrationprofile "$PROFILE" >/dev/null 2>&1 || die "Profile $PROFILE not found. Run: kubectl apply -k config/samples/"
   kubectl get deployment "$APP" -n "$APP_NAMESPACE" >/dev/null 2>&1 || die "$APP not found. Run: kubectl apply -k config/samples/"

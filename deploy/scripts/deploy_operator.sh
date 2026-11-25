@@ -35,11 +35,13 @@
 #   PLACEMENT_SERVER_PORT     listening port              (default: :8090)
 #   PLACEMENT_SCORE_PATH     decision endpoint path      (default: /api/v1/placement/score)
 #   PLACEMENT_SERVER_HEALTH_PATH  health endpoint path    (default: /healthz)
+#   PLACEMENT_SERVER_REQUEST_TIMEOUT  one placement request limit (default: 10s; > DECISION_AGENT_TIMEOUT)
 #
 # ─── Decision Agent ──────────────────────────────────────────────────────────
 #   USE_MOCK_AGENT            true|false                  (default: true)
 #   DECISION_AGENT_URL        required when USE_MOCK_AGENT=false
 #   DECISION_AGENT_PATH       agent API path              (default: /api/v1/agent/placement/decision)
+#   DECISION_AGENT_TIMEOUT    limit on every agent call   (default: 8s)
 #
 # ─── Extender paths ──────────────────────────────────────────────────────────
 #   EXTENDER_FILTER_PATH      extender filter path        (default: /extender/filter)
@@ -150,7 +152,9 @@ export REBALANCE_MOVE_RATE_LIMIT="${REBALANCE_MOVE_RATE_LIMIT:-5}"
 export PLACEMENT_SERVER_PORT=${PLACEMENT_SERVER_PORT:-:8090}
 export PLACEMENT_SCORE_PATH=${PLACEMENT_SCORE_PATH:-/api/v1/placement/score}
 export PLACEMENT_SERVER_HEALTH_PATH=${PLACEMENT_SERVER_HEALTH_PATH:-/healthz}
+export PLACEMENT_SERVER_REQUEST_TIMEOUT=${PLACEMENT_SERVER_REQUEST_TIMEOUT:-10s}
 export DECISION_AGENT_PATH=${DECISION_AGENT_PATH:-/api/v1/agent/placement/decision}
+export DECISION_AGENT_TIMEOUT=${DECISION_AGENT_TIMEOUT:-8s}
 export EXTENDER_FILTER_PATH=${EXTENDER_FILTER_PATH:-/extender/filter}
 export EXTENDER_PRIORITIZE_PATH=${EXTENDER_PRIORITIZE_PATH:-/extender/prioritize}
 
@@ -199,6 +203,7 @@ print_config() {
   echo "  Port                   : $PLACEMENT_SERVER_PORT"
   echo "  Path                   : $PLACEMENT_SCORE_PATH"
   echo "  Health                 : $PLACEMENT_SERVER_HEALTH_PATH"
+  echo "  Request Timeout        : $PLACEMENT_SERVER_REQUEST_TIMEOUT"
   echo "Extender Filter    : $EXTENDER_FILTER_PATH"
   echo "Extender Prioritize: $EXTENDER_PRIORITIZE_PATH"
   if [ "$USE_MOCK_AGENT" = "true" ]; then
@@ -206,6 +211,7 @@ print_config() {
   else
     echo "Decision Agent     : REAL  ($DECISION_AGENT_URL)"
   fi
+  echo "Decision Agent Timeout: $DECISION_AGENT_TIMEOUT"
 }
 
 generate_code_and_manifests() {
@@ -287,9 +293,11 @@ inject_operator_env_vars() {
     -n "$NAMESPACE" \
     DECISION_AGENT_URL="$DECISION_AGENT_URL" \
     DECISION_AGENT_PATH="$DECISION_AGENT_PATH" \
+    DECISION_AGENT_TIMEOUT="$DECISION_AGENT_TIMEOUT" \
     PLACEMENT_SERVER_PORT="$PLACEMENT_SERVER_PORT" \
     PLACEMENT_SCORE_PATH="$PLACEMENT_SCORE_PATH" \
     PLACEMENT_SERVER_HEALTH_PATH="$PLACEMENT_SERVER_HEALTH_PATH" \
+    PLACEMENT_SERVER_REQUEST_TIMEOUT="$PLACEMENT_SERVER_REQUEST_TIMEOUT" \
     EXTENDER_FILTER_PATH="$EXTENDER_FILTER_PATH" \
     EXTENDER_PRIORITIZE_PATH="$EXTENDER_PRIORITIZE_PATH" \
     EAO_GROUP="$EAO_GROUP" \

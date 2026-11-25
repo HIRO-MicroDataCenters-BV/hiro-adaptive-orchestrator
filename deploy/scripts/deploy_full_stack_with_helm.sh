@@ -41,6 +41,9 @@
 #   DEPLOY_PROMETHEUS     Bundle kube-prometheus-stack and turn on both
 #                         ServiceMonitors, so the hiro_* metrics are actually
 #                         scraped instead of just exposed      (default: false)
+#   DEPLOY_METRICS_SERVER Bundle metrics-server: live node and pod usage for the
+#                         CPU/Memory triggers and each decision request. Set
+#                         false if the cluster already runs one (default: true)
 #   OTLP_ENDPOINT         OTLP gRPC collector for traces, e.g.
 #                         alloy.observability.svc:4317. Empty disables tracing
 #                         entirely — nothing is exported       (default: empty)
@@ -105,6 +108,7 @@ USE_MOCK_AGENT=${USE_MOCK_AGENT:-false}
 USE_AI_DECISION_SERVICE=${USE_AI_DECISION_SERVICE:-true}
 DEPLOY_SAMPLES=${DEPLOY_SAMPLES:-true}
 DEPLOY_PROMETHEUS=${DEPLOY_PROMETHEUS:-false}
+DEPLOY_METRICS_SERVER=${DEPLOY_METRICS_SERVER:-true}
 OTLP_ENDPOINT=${OTLP_ENDPOINT:-}
 SCHEDULER_MODE=${SCHEDULER_MODE:-plugin}
 KIND_KUBECONFIG_PATH="${REPO_ROOT}/.kind-kubeconfig-${KIND_CLUSTER_NAME}.yaml"
@@ -180,7 +184,8 @@ print_config() {
   echo "AI Decision Service  : $USE_AI_DECISION_SERVICE"
   echo "Samples              : $DEPLOY_SAMPLES"
   echo "Prometheus           : $DEPLOY_PROMETHEUS"
-  echo "Tracing endpoint     : ${OTLP_ENDPOINT:-<none>}"
+  echo "Metrics server       : $DEPLOY_METRICS_SERVER"
+  echo "Tracing endpoint    : ${OTLP_ENDPOINT:-<none>}"
   echo "========================================================"
 }
 
@@ -319,6 +324,7 @@ deploy_stack() {
       --set hiro-operator.manager.image.pullPolicy=IfNotPresent \
       --set hiro-operator.metrics.port=${OPERATOR_METRICS_PORT} \
       --set prerequisites.prometheus.enable=${DEPLOY_PROMETHEUS} \
+      --set prerequisites.metricsServer.enable=${DEPLOY_METRICS_SERVER} \
       --set hiro-operator.prometheus.enabled=${DEPLOY_PROMETHEUS}"
 
   # Settings are keys of one map, so a single --set changes one of them.
@@ -539,6 +545,11 @@ print_summary() {
   else
     echo -e "\033[33m    Prometheus        : not deployed  (hiro_* exposed but unscraped)\033[0m"
   fi
+  if [ "$DEPLOY_METRICS_SERVER" = "true" ]; then
+    echo -e "\033[32m    Metrics server    : deployed  (live usage: kubectl top nodes)\033[0m"
+  else
+    echo -e "\033[33m    Metrics server    : not bundled  (cluster's own, or usage left empty)\033[0m"
+  fi
   if [ -n "$OTLP_ENDPOINT" ]; then
     echo -e "\033[32m    Tracing           : on  ($OTLP_ENDPOINT)\033[0m"
   else
@@ -551,6 +562,8 @@ print_summary() {
 
   step "Pods in $HELM_NAMESPACE"
   kubectl -n "$HELM_NAMESPACE" get pods
+  echo ""
+  echo -e "\033[32m    Port-forward, access URLs, tracing and teardown steps are printed above this summary.\033[0m"
 }
 
 # Local ports differ from remote ones so a local process already bound to the
@@ -696,8 +709,6 @@ print_scrape_and_tracing_guide() {
     fi
     echo ""
   fi
-
-  print_teardown_hint
 }
 
 run_deploy() {
@@ -717,10 +728,11 @@ run_deploy() {
   fi
   check_placement_server_health
   apply_samples
-  print_summary
   print_port_forward_guide
   print_access_urls
   print_scrape_and_tracing_guide
+  print_teardown_hint
+  print_summary
 }
 
 # ---------------------------------------------------------------------------

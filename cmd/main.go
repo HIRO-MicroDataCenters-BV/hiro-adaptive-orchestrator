@@ -315,7 +315,11 @@ func main() {
 	//                             e.g. "http://ai-agent.hiro-system.svc:8080"
 	//   DECISION_AGENT_PATH     — HTTP path on the AI agent (optional)
 	//                             default: "/api/v1/agent/placement/decision"
+	//   DECISION_AGENT_TIMEOUT  — limit on every AI agent call, placement and rebalance (optional)
+	//                             default: "8s"; must be < PLACEMENT_SERVER_REQUEST_TIMEOUT
 	//   PLACEMENT_SERVER_PORT   — listening address (optional, default ":8090")
+	//   PLACEMENT_SERVER_REQUEST_TIMEOUT — limit on one placement request (optional)
+	//                                      default: "10s"
 	//   PLACEMENT_SCORE_PATH         — HTTP path for AI scoring (optional)
 	//                                  default: "/api/v1/placement/score"
 	//   PLACEMENT_FILTER_PATH        — HTTP path for energy gate filter (optional)
@@ -370,6 +374,22 @@ func main() {
 		extenderPrioritizePath = "/extender/prioritize"
 	}
 
+	decisionAgentTimeout := parseDurationEnv("DECISION_AGENT_TIMEOUT")
+	if decisionAgentTimeout <= 0 {
+		decisionAgentTimeout = placementserver.DefaultDecisionAgentTimeout
+	}
+	placementServerRequestTimeout := parseDurationEnv("PLACEMENT_SERVER_REQUEST_TIMEOUT")
+	if placementServerRequestTimeout <= 0 {
+		placementServerRequestTimeout = placementserver.DefaultRequestTimeout
+	}
+	// The request's limit also covers building the AI request, so the agent call must end sooner.
+	if decisionAgentTimeout >= placementServerRequestTimeout {
+		setupLog.Error(nil, "DECISION_AGENT_TIMEOUT must be less than PLACEMENT_SERVER_REQUEST_TIMEOUT",
+			"decisionAgentTimeout", decisionAgentTimeout,
+			"placementServerRequestTimeout", placementServerRequestTimeout)
+		os.Exit(1)
+	}
+
 	eaoGroup := os.Getenv("EAO_GROUP")
 	if eaoGroup == "" {
 		eaoGroup = "eas.hiro.io"
@@ -390,6 +410,8 @@ func main() {
 	setupLog.Info("decision layer configured",
 		"agentURL", decisionAgentURL,
 		"agentPath", decisionAgentPath,
+		"agentTimeout", decisionAgentTimeout,
+		"placementRequestTimeout", placementServerRequestTimeout,
 		"placementScorePath", placementScorePath,
 		"placementFilterPath", placementFilterPath,
 		"placementHealthPath", placementServerHealthPath,
@@ -425,10 +447,21 @@ func main() {
 	setupLog.Info("EAO action mapping configured",
 		"runNow", eaoSettings.VerdictConfig.RunNowActions, "hold", eaoSettings.VerdictConfig.HoldActions)
 
+	// metricsClient talks to metrics-server (metrics.k8s.io) for the
+	// CPUThreshold/MemoryThreshold trigger conditions and the live usage in
+	// each decision request. metrics-server is an optional cluster component —
+	// both soft-fail when it's unavailable, so this client is safe to construct unconditionally.
+	metricsClient, err := metricsclientset.NewForConfig(restConfig)
+	if err != nil {
+		setupLog.Error(err, "unable to create metrics-server client")
+		os.Exit(1)
+	}
+
 	contextBuilder := placementserver.NewDecisionContextBuilder(
 		mgr.GetClient(),
 		controller.ProfileByAppRefIndex,
 		eaoSettings,
+		metricsClient,
 	)
 
 	// Register the pod scheduler MutatingAdmissionWebhook.
@@ -448,7 +481,7 @@ func main() {
 	decisionClient := placementserver.NewDecisionClient(
 		decisionAgentURL,
 		decisionAgentPath,
-		8*time.Second, // must be < PlacementServer requestTimeout (10s)
+		decisionAgentTimeout,
 	)
 
 	// -------------------------------------------------------------------------
@@ -602,15 +635,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// metricsClient talks to metrics-server (metrics.k8s.io) for the
-	// CPUThreshold/MemoryThreshold trigger conditions. metrics-server is an
-	// optional cluster component — NodePressureEvaluator soft-fails per node
-	// when it's unavailable, so this client is safe to construct unconditionally.
-	metricsClient, err := metricsclientset.NewForConfig(restConfig)
-	if err != nil {
-		setupLog.Error(err, "unable to create metrics-server client")
-		os.Exit(1)
-	}
 	pressureEvaluator := rebalance.NewNodePressureEvaluator(mgr.GetClient(), metricsClient, rebalanceNodePressureThreshold)
 	triggerEvaluator := rebalance.NewTriggerEvaluator(
 		mgr.GetClient(), eaoSettings, pressureEvaluator, rebalanceMinPendingPodAge,
@@ -662,7 +686,7 @@ func main() {
 		placementServerHealthPath,
 		extenderFilterPath,
 		extenderPrioritizePath,
-		10*time.Second, // requestTimeout: must be > DecisionClient timeout
+		placementServerRequestTimeout,
 	)
 
 	// Start PlacementServer alongside the manager.

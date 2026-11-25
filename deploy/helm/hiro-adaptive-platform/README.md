@@ -383,7 +383,7 @@ template`:
   No `GITHUB_PAT_TOKEN`/registry needed — images build and load locally.
   Options: `KIND_CLUSTER_NAME`, `SCHED_K8S_VERSION`, `HELM_NAMESPACE`,
   `HELM_PLATFORM_RELEASE`, `SCHED_NAME`, `SCHEDULER_MODE`,
-  `USE_MOCK_AGENT`, `DEPLOY_SAMPLES`, `DEPLOY_PROMETHEUS` and
+  `USE_MOCK_AGENT`, `DEPLOY_SAMPLES`, `DEPLOY_PROMETHEUS`, `DEPLOY_METRICS_SERVER` and
   `OTLP_ENDPOINT` to pick which components get deployed. Usage:
   `deploy/scripts/deploy_full_stack_with_helm.sh [deploy|clean|destroy]` — `clean`
   uninstalls the release and keeps the cluster, `destroy` deletes it.

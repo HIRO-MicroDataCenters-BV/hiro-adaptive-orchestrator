@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -29,6 +30,12 @@ import (
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/metrics"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/internal/utils"
 )
+
+// Never Ever delete this comments as they are used by kubebuilder to generate RBAC permissions for the controller.
+// If you need to change the permissions,
+// modify the verbs and resources in the comments below and then run "make generate" to update the generated code.
+
+// +kubebuilder:rbac:groups=metrics.k8s.io,resources=nodes;pods,verbs=get;list
 
 // =============================================================================
 // DecisionContextBuilder
@@ -61,6 +68,9 @@ type DecisionContextBuilder struct {
 	// eaoSettings finds the EnergyAwareOrchestration (EAO_GROUP / EAO_VERSION / EAO_KIND)
 	// and reads its decision (EAO_RUN_NOW_ACTIONS / EAO_HOLD_ACTIONS).
 	eaoSettings EAOSettings
+
+	// metricsClient reads live node and pod usage from metrics-server; nil leaves usage unknown.
+	metricsClient metricsv.Interface
 }
 
 // NewDecisionContextBuilder creates a new builder.
@@ -68,15 +78,18 @@ type DecisionContextBuilder struct {
 // client:             the same client.Client the reconciler uses (informer cache)
 // profileIndexField:  the ProfileByAppRefIndex constant from op_index.go
 // eaoSettings:        how to find an app's EAO and read its decision
+// metricsClient:      metrics-server client for live usage; nil leaves usage unknown
 func NewDecisionContextBuilder(
 	c client.Client,
 	profileIndexField string,
 	eaoSettings EAOSettings,
+	metricsClient metricsv.Interface,
 ) *DecisionContextBuilder {
 	return &DecisionContextBuilder{
 		client:            c,
 		profileIndexField: profileIndexField,
 		eaoSettings:       eaoSettings,
+		metricsClient:     metricsClient,
 	}
 }
 
@@ -376,7 +389,7 @@ func (b *DecisionContextBuilder) BuildRebalanceContext(
 		RebalanceContext: &RebalanceContext{
 			Reason:            reason,
 			DecisionID:        decisionID,
-			CurrentPlacements: buildCurrentPlacements(pods),
+			CurrentPlacements: buildCurrentPlacements(pods, b.podUsed(ctx, profile.Spec.ApplicationRef.Namespace)),
 			RebalanceState:    facts.State,
 			Trigger:           facts.Trigger,
 			Workload:          facts.Workload,
@@ -462,14 +475,15 @@ func toleratesAll(ctx context.Context, taints []corev1.Taint, tolerations []core
 // buildCurrentPlacements converts every pod of the application into a
 // PodPlacement — the full layout snapshot a rebalance decision needs,
 // unlike buildCurrentPlacement's single-pod use for initial placement.
-func buildCurrentPlacements(pods []corev1.Pod) []PodPlacement {
+// used is live usage by pod and container name (podUsed); nil leaves usage unknown.
+func buildCurrentPlacements(pods []corev1.Pod, used map[string]map[string]corev1.ResourceList) []PodPlacement {
 	placements := make([]PodPlacement, 0, len(pods))
 	for i := range pods {
 		placements = append(placements, PodPlacement{
 			PodName:    pods[i].Name,
 			NodeName:   pods[i].Spec.NodeName,
 			Phase:      string(pods[i].Status.Phase),
-			Containers: buildContainerInfo(pods[i].Spec.Containers),
+			Containers: buildContainerInfo(pods[i].Spec.Containers, used[pods[i].Name]),
 		})
 	}
 	return placements
@@ -478,7 +492,7 @@ func buildCurrentPlacements(pods []corev1.Pod) []PodPlacement {
 // buildContainerInfo maps a pod's containers into the wire-format shown to
 // the AI — see ContainerInfo's doc comment on why (AdjustResources needs to
 // name a specific container and see its current values).
-func buildContainerInfo(containers []corev1.Container) []ContainerInfo {
+func buildContainerInfo(containers []corev1.Container, used map[string]corev1.ResourceList) []ContainerInfo {
 	if len(containers) == 0 {
 		return nil
 	}
@@ -490,9 +504,32 @@ func buildContainerInfo(containers []corev1.Container) []ContainerInfo {
 			MemoryRequest: quantityString(c.Resources.Requests, corev1.ResourceMemory),
 			CPULimit:      quantityString(c.Resources.Limits, corev1.ResourceCPU),
 			MemoryLimit:   quantityString(c.Resources.Limits, corev1.ResourceMemory),
+			CPUUsed:       quantityString(used[c.Name], corev1.ResourceCPU),
+			MemoryUsed:    quantityString(used[c.Name], corev1.ResourceMemory),
 		})
 	}
 	return infos
+}
+
+// podUsed returns live usage by pod and container name in namespace; nil when metrics-server is unavailable.
+func (b *DecisionContextBuilder) podUsed(ctx context.Context, namespace string) map[string]map[string]corev1.ResourceList {
+	if b.metricsClient == nil {
+		return nil
+	}
+	list, err := b.metricsClient.MetricsV1beta1().PodMetricses(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		logf.FromContext(ctx).V(1).Info("builder: pod usage unavailable, used left empty", "namespace", namespace, "err", err)
+		return nil
+	}
+	used := make(map[string]map[string]corev1.ResourceList, len(list.Items))
+	for i := range list.Items {
+		containers := make(map[string]corev1.ResourceList, len(list.Items[i].Containers))
+		for _, c := range list.Items[i].Containers {
+			containers[c.Name] = c.Usage
+		}
+		used[list.Items[i].Name] = containers
+	}
+	return used
 }
 
 // quantityString returns list[name]'s string form, or "" if list is nil or

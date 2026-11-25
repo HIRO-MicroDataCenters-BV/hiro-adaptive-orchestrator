@@ -93,8 +93,10 @@ rules:
   - metrics.k8s.io
   resources:
   - nodes
+  - pods
   verbs:
   - get
+  - list
 - apiGroups:
   - orchestration.hiro.io
   resources:

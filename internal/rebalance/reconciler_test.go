@@ -125,7 +125,7 @@ func newTestReconcilerWithAgent(t *testing.T, agentURL string, objs ...client.Ob
 	eaoSettings := placementserver.NewEAOSettings(testEAOGVK)
 	evaluator := NewTriggerEvaluator(c, eaoSettings, pressure, DefaultMinPendingPodAge)
 
-	contextBuilder := placementserver.NewDecisionContextBuilder(c, testProfileIndexField, eaoSettings)
+	contextBuilder := placementserver.NewDecisionContextBuilder(c, testProfileIndexField, eaoSettings, metricsClient)
 	decisionClient := placementserver.NewDecisionClient(agentURL, "", 200*time.Millisecond)
 
 	decisionStore := placementserver.NewDecisionStore(0)

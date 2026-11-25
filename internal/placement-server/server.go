@@ -56,6 +56,9 @@ import (
 // encode output in the format the caller expects.
 // =============================================================================
 
+// DefaultRequestTimeout limits one placement request; it must exceed the decision agent timeout.
+const DefaultRequestTimeout = 10 * time.Second
+
 // PlacementServer is the HTTP server that handles both the scheduler plugin
 // and the kube-scheduler extender protocols.
 type PlacementServer struct {

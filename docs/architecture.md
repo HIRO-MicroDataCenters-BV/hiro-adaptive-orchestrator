@@ -26,7 +26,9 @@ function-level call traces of both scheduling paths.
 │  Rebalance Engine                       │   │  [B] default kube-scheduler │
 │    Watching → Triggered → Evaluating    │   │      extender, cluster-wide │
 │    → Decided → Enacting                 │   │                             │
-│    (Move / RetryPendingSchedule)        │◄──┤  [A] → /placement/filter    │
+│    (Move / AdjustReplicas /             │   │                             │
+│     AdjustResources /                   │   │                             │
+│     RetryPendingSchedule)               │◄──┤  [A] → /placement/filter    │
 │    │ writes on Move                     │   │       /placement/score      │
 │    ▼                                    │   │  [B] → /extender/filter     │
 │  DecisionStore (shared, TTL-bounded)    │   │       /extender/prioritize  │
@@ -42,10 +44,13 @@ function-level call traces of both scheduling paths.
 └──────────────────┬───────────────────────┘   └─────────────────────────────┘
                    │ POST DecisionRequest / RebalanceContext
                    ▼
-         ┌──────────────────────┐
-         │  Decision Agent      │
-         │  (AI or Mock) :8080  │
-         └──────────────────────┘
+  ┌──────────────────────────────────────┐        ┌───────────────────────────┐
+  │  AI Decision Service :8080 (or Mock) │  POST  │  Kev (System One API)     │
+  │  ──────────────────────────────────  │───────▶│  optional, placement only │
+  │  placement: scorer → model → check   │        │  local Mac today          │
+  │     model off/slow/bad → scorer      │        └───────────────────────────┘
+  │  rebalance: gates → rules            │
+  └──────────────────────────────────────┘
 ```
 
 ```mermaid
@@ -55,7 +60,7 @@ flowchart TB
     subgraph Operator["HIRO Operator Pod"]
         direction TB
         Reconciler["Reconciler<br/>(placement status)"]
-        RE["Rebalance Engine<br/>Watching → Triggered → Evaluating<br/>→ Decided → Enacting<br/>(Move / RetryPendingSchedule)"]
+        RE["Rebalance Engine<br/>Watching → Triggered → Evaluating<br/>→ Decided → Enacting<br/>(Move / AdjustReplicas /<br/>AdjustResources / RetryPendingSchedule)"]
         Store[("DecisionStore<br/>shared, TTL-bounded")]
         PS["PlacementServer (:8090)<br/>─────────────────────<br/>/api/v1/placement/score<br/>/api/v1/placement/filter<br/>/extender/filter<br/>/extender/prioritize<br/>/healthz"]
 
@@ -69,7 +74,8 @@ flowchart TB
         B["[B] default kube-scheduler<br/>extender, cluster-wide"]
     end
 
-    Agent["Decision Agent<br/>(AI or Mock) :8080"]
+    Agent["AI Decision Service :8080 (or Mock)<br/>─────────────────────<br/>placement: scorer → model → check<br/>model off/slow/bad → scorer<br/>rebalance: gates → rules"]
+    Kev["Kev (System One API)<br/>optional, placement only<br/>local Mac today"]
 
     API -->|"watch OrchestrationProfile / EAO<br/>watch Deployments/StatefulSets/Jobs"| Reconciler
     API -->|"watch Pod/Node events<br/>+ periodic tick"| RE
@@ -78,7 +84,10 @@ flowchart TB
     B -->|"[B] → /extender/filter<br/>/extender/prioritize"| PS
     PS -->|"POST DecisionRequest"| Agent
     RE -->|"POST RebalanceContext"| Agent
+    Agent -->|"POST"| Kev
 ```
+
+The operator calls whatever `DECISION_AGENT_URL` points at: the AI Decision Service or the mock. For the service's scorer, model, answer checks and settings, see [ai-decision-service/README.md](../ai-decision-service/README.md).
 
 <a id="reconciliation-flow"></a>
 ## Reconciliation Flow
@@ -156,7 +165,7 @@ flowchart LR
         R4["GET /healthz → 200 ok"]
     end
 
-    Agent["Decision<br/>Agent :8080"]
+    Agent["AI Decision Service<br/>:8080 (or Mock)"]
 
     Plugin --> R0
     Plugin --> R1
@@ -179,7 +188,7 @@ End-to-end flow for pods with `spec.schedulerName: hiro-scheduler`. The `HIROSco
 sequenceDiagram
     participant Sched as hiro-scheduler
     participant PS as PlacementServer<br/>(:8090, operator pod)
-    participant Agent as External Decision<br/>Agent (:8080)
+    participant Agent as AI Decision Service<br/>(:8080, or Mock)
 
     Note over Sched: Pod created with<br/>spec.schedulerName: hiro-scheduler
     Sched->>PS: PreFilter — POST /api/v1/placement/filter<br/>Body: EnergyGateRequest{pod}
@@ -193,8 +202,8 @@ sequenceDiagram
     activate PS
     PS->>PS: Decode PlacementContext
     PS->>PS: builder.Build() — assemble DecisionRequest<br/>findProfileForPod() (O(1) field index)<br/>buildAOProfileContext() (strategy + awareness + placement)<br/>fetchEAOProfile() (if awareness.Energy=true)
-    PS->>Agent: client.RequestDecision()<br/>POST DECISION_AGENT_URL<br/>Body: DecisionRequest{pod, candidateNodes, AOProfile, EAOProfile}
-    Agent-->>PS: {nodeScores: [{nodeName, score 0-100}], reason}
+    PS->>Agent: client.RequestDecision()<br/>POST DECISION_AGENT_URL<br/>Body: DecisionRequest{pod, nodeStats, AOProfile, EAOProfile}
+    Agent-->>PS: {nodeScores: [{nodeName, score 0-100}], reason, confidence, decidedBy}
     PS-->>Sched: 200 OK {nodeScores, reason}
     deactivate PS
     Sched->>Sched: PreScore stashes NodeScores in CycleState

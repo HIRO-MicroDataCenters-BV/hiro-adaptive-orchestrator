@@ -74,6 +74,7 @@ func (b *DecisionContextBuilder) buildNodeStats(
 		logger.Info("builder: app pods unavailable, appPods left null", "err", err)
 	}
 	podImages := imagesOf(pod)
+	nodeUsed := b.nodeUsed(ctx)
 
 	now := metav1.Now()
 	stats := make([]NodeStat, 0, len(nodes))
@@ -88,9 +89,41 @@ func (b *DecisionContextBuilder) buildNodeStats(
 		} else {
 			addUsage(&stat, podList.Items, appUIDs)
 		}
+		addUsed(&stat, nodeUsed[node.Name])
 		stats = append(stats, stat)
 	}
 	return stats
+}
+
+// nodeUsed returns each node's live usage from metrics-server; nil when it's unavailable.
+func (b *DecisionContextBuilder) nodeUsed(ctx context.Context) map[string]corev1.ResourceList {
+	if b.metricsClient == nil {
+		return nil
+	}
+	list, err := b.metricsClient.MetricsV1beta1().NodeMetricses().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		// V(1): every request would log it on a cluster without metrics-server.
+		logf.FromContext(ctx).V(1).Info("builder: node usage unavailable, used left null", "err", err)
+		return nil
+	}
+	used := make(map[string]corev1.ResourceList, len(list.Items))
+	for i := range list.Items {
+		used[list.Items[i].Name] = list.Items[i].Usage
+	}
+	return used
+}
+
+// addUsed fills Used for each resource the node reports and metrics-server measured.
+func addUsed(stat *NodeStat, used corev1.ResourceList) {
+	for name, q := range used {
+		r, ok := stat.Resources[string(name)]
+		if !ok {
+			continue
+		}
+		v := baseValue(name, q)
+		r.Used = &v
+		stat.Resources[string(name)] = r
+	}
 }
 
 // nonCandidateNodeStats lists, with candidate=false, the nodes hosting the app's pods that
