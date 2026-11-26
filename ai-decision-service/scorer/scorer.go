@@ -49,8 +49,8 @@ func ScoredResources(profile *placement.AOProfileContext) []string {
 	return resources
 }
 
-// average returns the mean utilisation among the scored resources.
-func average(util map[string]float64) float64 {
+// Average returns the mean utilisation among the scored resources.
+func Average(util map[string]float64) float64 {
 	var sum float64
 	for _, u := range util {
 		sum += u
@@ -61,8 +61,8 @@ func average(util map[string]float64) float64 {
 	return sum / float64(len(util))
 }
 
-// RequestedUtilization is (requested + pod) / allocatable per resource; ok is false when any of it is unknown.
-func RequestedUtilization(node placement.NodeStat,
+// Utilization is (requested + pod) / allocatable per resource; ok is false when any of it is unknown.
+func Utilization(node placement.NodeStat,
 	pod map[string]int64,
 	resources []string) (util map[string]float64, ok bool) {
 	util = make(map[string]float64)
@@ -71,7 +71,11 @@ func RequestedUtilization(node placement.NodeStat,
 		if !found || nr.Requested == nil || nr.Allocatable <= 0 {
 			return nil, false
 		}
-		util[r] = float64(*nr.Requested+pod[r]) / float64(nr.Allocatable)
+		base := *nr.Requested
+		if nr.Used != nil {
+			base = max(base, *nr.Used) // a node busy by usage must not look empty
+		}
+		util[r] = float64(base+pod[r]) / float64(nr.Allocatable)
 	}
 	return util, true
 }
@@ -93,7 +97,7 @@ func packedScore(util map[string]float64, cfg Config) float64 {
 	if highest > cfg.PackedMaxUtil {
 		return 0
 	}
-	return 100 * average(util)
+	return 100 * Average(util)
 }
 
 // balancedScore prefers emptier nodes, minus a penalty when CPU and memory are uneven.
@@ -115,36 +119,36 @@ func balancedScore(util map[string]float64, cfg Config) float64 {
 	return score
 }
 
-// spreadCounts is how many of the app's pods each zone has, and the highest zone and node counts.
-type spreadCounts struct {
-	zoneCounts       map[string]int
-	highestZoneCount int
-	highestNodeCount int
+// SpreadCounts is how many of the app's pods each zone has, and the highest zone and node counts.
+type SpreadCounts struct {
+	ZoneCounts       map[string]int
+	HighestZoneCount int
+	HighestNodeCount int
 }
 
-// countAppPodsPerZone counts the app's pods per zone;
+// CountAppPodsPerZone counts the app's pods per zone;
 // nodes with unknown appPods or no zone label are skipped for zones.
-func countAppPodsPerZone(nodes []placement.NodeStat, cfg Config) spreadCounts {
-	counts := spreadCounts{
-		zoneCounts: make(map[string]int),
+func CountAppPodsPerZone(nodes []placement.NodeStat, cfg Config) SpreadCounts {
+	counts := SpreadCounts{
+		ZoneCounts: make(map[string]int),
 	}
 	for _, node := range nodes {
 		appPods := node.AppPods
 		if appPods == nil {
 			continue
 		}
-		counts.highestNodeCount = max(counts.highestNodeCount, *appPods)
+		counts.HighestNodeCount = max(counts.HighestNodeCount, *appPods)
 		zone := node.Labels[cfg.ZoneLabel]
 		if zone != "" {
-			counts.zoneCounts[zone] += *appPods
-			counts.highestZoneCount = max(counts.highestZoneCount, counts.zoneCounts[zone])
+			counts.ZoneCounts[zone] += *appPods
+			counts.HighestZoneCount = max(counts.HighestZoneCount, counts.ZoneCounts[zone])
 		}
 	}
 	return counts
 }
 
 // spreadScore prefers nodes and zones with fewer of the app's pods, with Balanced as a tie-break.
-func spreadScore(node placement.NodeStat, util map[string]float64, counts spreadCounts, cfg Config) float64 {
+func spreadScore(node placement.NodeStat, util map[string]float64, counts SpreadCounts, cfg Config) float64 {
 	if maxUtil(util) > 1 {
 		return 0
 	}
@@ -152,20 +156,20 @@ func spreadScore(node placement.NodeStat, util map[string]float64, counts spread
 	var nodePart float64
 	if node.AppPods == nil {
 		nodePart = cfg.UnknownScore
-	} else if counts.highestNodeCount == 0 {
+	} else if counts.HighestNodeCount == 0 {
 		nodePart = 100
 	} else {
-		nodePart = 100 * (1 - float64(*node.AppPods)/float64(counts.highestNodeCount))
+		nodePart = 100 * (1 - float64(*node.AppPods)/float64(counts.HighestNodeCount))
 	}
 
 	var zonePart float64
 	zone := node.Labels[cfg.ZoneLabel]
 	if zone == "" {
 		zonePart = nodePart
-	} else if counts.highestZoneCount == 0 {
+	} else if counts.HighestZoneCount == 0 {
 		zonePart = 100
 	} else {
-		zonePart = 100 * (1 - float64(counts.zoneCounts[zone])/float64(counts.highestZoneCount))
+		zonePart = 100 * (1 - float64(counts.ZoneCounts[zone])/float64(counts.HighestZoneCount))
 	}
 
 	zoneWeight := cfg.SpreadZoneWeight
@@ -181,7 +185,7 @@ func Score(req placement.DecisionRequest, cfg Config) ([]placement.NodeScore, st
 	strategy := Strategy(req.AOProfile)
 	pod := PodRequests(req.Pod)
 	resources := ScoredResources(req.AOProfile)
-	counts := countAppPodsPerZone(req.NodeStats, cfg)
+	counts := CountAppPodsPerZone(req.NodeStats, cfg)
 
 	nodeScores := make([]placement.NodeScore, 0, len(req.NodeStats))
 	var bestNodeScore float64
@@ -191,7 +195,7 @@ func Score(req placement.DecisionRequest, cfg Config) ([]placement.NodeScore, st
 			continue // not a target; rebalance requests list it only so the decider sees every pod's node
 		}
 		var score float64
-		util, ok := RequestedUtilization(nodeStat, pod, resources)
+		util, ok := Utilization(nodeStat, pod, resources)
 		if !ok {
 			score = cfg.UnknownScore
 		} else {

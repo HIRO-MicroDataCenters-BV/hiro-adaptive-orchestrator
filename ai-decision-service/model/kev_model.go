@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/scorer"
@@ -52,6 +51,7 @@ type kevAnswer struct {
 // KevDecider asks Kev, through its System One API, where to place a pod.
 type KevDecider struct {
 	cfg        Config
+	scorerCfg  scorer.Config
 	httpClient *http.Client
 	log        *slog.Logger
 }
@@ -59,14 +59,14 @@ type KevDecider struct {
 var _ PlacementDecider = (*KevDecider)(nil) // the build fails if KevDecider stops matching the interface
 
 // NewKevDecider returns a KevDecider whose calls stop after cfg.Timeout.
-func NewKevDecider(cfg Config, log *slog.Logger) *KevDecider {
-	return &KevDecider{cfg: cfg, httpClient: &http.Client{Timeout: cfg.Timeout}, log: log}
+func NewKevDecider(cfg Config, scorerCfg scorer.Config, log *slog.Logger) *KevDecider {
+	return &KevDecider{cfg: cfg, scorerCfg: scorerCfg, httpClient: &http.Client{Timeout: cfg.Timeout}, log: log}
 }
 
 // DecidePlacement asks Kev where to place a pod based on the current node statistics and AO profile.
 func (kd *KevDecider) DecidePlacement(ctx context.Context,
 	req placement.DecisionRequest) (placement.DecisionResponse, error) {
-	kevReq := buildKevRequest(req, kd.cfg.ModelName)
+	kevReq := buildKevRequest(req, kd.cfg.ModelName, kd.scorerCfg)
 	if len(kevReq.Questions[kevQuestionID].Criteria) == 0 {
 		return placement.DecisionResponse{},
 			fmt.Errorf("(requestId=%s) no candidate nodes to ask Kev about", req.RequestID)
@@ -146,59 +146,101 @@ func (kd *KevDecider) DecidePlacement(ctx context.Context,
 	return placementResp, nil
 }
 
-// strategyRule spells out the strategy, as Kev picks poorly without it; default is Balanced, as in the scorer.
-func strategyRule(strategy string) string {
+// strategyWording gives the strategy's purpose (for the state) and the one positive rule Kev ranks nodes by;
+// negated rules made Kev pick worse. Default is Balanced, as in the scorer.
+func strategyWording(strategy string, packedMaxUtil float64) (purpose, priority string) {
 	switch strategy {
 	case string(orchestrationv1alpha1.PlacementStrategyPacked):
-		return "Pick the node with the highest CPU and memory usage, whatever its pod count."
+		return fmt.Sprintf("Strategy: Packed. To save energy, fill nodes that are already in use so other nodes "+
+				"can stay empty, but no node may go over %.0f%% on any resource.", 100*packedMaxUtil),
+			"Under Packed, the fuller node is the better place."
 	case string(orchestrationv1alpha1.PlacementStrategySpread):
-		return "Pick the node with the fewest pods of this app, even if it is busier."
+		return "Strategy: Spread. For high availability, keep this app's pods apart, so that losing one node, " +
+				"or one zone, takes down as few of them as possible.",
+			"Under Spread, fewer of this app's pods in the node's zone is better; if that is the same, " +
+				"fewer of this app's pods on the node is better; only if both are the same, the less busy node is better."
 	default:
-		return "Pick the node with the lowest CPU and memory usage, whatever its pod count."
+		return "Strategy: Balanced. The app is latency sensitive, so no node should become a hotspot on any resource.",
+			"Under Balanced, the node with lower CPU and memory use is the better place."
 	}
 }
 
-// buildKevRequest constructs the request to be sent to Kev, including the current state, model, and questions.
-func buildKevRequest(req placement.DecisionRequest, modelName string) kevRequest {
-	criteria := make(map[string]string)
+// nodeFacts describes one node with the pod placed, leading with what the strategy ranks by.
+func nodeFacts(strategy string, util map[string]float64, resources []string,
+	appPods *int, zone string, zonePods int) string {
+	levels := make([]string, 0, len(resources))
+	busiest := resources[0]
+	for i, resource := range resources {
+		verb := "at"
+		if i == 0 {
+			verb = "would be at"
+		}
+		levels = append(levels, fmt.Sprintf("%s %s %.0f%%", resource, verb, 100*util[resource]))
+		if util[resource] > util[busiest] {
+			busiest = resource
+		}
+	}
+	usage := strings.Join(levels, " and ") // "cpu would be at 60% and memory at 58%"
 
+	switch strategy {
+	case string(orchestrationv1alpha1.PlacementStrategyPacked):
+		return fmt.Sprintf("with this pod placed, it would be %.0f%% full on average; %s", 100*scorer.Average(util), usage)
+	case string(orchestrationv1alpha1.PlacementStrategySpread):
+		nodePods := "an unknown number of pods"
+		if appPods != nil {
+			nodePods = podCount(*appPods)
+		}
+		where := fmt.Sprintf("this app already runs %s on this node", nodePods)
+		if zone != "" {
+			where = fmt.Sprintf("this app already runs %s in this node's zone, %s, and %s on this node",
+				podCount(zonePods), zone, nodePods)
+		}
+		return fmt.Sprintf("%s; with this pod placed, its busiest resource, %s, would be at %.0f%%; %s",
+			where, busiest, 100*util[busiest], usage)
+	default:
+		return "with this pod placed, " + usage
+	}
+}
+
+// podCount reads "1 pod" or "3 pods".
+func podCount(n int) string {
+	if n == 1 {
+		return "1 pod"
+	}
+	return fmt.Sprintf("%d pods", n)
+}
+
+// buildKevRequest asks Kev one choice question over the candidate nodes, each described with the pod placed.
+func buildKevRequest(req placement.DecisionRequest, modelName string, scorerCfg scorer.Config) kevRequest {
 	strategy := scorer.Strategy(req.AOProfile)
+	purpose, priority := strategyWording(strategy, scorerCfg.PackedMaxUtil)
 	podSize := scorer.PodRequests(req.Pod)
-	cpu := podSize[corev1.ResourceCPU.String()]
-	memBytes := podSize[corev1.ResourceMemory.String()]
-	mem := memBytes / (1024 * 1024)
-	stateStr := "Placing a pod that requests " +
-		fmt.Sprintf("%dm", cpu) + " CPU and " +
-		fmt.Sprintf("%dMi", mem) + " memory. Strategy: " +
-		strategy + "."
-	instrStr := strategyRule(strategy)
+	state := fmt.Sprintf("Choosing a node for a new pod of this app, which requests %dm CPU and %dMi memory. %s",
+		podSize[corev1.ResourceCPU.String()], podSize[corev1.ResourceMemory.String()]/(1024*1024), purpose)
+
 	resources := scorer.ScoredResources(req.AOProfile)
+	zonePods := scorer.CountAppPodsPerZone(req.NodeStats, scorerCfg).ZoneCounts // all nodes, so non-candidates count too
+	criteria := make(map[string]string)
 	for _, nodeStat := range req.NodeStats {
 		if !nodeStat.Candidate {
 			continue // Kev may only choose among candidates
 		}
-		usage := "usage unknown"
-		if util, ok := scorer.RequestedUtilization(nodeStat, nil, resources); ok {
-			parts := make([]string, 0, len(resources))
-			for _, resource := range resources {
-				parts = append(parts, fmt.Sprintf("%s %.1f%% requested", resource, 100*util[resource]))
-			}
-			usage = strings.Join(parts, ", ")
+		util, ok := scorer.Utilization(nodeStat, podSize, resources)
+		if !ok {
+			criteria[nodeStat.Name] = "usage unknown"
+			continue
 		}
-		pods := "unknown"
-		if nodeStat.AppPods != nil {
-			pods = strconv.Itoa(*nodeStat.AppPods)
-		}
-		criteria[nodeStat.Name] = fmt.Sprintf("%s, %s pods of this app", usage, pods)
+		zone := nodeStat.Labels[scorerCfg.ZoneLabel]
+		criteria[nodeStat.Name] = nodeFacts(strategy, util, resources, nodeStat.AppPods, zone, zonePods[zone])
 	}
 
 	return kevRequest{
-		State: stateStr,
+		State: state,
 		Model: modelName,
 		Questions: map[string]kevQuestion{
 			kevQuestionID: {
 				Type:         kevQuestionTypeChoice,
-				Instructions: instrStr,
+				Instructions: "Which node is the best place for this pod? " + priority,
 				Criteria:     criteria,
 			},
 		},

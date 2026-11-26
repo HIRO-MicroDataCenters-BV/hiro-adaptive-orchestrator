@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/scorer"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -43,12 +44,29 @@ func podRequesting(cpu, memory string) *corev1.Pod {
 	return pod
 }
 
+// inZone puts the node in zone, under the scorer's default zone label.
+func inZone(n placement.NodeStat, zone string) placement.NodeStat {
+	n.Labels = map[string]string{scorer.DefaultZoneLabel: zone}
+	return n
+}
+
 func TestBuildKevRequest(t *testing.T) {
-	knownNode := nodeStat("sample-worker", 4000, 200, 8<<30, 1<<30, 1, true)
-	knownNodeFacts := "cpu 5.0% requested, memory 12.5% requested, 1 pods of this app"
-	unknownNode := placement.NodeStat{Name: "sample-worker2", Candidate: true}
-	unknownNodeFacts := "usage unknown, unknown pods of this app"
-	nonCandidateNode := placement.NodeStat{Name: "sample-worker3", Candidate: false}
+	const (
+		smallPod = "Choosing a node for a new pod of this app, which requests 50m CPU and 64Mi memory. "
+		ask      = "Which node is the best place for this pod? "
+		balanced = "Strategy: Balanced. The app is latency sensitive, so no node should become a hotspot on any resource."
+		packed   = "Strategy: Packed. To save energy, fill nodes that are already in use so other nodes can stay empty, " +
+			"but no node may go over 85% on any resource."
+		spread = "Strategy: Spread. For high availability, keep this app's pods apart, so that losing one node, " +
+			"or one zone, takes down as few of them as possible."
+		spreadRule = "Under Spread, fewer of this app's pods in the node's zone is better; if that is the same, " +
+			"fewer of this app's pods on the node is better; only if both are the same, the less busy node is better."
+		// a 50m / 64Mi pod on worker: cpu (200+50)/4000 = 6%, memory (1Gi+64Mi)/8Gi = 13%
+		smallPodUsage = "its busiest resource, memory, would be at 13%; cpu would be at 6% and memory at 13%"
+	)
+	worker := nodeStat("sample-worker", 4000, 200, 8<<30, 1<<30, 1, true)
+	unknown := placement.NodeStat{Name: "sample-worker2", Candidate: true}
+	nonCandidate := nodeStat("sample-worker3", 4000, 200, 8<<30, 1<<30, 2, false)
 
 	cases := []struct {
 		name             string
@@ -58,58 +76,54 @@ func TestBuildKevRequest(t *testing.T) {
 		wantCriteria     map[string]string // exact, so an extra node fails too
 	}{
 		{
-			name: "spread with known facts",
-			req: placement.DecisionRequest{
-				AOProfile: &placement.AOProfileContext{Strategy: "Spread"},
-				Pod:       podRequesting("50m", "64Mi"),
-				NodeStats: []placement.NodeStat{knownNode},
-			},
-			wantState:        "Placing a pod that requests 50m CPU and 64Mi memory. Strategy: Spread.",
-			wantInstructions: "Pick the node with the fewest pods of this app, even if it is busier.",
+			name: "balanced by default, pod counted",
+			req:  placement.DecisionRequest{Pod: podRequesting("1", "1Gi"), NodeStats: []placement.NodeStat{worker}},
+			wantState: "Choosing a node for a new pod of this app, which requests 1000m CPU and 1024Mi memory. " +
+				balanced,
+			wantInstructions: ask + "Under Balanced, the node with lower CPU and memory use is the better place.",
+			wantCriteria:     map[string]string{"sample-worker": "with this pod placed, cpu would be at 30% and memory at 25%"},
+		},
+		{
+			name: "packed leads with the average",
+			req: placement.DecisionRequest{AOProfile: &placement.AOProfileContext{Strategy: "Packed"},
+				Pod: podRequesting("50m", "64Mi"), NodeStats: []placement.NodeStat{worker}},
+			wantState:        smallPod + packed,
+			wantInstructions: ask + "Under Packed, the fuller node is the better place.",
 			wantCriteria: map[string]string{
-				"sample-worker": knownNodeFacts,
-			},
+				"sample-worker": "with this pod placed, it would be 10% full on average; cpu would be at 6% and memory at 13%"},
 		},
 		{
-			name: "spread with unknown facts",
-			req: placement.DecisionRequest{
-				AOProfile: &placement.AOProfileContext{Strategy: "Spread"},
-				Pod:       podRequesting("50m", "64Mi"),
-				NodeStats: []placement.NodeStat{knownNode, unknownNode},
-			},
-			wantState:        "Placing a pod that requests 50m CPU and 64Mi memory. Strategy: Spread.",
-			wantInstructions: "Pick the node with the fewest pods of this app, even if it is busier.",
+			name: "spread without zones skips non-candidates and marks unknown usage",
+			req: placement.DecisionRequest{AOProfile: &placement.AOProfileContext{Strategy: "Spread"},
+				Pod: podRequesting("50m", "64Mi"), NodeStats: []placement.NodeStat{worker, unknown, nonCandidate}},
+			wantState:        smallPod + spread,
+			wantInstructions: ask + spreadRule,
 			wantCriteria: map[string]string{
-				"sample-worker":  knownNodeFacts,
-				"sample-worker2": unknownNodeFacts,
+				"sample-worker":  "this app already runs 1 pod on this node; with this pod placed, " + smallPodUsage,
+				"sample-worker2": "usage unknown",
 			},
 		},
 		{
-			name: "Non candidate node",
-			req: placement.DecisionRequest{
-				AOProfile: &placement.AOProfileContext{Strategy: "Spread"},
-				Pod:       podRequesting("50m", "64Mi"),
-				NodeStats: []placement.NodeStat{knownNode, nonCandidateNode},
+			name: "spread counts zone pods on every node, candidate or not",
+			req: placement.DecisionRequest{AOProfile: &placement.AOProfileContext{Strategy: "Spread"},
+				Pod: podRequesting("50m", "64Mi"), NodeStats: []placement.NodeStat{
+					inZone(nodeStat("w1", 4000, 200, 8<<30, 1<<30, 0, true), "a"),
+					inZone(nodeStat("w2", 4000, 200, 8<<30, 1<<30, 1, true), "b"),
+					inZone(nonCandidate, "a"),
+				}},
+			wantState:        smallPod + spread,
+			wantInstructions: ask + spreadRule,
+			wantCriteria: map[string]string{
+				"w1": "this app already runs 2 pods in this node's zone, a, and 0 pods on this node; " +
+					"with this pod placed, " + smallPodUsage,
+				"w2": "this app already runs 1 pod in this node's zone, b, and 1 pod on this node; " +
+					"with this pod placed, " + smallPodUsage,
 			},
-			wantState:        "Placing a pod that requests 50m CPU and 64Mi memory. Strategy: Spread.",
-			wantInstructions: "Pick the node with the fewest pods of this app, even if it is busier.",
-			wantCriteria:     map[string]string{"sample-worker": knownNodeFacts},
-		},
-		{
-			name: "Nil Profile",
-			req: placement.DecisionRequest{
-				AOProfile: nil,
-				Pod:       podRequesting("1", "1Gi"),
-				NodeStats: []placement.NodeStat{knownNode},
-			},
-			wantState:        "Placing a pod that requests 1000m CPU and 1024Mi memory. Strategy: Balanced.",
-			wantInstructions: "Pick the node with the lowest CPU and memory usage, whatever its pod count.",
-			wantCriteria:     map[string]string{"sample-worker": knownNodeFacts},
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := buildKevRequest(c.req, "kev-latest")
+			got := buildKevRequest(c.req, "kev-latest", scorer.DefaultConfig())
 			question, found := got.Questions[kevQuestionID]
 			if !found {
 				t.Fatalf("no question under %q", kevQuestionID)
@@ -173,7 +187,7 @@ func kevTestDecider(baseURL string, timeout time.Duration) *KevDecider {
 		Path:      kevTestPath,
 		ModelName: kevTestModel,
 		Timeout:   timeout,
-	}, discardLog)
+	}, scorer.DefaultConfig(), discardLog)
 }
 
 // kevTestRequest builds a Spread request for a small pod over nodes.

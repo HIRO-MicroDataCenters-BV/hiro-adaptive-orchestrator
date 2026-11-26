@@ -40,6 +40,14 @@ func node(name, zone string, cpuAlloc, cpuReq, memAlloc, memReq int64, appPods i
 	}
 }
 
+// withUsed sets the node's live cpu and memory usage.
+func withUsed(n placement.NodeStat, cpuUsed, memUsed int64) placement.NodeStat {
+	cpu, mem := n.Resources["cpu"], n.Resources["memory"]
+	cpu.Used, mem.Used = &cpuUsed, &memUsed
+	n.Resources["cpu"], n.Resources["memory"] = cpu, mem
+	return n
+}
+
 func TestFormulas(t *testing.T) {
 	// Test cases for the formula function can be added here.
 	cfg := DefaultConfig()
@@ -60,6 +68,34 @@ func TestFormulas(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if !near(c.got, c.want) {
 				t.Errorf("%s: got %v, want %v", c.name, c.got, c.want)
+			}
+		})
+	}
+}
+
+func TestUtilization(t *testing.T) {
+	resources := []string{"cpu", "memory"}
+	pod := map[string]int64{"cpu": 100, "memory": 0}
+	cases := []struct {
+		name    string
+		node    placement.NodeStat
+		wantCPU float64
+	}{
+		{name: "used above requested counts the usage",
+			node: withUsed(node("a", "", 1000, 100, 1000, 100, 0, true), 900, 100), wantCPU: 1.0},
+		{name: "used below requested keeps the reservation",
+			node: withUsed(node("b", "", 1000, 400, 1000, 100, 0, true), 50, 300), wantCPU: 0.5},
+		{name: "used unknown falls back to requested",
+			node: node("c", "", 1000, 400, 1000, 100, 0, true), wantCPU: 0.5},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			util, ok := Utilization(c.node, pod, resources)
+			if !ok {
+				t.Fatal("ok = false, want true")
+			}
+			if !near(util["cpu"], c.wantCPU) {
+				t.Errorf("cpu util = %v, want %v", util["cpu"], c.wantCPU)
 			}
 		})
 	}

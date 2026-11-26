@@ -4,6 +4,8 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/scorer"
 )
 
 // discardLog drops every line, so tests stay quiet.
@@ -78,7 +80,7 @@ func TestValidateConfig(t *testing.T) {
 
 func TestNew(t *testing.T) {
 	// model off: a true nil, so the server can check decider == nil
-	d, err := New(Config{Provider: ""}, discardLog)
+	d, err := New(Config{Provider: ""}, scorer.DefaultConfig(), discardLog)
 	if d != nil {
 		t.Errorf("expected d to be nil when model is off, got %v", d)
 	}
@@ -87,7 +89,7 @@ func TestNew(t *testing.T) {
 	}
 
 	// kev: a *KevDecider
-	d, err = New(Config{Provider: ProviderKev, Timeout: DefaultTimeout}, discardLog)
+	d, err = New(Config{Provider: ProviderKev, Timeout: DefaultTimeout}, scorer.DefaultConfig(), discardLog)
 	if err != nil {
 		t.Errorf("expected err to be nil for KevDecider, got %v", err)
 	}
@@ -96,7 +98,7 @@ func TestNew(t *testing.T) {
 	}
 
 	// unknown provider
-	_, err = New(Config{Provider: "unknown"}, discardLog)
+	_, err = New(Config{Provider: "unknown"}, scorer.DefaultConfig(), discardLog)
 	if err == nil {
 		t.Errorf("expected error for unknown provider, got nil")
 	}
