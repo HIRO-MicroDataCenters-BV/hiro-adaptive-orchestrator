@@ -52,22 +52,43 @@ func TestFormulas(t *testing.T) {
 	// Test cases for the formula function can be added here.
 	cfg := DefaultConfig()
 	util1 := map[string]float64{"cpu": 0.5, "memory": 0.7}
-	util2 := map[string]float64{"cpu": 0.9, "memory": 0.5}
-	util3 := map[string]float64{"cpu": 1.2, "memory": 0.5}
 	cases := []struct {
 		name string
 		got  float64
 		want float64
 	}{
-		{name: "packed average", got: packedScore(util1, cfg), want: 60},
-		{name: "packed above limit", got: packedScore(util2, cfg), want: 0},
+		{name: "packed average", got: packedScore(util1), want: 60},
 		{name: "balanced", got: balancedScore(util1, cfg), want: 26},
-		{name: "balanced does not fit", got: balancedScore(util3, cfg), want: 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if !near(c.got, c.want) {
 				t.Errorf("%s: got %v, want %v", c.name, c.got, c.want)
+			}
+		})
+	}
+}
+
+func TestAllowed(t *testing.T) {
+	cfg := DefaultConfig() // PackedMaxUtil 0.85
+	cases := []struct {
+		name     string
+		util     map[string]float64
+		strategy string
+		want     bool
+	}{
+		{name: "exactly full fits", util: map[string]float64{"cpu": 1.0, "memory": 0.5}, strategy: "Balanced", want: true},
+		{name: "balanced does not fit", util: map[string]float64{"cpu": 1.2, "memory": 0.5}, strategy: "Balanced"},
+		{name: "spread does not fit", util: map[string]float64{"cpu": 0.5, "memory": 1.1}, strategy: "Spread"},
+		{name: "over the packed limit is fine for balanced",
+			util: map[string]float64{"cpu": 0.9, "memory": 0.5}, strategy: "Balanced", want: true},
+		{name: "packed at the limit", util: map[string]float64{"cpu": 0.85, "memory": 0.5}, strategy: "Packed", want: true},
+		{name: "packed above the limit", util: map[string]float64{"cpu": 0.9, "memory": 0.5}, strategy: "Packed"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := Allowed(c.util, c.strategy, cfg); got != c.want {
+				t.Errorf("Allowed(%v, %s) = %v, want %v", c.util, c.strategy, got, c.want)
 			}
 		})
 	}

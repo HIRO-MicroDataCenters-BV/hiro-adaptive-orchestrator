@@ -80,8 +80,8 @@ func Utilization(node placement.NodeStat,
 	return util, true
 }
 
-// maxUtil returns the highest utilisation among the scored resources.
-func maxUtil(util map[string]float64) float64 {
+// MaxUtil returns the highest utilisation among the scored resources.
+func MaxUtil(util map[string]float64) float64 {
 	var highest float64
 	for _, u := range util {
 		if u > highest {
@@ -91,22 +91,25 @@ func maxUtil(util map[string]float64) float64 {
 	return highest
 }
 
-// packedScore prefers fuller nodes, but scores 0 above the packed limit.
-func packedScore(util map[string]float64, cfg Config) float64 {
-	highest := maxUtil(util)
-	if highest > cfg.PackedMaxUtil {
-		return 0
+// Allowed reports whether a node may take the pod, for any decider: the pod must fit (util includes it),
+// and under Packed the node must stay within PackedMaxUtil, as Packed fills nodes and needs headroom.
+func Allowed(util map[string]float64, strategy string, cfg Config) bool {
+	limit := 1.0
+	if strategy == string(orchestrationv1alpha1.PlacementStrategyPacked) {
+		limit = cfg.PackedMaxUtil
 	}
+	return MaxUtil(util) <= limit
+}
+
+// packedScore prefers fuller nodes; Score has already dropped nodes over the packed limit.
+func packedScore(util map[string]float64) float64 {
 	return 100 * Average(util)
 }
 
-// balancedScore prefers emptier nodes, minus a penalty when CPU and memory are uneven.
+// balancedScore prefers emptier nodes, minus a penalty when CPU and memory are uneven;
+// Score has already dropped nodes the pod does not fit on.
 func balancedScore(util map[string]float64, cfg Config) float64 {
-	highest := maxUtil(util)
-	if highest > 1 {
-		return 0
-	}
-	score := 100 * (1 - highest)
+	score := 100 * (1 - MaxUtil(util))
 	cpu, cpuFound := util[corev1.ResourceCPU.String()]
 	mem, memFound := util[corev1.ResourceMemory.String()]
 	if cpuFound && memFound {
@@ -147,12 +150,9 @@ func CountAppPodsPerZone(nodes []placement.NodeStat, cfg Config) SpreadCounts {
 	return counts
 }
 
-// spreadScore prefers nodes and zones with fewer of the app's pods, with Balanced as a tie-break.
+// spreadScore prefers nodes and zones with fewer of the app's pods, with Balanced as a tie-break;
+// Score has already dropped nodes the pod does not fit on.
 func spreadScore(node placement.NodeStat, util map[string]float64, counts SpreadCounts, cfg Config) float64 {
-	if maxUtil(util) > 1 {
-		return 0
-	}
-
 	var nodePart float64
 	if node.AppPods == nil {
 		nodePart = cfg.UnknownScore
@@ -198,10 +198,12 @@ func Score(req placement.DecisionRequest, cfg Config) ([]placement.NodeScore, st
 		util, ok := Utilization(nodeStat, pod, resources)
 		if !ok {
 			score = cfg.UnknownScore
+		} else if !Allowed(util, strategy, cfg) {
+			score = 0
 		} else {
 			switch strategy {
 			case string(orchestrationv1alpha1.PlacementStrategyPacked):
-				score = packedScore(util, cfg)
+				score = packedScore(util)
 			case string(orchestrationv1alpha1.PlacementStrategySpread):
 				score = spreadScore(nodeStat, util, counts, cfg)
 			default:

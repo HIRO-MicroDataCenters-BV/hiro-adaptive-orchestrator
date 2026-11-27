@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,14 @@ const (
 			{"name":"node2", "candidate": true, "conditions": {"Ready":"True"}}],
 		"rebalanceContext": {"reason":"test",
 			"currentPlacements": [{"podName":"p1", "nodeName":"node1", "phase":"Running"}]}}`
+	// a 1-CPU pod: node1 has 3.5 of 4 CPU requested, so it doesn't fit; node2 is empty
+	NoFitPlacementBody = `{"requestId":"r0",
+		"pod": {"spec": {"containers": [{"name": "app", "resources": {"requests": {"cpu": "1", "memory": "64Mi"}}}]}},
+		"nodeStats": [
+			{"name":"node1", "candidate": true, "resources": {
+				"cpu": {"allocatable": 4000, "requested": 3500}, "memory": {"allocatable": 8589934592, "requested": 0}}},
+			{"name":"node2", "candidate": true, "resources": {
+				"cpu": {"allocatable": 4000, "requested": 0}, "memory": {"allocatable": 8589934592, "requested": 0}}}]}`
 	stubModelReason = "stub model: node2 best"
 )
 
@@ -80,6 +89,7 @@ func TestPlacementUsesScorer(t *testing.T) {
 func TestPlacementUsesModel(t *testing.T) {
 	cases := []struct {
 		name          string
+		body          string // empty means InitialPlacementBody
 		modelScores   []placement.NodeScore
 		modelErr      error
 		wantDecidedBy string
@@ -87,6 +97,18 @@ func TestPlacementUsesModel(t *testing.T) {
 		{
 			name:          "good answer",
 			modelScores:   []placement.NodeScore{{NodeName: "node1", Score: 30}, {NodeName: "node2", Score: 70}},
+			wantDecidedBy: placement.DecidedByModel,
+		},
+		{
+			name:          "node the pod does not fit on scored",
+			body:          NoFitPlacementBody,
+			modelScores:   []placement.NodeScore{{NodeName: "node1", Score: 40}, {NodeName: "node2", Score: 60}},
+			wantDecidedBy: placement.DecidedByFallback,
+		},
+		{
+			name:          "node the pod does not fit on scored 0",
+			body:          NoFitPlacementBody,
+			modelScores:   []placement.NodeScore{{NodeName: "node1", Score: 0}, {NodeName: "node2", Score: 100}},
 			wantDecidedBy: placement.DecidedByModel,
 		},
 		{
@@ -131,7 +153,8 @@ func TestPlacementUsesModel(t *testing.T) {
 				answer: placement.DecisionResponse{NodeScores: c.modelScores, Reason: stubModelReason},
 				err:    c.modelErr,
 			}
-			rec := do(t, DefaultConfig(), decider, http.MethodPost, DefaultDecisionPath, InitialPlacementBody)
+			body := cmp.Or(c.body, InitialPlacementBody)
+			rec := do(t, DefaultConfig(), decider, http.MethodPost, DefaultDecisionPath, body)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 			}

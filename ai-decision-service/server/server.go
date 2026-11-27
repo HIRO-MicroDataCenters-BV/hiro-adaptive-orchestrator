@@ -132,7 +132,7 @@ func (s *AIDecisionService) placementAnswer(ctx context.Context,
 
 	modelAnswer, err := s.placementDecider.DecidePlacement(ctx, req)
 	if err == nil {
-		err = checkPlacementAnswer(modelAnswer, req)
+		err = checkPlacementAnswer(modelAnswer, req, s.cfg.ScorerConfig)
 	}
 	if err != nil {
 		s.log.Warn("Placement model failed, scorer will be used instead",
@@ -169,23 +169,34 @@ func inputHash(req placement.DecisionRequest) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// checkPlacementAnswer returns why a model answer can't be used:
-// each candidate needs exactly one score from 0 to 100.
-func checkPlacementAnswer(answer placement.DecisionResponse, req placement.DecisionRequest) error {
-	unscored := map[string]bool{}
+// checkPlacementAnswer returns why a model answer can't be used, whichever model gave it:
+// each candidate needs exactly one score from 0 to 100, and a node that isn't allowed must score 0.
+func checkPlacementAnswer(answer placement.DecisionResponse, req placement.DecisionRequest,
+	scorerCfg scorer.Config) error {
+	strategy := scorer.Strategy(req.AOProfile)
+	pod := scorer.PodRequests(req.Pod)
+	resources := scorer.ScoredResources(req.AOProfile)
+	unscored := map[string]placement.NodeStat{}
 	for _, node := range req.NodeStats {
 		if node.Candidate {
-			unscored[node.Name] = true
+			unscored[node.Name] = node
 		}
 	}
 	for _, nodeScore := range answer.NodeScores {
 		nodeName := nodeScore.NodeName
-		if _, ok := unscored[nodeName]; !ok {
+		node, ok := unscored[nodeName]
+		if !ok {
 			return fmt.Errorf("node %s is not a possible node or scored twice", nodeName)
 		}
 		if nodeScore.Score < MinScore ||
 			nodeScore.Score > MaxScore || math.IsNaN(nodeScore.Score) {
 			return fmt.Errorf("node %s has invalid score %v", nodeName, nodeScore.Score)
+		}
+		// unknown usage can't be judged, so it passes, as the scorer gives it UnknownScore
+		util, known := scorer.Utilization(node, pod, resources)
+		if nodeScore.Score > 0 && known && !scorer.Allowed(util, strategy, scorerCfg) {
+			return fmt.Errorf("node %s is not allowed (no fit, or over the Packed limit) but scored %v",
+				nodeName, nodeScore.Score)
 		}
 		delete(unscored, nodeName)
 	}

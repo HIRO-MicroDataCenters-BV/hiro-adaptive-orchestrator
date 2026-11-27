@@ -67,9 +67,10 @@ func NewKevDecider(cfg Config, scorerCfg scorer.Config, log *slog.Logger) *KevDe
 func (kd *KevDecider) DecidePlacement(ctx context.Context,
 	req placement.DecisionRequest) (placement.DecisionResponse, error) {
 	kevReq := buildKevRequest(req, kd.cfg.ModelName, kd.scorerCfg)
-	if len(kevReq.Questions[kevQuestionID].Criteria) == 0 {
+	asked := kevReq.Questions[kevQuestionID].Criteria
+	if len(asked) == 0 {
 		return placement.DecisionResponse{},
-			fmt.Errorf("(requestId=%s) no candidate nodes to ask Kev about", req.RequestID)
+			fmt.Errorf("(requestId=%s) no allowed candidate nodes to ask Kev about", req.RequestID)
 	}
 	kd.log.Debug("Sent request to Kev", "requestId", req.RequestID,
 		"kevRequest", kevReq)
@@ -122,6 +123,10 @@ func (kd *KevDecider) DecidePlacement(ctx context.Context,
 	nodeScores := make([]placement.NodeScore, 0, len(req.NodeStats))
 	for _, nodeStat := range req.NodeStats {
 		if !nodeStat.Candidate {
+			continue
+		}
+		if _, ok := asked[nodeStat.Name]; !ok {
+			nodeScores = append(nodeScores, placement.NodeScore{NodeName: nodeStat.Name, Score: 0}) // not allowed
 			continue
 		}
 		probability, found := answer.Probabilities[nodeStat.Name]
@@ -229,6 +234,9 @@ func buildKevRequest(req placement.DecisionRequest, modelName string, scorerCfg 
 		if !ok {
 			criteria[nodeStat.Name] = "usage unknown"
 			continue
+		}
+		if !scorer.Allowed(util, strategy, scorerCfg) {
+			continue // Kev ignores "over the limit" text, so it isn't asked about nodes it may not choose
 		}
 		zone := nodeStat.Labels[scorerCfg.ZoneLabel]
 		criteria[nodeStat.Name] = nodeFacts(strategy, util, resources, nodeStat.AppPods, zone, zonePods[zone])

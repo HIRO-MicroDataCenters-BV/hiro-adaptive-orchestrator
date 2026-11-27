@@ -67,6 +67,8 @@ func TestBuildKevRequest(t *testing.T) {
 	worker := nodeStat("sample-worker", 4000, 200, 8<<30, 1<<30, 1, true)
 	unknown := placement.NodeStat{Name: "sample-worker2", Candidate: true}
 	nonCandidate := nodeStat("sample-worker3", 4000, 200, 8<<30, 1<<30, 2, false)
+	full := nodeStat("full", 4000, 3500, 8<<30, 1<<30, 0, true)    // a 50m pod takes cpu to 89%: over the Packed limit
+	noFit := nodeStat("no-fit", 4000, 3990, 8<<30, 1<<30, 0, true) // a 50m pod needs 4040m of 4000m
 
 	cases := []struct {
 		name             string
@@ -119,6 +121,23 @@ func TestBuildKevRequest(t *testing.T) {
 				"w2": "this app already runs 1 pod in this node's zone, b, and 1 pod on this node; " +
 					"with this pod placed, " + smallPodUsage,
 			},
+		},
+		{
+			name: "packed leaves out a node over the limit",
+			req: placement.DecisionRequest{AOProfile: &placement.AOProfileContext{Strategy: "Packed"},
+				Pod: podRequesting("50m", "64Mi"), NodeStats: []placement.NodeStat{worker, full}},
+			wantState:        smallPod + packed,
+			wantInstructions: ask + "Under Packed, the fuller node is the better place.",
+			wantCriteria: map[string]string{
+				"sample-worker": "with this pod placed, it would be 10% full on average; cpu would be at 6% and memory at 13%"},
+		},
+		{
+			name: "balanced leaves out a node the pod does not fit on, but keeps one over the packed limit",
+			req: placement.DecisionRequest{Pod: podRequesting("50m", "64Mi"),
+				NodeStats: []placement.NodeStat{full, noFit}},
+			wantState:        smallPod + balanced,
+			wantInstructions: ask + "Under Balanced, the node with lower CPU and memory use is the better place.",
+			wantCriteria:     map[string]string{"full": "with this pod placed, cpu would be at 89% and memory at 13%"},
 		},
 	}
 	for _, c := range cases {
@@ -228,6 +247,29 @@ func TestDecidePlacement(t *testing.T) {
 	}
 }
 
+func TestDecidePlacementScoresNodesNotAllowedZero(t *testing.T) {
+	// Kev is asked only about sample-worker, so its reply has no probability for no-fit.
+	reply := `{"answers":{"placement":{"choice":"sample-worker","confidence":0.9,` +
+		`"probabilities":{"sample-worker":1}}}}`
+	srv := fakeKev(t, http.StatusOK, reply, 0)
+	req := kevTestRequest(
+		nodeStat("sample-worker", 4000, 200, 8<<30, 1<<30, 1, true),
+		nodeStat("no-fit", 4000, 3990, 8<<30, 1<<30, 0, true), // a 50m pod needs 4040m of 4000m
+	)
+
+	got, err := kevTestDecider(srv.URL, kevTestTimeout).DecidePlacement(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantScores := []placement.NodeScore{
+		{NodeName: "sample-worker", Score: 100},
+		{NodeName: "no-fit", Score: 0},
+	}
+	if !slices.Equal(got.NodeScores, wantScores) {
+		t.Errorf("got scores %v, want %v", got.NodeScores, wantScores)
+	}
+}
+
 func TestDecidePlacementErrors(t *testing.T) {
 	worker := nodeStat("sample-worker", 4000, 200, 8<<30, 1<<30, 1, true)
 	worker2 := nodeStat("sample-worker2", 8000, 1000, 16<<30, 2<<30, 0, true)
@@ -289,6 +331,12 @@ func TestDecidePlacementErrors(t *testing.T) {
 		{
 			name:   "no candidates",
 			req:    kevTestRequest(nonCandidate),
+			status: http.StatusOK,
+			body:   validReply,
+		},
+		{
+			name:   "no allowed candidates",
+			req:    kevTestRequest(nodeStat("no-fit", 4000, 3990, 8<<30, 1<<30, 0, true)), // 50m needs 4040m of 4000m
 			status: http.StatusOK,
 			body:   validReply,
 		},
