@@ -38,6 +38,14 @@ const (
 				"cpu": {"allocatable": 4000, "requested": 3500}, "memory": {"allocatable": 8589934592, "requested": 0}}},
 			{"name":"node2", "candidate": true, "resources": {
 				"cpu": {"allocatable": 4000, "requested": 0}, "memory": {"allocatable": 8589934592, "requested": 0}}}]}`
+	// a 1-CPU pod fits on neither node, so there is nothing to ask the model
+	NothingFitsPlacementBody = `{"requestId":"r0",
+		"pod": {"spec": {"containers": [{"name": "app", "resources": {"requests": {"cpu": "1", "memory": "64Mi"}}}]}},
+		"nodeStats": [
+			{"name":"node1", "candidate": true, "resources": {
+				"cpu": {"allocatable": 4000, "requested": 3500}, "memory": {"allocatable": 8589934592, "requested": 0}}},
+			{"name":"node2", "candidate": true, "resources": {
+				"cpu": {"allocatable": 4000, "requested": 3600}, "memory": {"allocatable": 8589934592, "requested": 0}}}]}`
 	// a healthy app in a cooldown: no change is possible, so the rebalance model isn't asked
 	CooldownRebalanceBody = `{"requestId":"r3",
 		"nodeStats": [{"name":"node1", "candidate": true, "conditions": {"Ready":"True"}},
@@ -113,6 +121,7 @@ func TestPlacementUsesModel(t *testing.T) {
 		modelScores   []placement.NodeScore
 		modelErr      error
 		wantDecidedBy string
+		wantScores    []placement.NodeScore // empty means modelScores
 	}{
 		{
 			name:          "good answer",
@@ -120,16 +129,23 @@ func TestPlacementUsesModel(t *testing.T) {
 			wantDecidedBy: placement.DecidedByModel,
 		},
 		{
-			name:          "node the pod does not fit on scored",
+			name:          "node the pod does not fit on is hidden from the model and scored 0",
+			body:          NoFitPlacementBody,
+			modelScores:   []placement.NodeScore{{NodeName: "node2", Score: 100}},
+			wantDecidedBy: placement.DecidedByModel,
+			wantScores:    []placement.NodeScore{{NodeName: "node2", Score: 100}, {NodeName: "node1", Score: 0}},
+		},
+		{
+			name:          "hidden node scored by the model too",
 			body:          NoFitPlacementBody,
 			modelScores:   []placement.NodeScore{{NodeName: "node1", Score: 40}, {NodeName: "node2", Score: 60}},
 			wantDecidedBy: placement.DecidedByFallback,
 		},
 		{
-			name:          "node the pod does not fit on scored 0",
-			body:          NoFitPlacementBody,
-			modelScores:   []placement.NodeScore{{NodeName: "node1", Score: 0}, {NodeName: "node2", Score: 100}},
-			wantDecidedBy: placement.DecidedByModel,
+			name:          "no node allowed, so the model is not asked",
+			body:          NothingFitsPlacementBody,
+			modelScores:   []placement.NodeScore{{NodeName: "node1", Score: 30}, {NodeName: "node2", Score: 70}},
+			wantDecidedBy: placement.DecidedByScorer,
 		},
 		{
 			name:          "model error",
@@ -187,8 +203,12 @@ func TestPlacementUsesModel(t *testing.T) {
 				t.Errorf("expected request ID 'r0' and decided by %s, got response: %+v", c.wantDecidedBy, resp)
 			}
 			if c.wantDecidedBy == placement.DecidedByModel {
-				if !slices.Equal(resp.NodeScores, c.modelScores) || resp.Reason != stubModelReason {
-					t.Errorf("expected the model's scores %v and reason, got response: %+v", c.modelScores, resp)
+				wantScores := c.wantScores
+				if wantScores == nil {
+					wantScores = c.modelScores
+				}
+				if !slices.Equal(resp.NodeScores, wantScores) || resp.Reason != stubModelReason {
+					t.Errorf("expected the scores %v and the model's reason, got response: %+v", wantScores, resp)
 				}
 			} else if len(resp.NodeScores) != 2 || !strings.HasPrefix(resp.Reason, "Balanced") {
 				t.Errorf("expected the scorer's answer, got response: %+v", resp)

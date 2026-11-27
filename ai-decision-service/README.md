@@ -36,8 +36,9 @@ Utilisation is worked out per resource **after** placing the pod: `(max(requeste
 Off by default (`AI_DECISION_SERVICE_MODEL_PROVIDER` empty). With a provider set:
 
 1. The scorer runs first, so its answer is ready if the model fails.
-2. The model is asked, and given up on after `AI_DECISION_SERVICE_MODEL_TIMEOUT`.
-3. **Check**, the same for every model: each candidate needs exactly one score from 0 to 100, and a node that isn't allowed must score 0. A model error, a timeout or a failed check sends the scorer's answer with `decidedBy: fallback`.
+2. The nodes the pod can't go to (not **Allowed**, above) are hidden from the model and score 0. If no node is left, the scorer answers and the model isn't asked.
+3. The model is asked, and given up on after `AI_DECISION_SERVICE_MODEL_TIMEOUT`.
+4. **Check**, the same for every model: each candidate needs exactly one score from 0 to 100. A model error, a timeout or a failed check sends the scorer's answer with `decidedBy: fallback`.
 
 The log also records the scorer's answer beside the model's, so the two can be compared.
 
@@ -45,7 +46,7 @@ The log also records the scorer's answer beside the model's, so the two can be c
 |---|---|---|
 | `kev` | `model/kev_model.go` | [model/kev_model.md](model/kev_model.md): wiring, how it works, accuracy, gaps, next steps |
 
-**Switching or adding a model** (Kev, an LLM or any other): see [docs/decision-models.md](../docs/decision-models.md). Switching is config only; adding one is a new adapter file plus one `case` in `model.New`.
+**Using, switching or adding a model** (Kev, an LLM or any other): see [What changes for a new model](../docs/decision-models.md#what-changes-for-a-new-model). Kev and any OpenAI-style LLM need settings only; only a model with its own API needs an adapter.
 
 ### Rebalance (`rebalance/`)
 
@@ -71,7 +72,7 @@ Off by default (`AI_DECISION_SERVICE_REBALANCE_MODEL_PROVIDER` empty). It has it
 3. The model is asked, and given up on after `AI_DECISION_SERVICE_REBALANCE_MODEL_TIMEOUT`.
 4. **Check**, the same for every model: the gates and validate above, plus the **must-do**: while a pod is on a down node and a healthy node can take it, the answer must move a pod off a down node. A model error, a timeout or a failed check sends the rules' answer with `decidedBy: fallback`.
 
-No rebalance adapter exists yet. Adding one is a new file in `model/` plus one `case` in `model.NewRebalance`; see [docs/decision-models.md](../docs/decision-models.md#3-add-a-new-model).
+No rebalance model exists yet. The built-in `openai-compatible` adapter (next step) will let any OpenAI-style LLM do rebalance with settings only; see [What changes for a new model](../docs/decision-models.md#what-changes-for-a-new-model).
 
 Each answer writes one JSON log line: `requestId`, `flow`, `decidedBy`, `latencyMilliSec`, `inputHash` (same input, same hash), `nodes` and the response.
 

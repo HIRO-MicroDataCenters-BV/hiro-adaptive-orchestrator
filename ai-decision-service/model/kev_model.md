@@ -1,47 +1,28 @@
 # Kev placement adapter
 
-Provider `kev`. Asks Kev, through its System One API, where to place a pod: **one call per pod, one `choice` question over the allowed candidate nodes**.
+Provider `kev`. Asks Kev, through its System One API, where to place a pod: **one call per pod, one `choice` question over the candidate nodes**.
 
 | File | What it holds |
 |---|---|
 | `kev_model.go` | The adapter: question wording, node facts, call, reply → scores |
-| `kev_model_test.go` | Exact wording per strategy, nodes left out, and every error path, against a fake Kev |
+| `kev_model_test.go` | Exact wording per strategy, and every error path, against a fake Kev |
 | `kev_model.md` | This page |
 
-Switching or adding a model is covered in [docs/decision-models.md](../../docs/decision-models.md). To replace Kev, swap these three files and its `case` in `model.New`; nothing else changes.
+To switch, replace or add a model, see [docs/decision-models.md](../../docs/decision-models.md). Replacing Kev means swapping these three files and its `case` in `model.New`; nothing else changes.
 
 ## Wiring
 
 Off by default. To turn Kev on, set:
 
-| Env var | Value | |
-|---|---|---|
-| `AI_DECISION_SERVICE_MODEL_PROVIDER` | `kev` | Selects this adapter |
-| `AI_DECISION_SERVICE_MODEL_BASE_URL` | Kev's address (below) | As seen from inside the cluster |
-| `AI_DECISION_SERVICE_MODEL_PATH` | `/v1/systemone` | Kev's System One endpoint |
-| `AI_DECISION_SERVICE_MODEL_NAME` | `kev-latest` | Sent as `model` in each call |
-| `AI_DECISION_SERVICE_MODEL_TIMEOUT` | `5000ms` (the default) | Then the scorer answers. Must stay below the operator's `DECISION_AGENT_TIMEOUT` (8s) |
-
-Kev's address depends on where it runs:
-
-| Kev runs | Base URL |
+| Setting | Value |
 |---|---|
-| In the cluster | Its Service, e.g. `http://kev.<namespace>.svc:8009` |
-| Anywhere else on the network | Its URL |
-| On the host, with Kind on Docker Desktop (macOS, Windows) | `http://host.docker.internal:8009` |
-| On the host, with Kind on Linux | `http://<gateway>:8009`, where `<gateway>` is the IPv4 `Gateway` from `docker network inspect kind` |
+| `AI_DECISION_SERVICE_MODEL_PROVIDER` | `kev` |
+| `AI_DECISION_SERVICE_MODEL_BASE_URL` | Kev's address, e.g. `http://host.docker.internal:8009` with Kev on your machine and Kind on Docker Desktop |
+| `AI_DECISION_SERVICE_MODEL_PATH` | `/v1/systemone` |
+| `AI_DECISION_SERVICE_MODEL_NAME` | `kev-latest` |
+| `AI_DECISION_SERVICE_MODEL_TIMEOUT` | `5000ms`, the default |
 
-On the host, Kev must listen on all interfaces, not only `localhost`.
-
-- **Helm:** set them under `aiDecisionService.config`.
-- **Kind:** pass them to the deploy script, which hands the model settings to the service:
-  ```bash
-  AI_DECISION_SERVICE_MODEL_PROVIDER=kev \
-  AI_DECISION_SERVICE_MODEL_BASE_URL=http://host.docker.internal:8009 \
-  AI_DECISION_SERVICE_MODEL_PATH=/v1/systemone \
-  AI_DECISION_SERVICE_MODEL_NAME=kev-latest \
-  deploy/scripts/deploy_full_stack_with_helm.sh
-  ```
+The address for each setup, and how to set these with Helm or the Kind script, are in [Switch a model](../../docs/decision-models.md#2-switch-a-model).
 
 **Kev's API**, as used here:
 
@@ -56,23 +37,20 @@ POST {base URL}{path}
 
 ```mermaid
 flowchart TD
-    R["Candidate nodes in the request"] --> U["Utilisation with the pod placed:<br/>max(requested, used) + pod, per resource"]
+    R["Candidate nodes from the service<br/>(it has already hidden the nodes the pod can't go to)"] --> U["Utilisation with the pod placed:<br/>max(requested, used) + pod, per resource"]
     U --> K{"Usage known?"}
     K -- no --> X["Option text: usage unknown"]
-    K -- yes --> A{"scorer.Allowed?<br/>fits, and Packed under its limit"}
-    A -- no --> Z["Left out of the question<br/>score 0"]
-    A -- yes --> F["Option text: the node's facts<br/>for this strategy"]
+    K -- yes --> F["Option text: the node's facts<br/>for this strategy"]
     F --> Q["One choice question<br/>state = the strategy's purpose<br/>instructions = one priority rule"]
     X --> Q
     Q --> P["Kev's probability per option"]
     P --> S["Score = 100 × probability"]
-    S --> C["Server answer check, then the answer<br/>decidedBy: model"]
-    Z --> C
+    S --> C["The service adds 0 for the hidden nodes,<br/>checks the answer, and sends it<br/>decidedBy: model"]
 ```
 
 1. **Utilisation** uses `scorer.Utilization` with the pod placed, so a node busy above its requests doesn't look empty.
-2. **Nodes that aren't allowed** (`scorer.Allowed`) are left out of the question and score 0. The server check would reject them anyway; leaving them out also stops them from distracting Kev, which ignores "over the limit" text in options.
-3. **No allowed node left:** the adapter returns an error and the scorer answers.
+2. **Nodes the pod can't go to** never reach Kev: the service hides them and scores them 0 itself. That also keeps them from distracting Kev, which ignores "over the limit" text in options.
+3. **No node left:** the service doesn't call Kev, and the scorer answers.
 4. **Scores:** each asked node gets 100 × Kev's probability; the reason names Kev's pick, e.g. `Packed: node-2 best (probability 0.83)`, and Kev's confidence is passed on.
 5. **Any error** (Kev down, HTTP error, bad JSON, missing answer or probability, timeout) makes the scorer answer, with `decidedBy: fallback`.
 
@@ -94,7 +72,7 @@ The state is always `Choosing a node for a new pod of this app, which requests {
 
 | Node | With the pod placed | Allowed under Packed (85%) |
 |---|---|---|
-| node-1 | cpu 88%, memory 80% | no: left out, score 0 |
+| node-1 | cpu 88%, memory 80% | no: the service hides it and scores it 0 |
 | node-2 | cpu 60%, memory 58% | yes |
 | node-3 | cpu 30%, memory 30% | yes |
 
@@ -125,7 +103,7 @@ Each choice was measured against Kev before it went in:
 
 | Choice | Why |
 |---|---|
-| Code leaves out nodes that aren't allowed | Kev ignores "over the limit" text in options. With the new wording alone, Packed reached 22 of 29; leaving those nodes out took it to 26. |
+| Kev never sees nodes the pod can't go to (the service hides them) | Kev ignores "over the limit" text in options. With the new wording alone, Packed reached 22 of 29; hiding those nodes took it to 26. |
 | Numbers include the new pod | Without it, a big pod's effect on a node is invisible. |
 | The state gives the strategy's purpose; the instructions give one positive rule | Negated rules ("whatever its pod count", "even if it is busier") made Kev pick worse. |
 | Each node's facts lead with what the strategy ranks by | Packed reads its average fullness first; Spread reads zone, then node pods. |
@@ -150,7 +128,7 @@ One call per scenario, 85 scenarios (25 hand-made, 60 random), each judged again
 2. **Close or uneven numbers:** e.g. under Balanced, Kev can prefer cpu 10% / memory 60% over 45% / 45%, the very hotspot Balanced avoids.
 3. **Spread order:** Kev doesn't strictly apply zone, then node pods, then usage, when a lower fact has the bigger gap.
 4. **Facts not sent:** images already on the node, GPU, taints and energy (null today). In trials Kev used energy facts, but ignored image, GPU and taint facts.
-5. **Unknown usage:** such a node is offered as `usage unknown` and can't be checked against the limit; the server check lets it pass, as the scorer does.
+5. **Unknown usage:** such a node can't be checked against the limit, so the service keeps it as a candidate, as the scorer does, and Kev reads `usage unknown`.
 6. **Latency** grows with the number of nodes.
 
 ## Next steps

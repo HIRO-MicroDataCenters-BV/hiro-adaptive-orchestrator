@@ -142,36 +142,24 @@ Every other deployment path — shell scripts, operator-only, scheduler-only, ex
 
 ### <u>Components</u>
 
-Three binaries get deployed, plus an optional mock AI agent for local testing:
+Three binaries get deployed, plus an optional mock agent for local testing:
 
-| Deployed unit            | Binary                         | What it is                                                                                                                                                                 |
-| ------------------------ | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Operator**             | `cmd/main.go`                  | One pod, one process, three cooperating parts (below)                                                                                                                      |
-| **Scheduler Plugin**     | `scheduler-plugin/cmd/main.go` | A custom `kube-scheduler` build with the `HIROScore` plugin registered. Only needed for the plugin path — the extender path uses the cluster's existing default scheduler. |
-| **AI Decision Service**  | `ai-decision-service/cmd/main.go` | Decides placement and rebalance for the operator. It asks a pluggable model (Kev today) and checks its answer, with a code scorer and rules as the fallback. See [ai-decision-service/README.md](ai-decision-service/README.md); to replace the model or add one, see [docs/decision-models.md](docs/decision-models.md) |
-| **Mock Decision Agent**  | `deploy/manifests/mock_decision_agent.yaml` | Python HTTP server standing in for a real AI agent in local/CI runs: random placement scores, random `Move`/`NoOp` rebalance answers                                       |
+| Deployed unit | Binary | What it does | Details |
+|---|---|---|---|
+| **Operator** | `cmd/main.go` | One pod, one process, three parts (below) | [Component wiring](docs/architecture.md#component-wiring) |
+| **Scheduler Plugin** | `scheduler-plugin/cmd/main.go` | A custom `kube-scheduler` with the `HIROScore` plugin. Only for the plugin path; the extender path uses the cluster's own scheduler | [Plugin path](docs/architecture.md#plugin-path-hiro-scheduler--placementserver) |
+| **AI Decision Service** | `ai-decision-service/cmd/main.go` | Decides placement and rebalance. Asks a model when one is set (off by default), checks its answer, and falls back to code | [Service](ai-decision-service/README.md) · [Use or add a model](docs/decision-models.md) |
+| **Mock Decision Agent** | `deploy/manifests/mock_decision_agent.yaml` | Random answers, in place of the AI Decision Service, for local tests | [Mock agent](docs/deployment.md#mock-decision-agent) |
 
 Inside the operator process:
 
-| Part                 | Package                      | Role                                                                                                                                                                                       |
-| -------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Reconciler**       | `internal/controller/`       | Watches `OrchestrationProfile` and its referenced workloads, computes `status`                                                                                                             |
-| **PlacementServer**  | `internal/placement-server/` | HTTP listener on `:8090` serving 5 routes — `/api/v1/placement/score` + `/api/v1/placement/filter` (plugin), `/extender/filter`, `/extender/prioritize`, `/healthz` — see [docs/architecture.md](docs/architecture.md#placementserver) |
-| **Rebalance Engine** | `internal/rebalance/`        | Detects triggers, consults the AI, enacts `Move`/`RetryPendingSchedule`. Shares a `DecisionStore` with the PlacementServer so an accepted `Move` biases where the replacement pod lands — see [internal/rebalance/README.md](internal/rebalance/README.md) |
+| Part | Package | What it does | Details |
+|---|---|---|---|
+| **Reconciler** | `internal/controller/` | Watches `OrchestrationProfile` and its workloads, and fills in `status` | [Reconciliation flow](docs/architecture.md#reconciliation-flow) |
+| **PlacementServer** | `internal/placement-server/` | HTTP on `:8090`. The scheduler plugin or extender calls it, and it asks the AI Decision Service for node scores | [PlacementServer](docs/architecture.md#placementserver) |
+| **Rebalance Engine** | `internal/rebalance/` | Detects triggers, asks the AI Decision Service, and carries out Move, AdjustReplicas, AdjustResources or a retry | [Rebalance engine](internal/rebalance/README.md) |
 
-The `OrchestrationProfile` CRD is how you drive all of it: it binds a placement strategy
-(`Balanced`/`Packed`/`Spread`) and optional resource awareness (CPU/Memory/GPU/Energy) to one
-workload, and reports what happened back in its `status`.
-
-See **[docs/architecture.md](docs/architecture.md)** for the component wiring diagram, the
-reconciliation flow, the Plugin and Extender request paths, and the full `OrchestrationProfile`
-CRD spec — **[internal/rebalance/README.md](internal/rebalance/README.md)** for the rebalance
-engine's decision lifecycle — and **[docs/scheduling-flows.md](docs/scheduling-flows.md)** for
-function-level call traces of both scheduling paths.
-
-The AI Decision Service asks a pluggable model (Kev today) where to place each pod and how to
-rebalance, with code as the fallback. To switch to another model, or plug in a new LLM or other
-intelligence, see **[docs/decision-models.md](docs/decision-models.md)**.
+The `OrchestrationProfile` CRD drives all of it: it binds a placement strategy (`Balanced`, `Packed` or `Spread`) and optional resource awareness (CPU, memory, GPU, energy) to one workload, and reports back in its `status`. Full spec: [OrchestrationProfile CRD](docs/architecture.md#orchestrationprofile-crd). Function-level call traces of both scheduling paths: [docs/scheduling-flows.md](docs/scheduling-flows.md).
 
 ---
 

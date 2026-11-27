@@ -12,6 +12,7 @@ import (
 	"maps"
 	"math"
 	"net/http"
+	"slices"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -131,12 +132,19 @@ func (s *AIDecisionService) placementAnswer(ctx context.Context,
 	if s.placementDecider == nil {
 		return scorerAnswer
 	}
+	modelReq, hidden := hideNotAllowed(req, s.cfg.ScorerConfig)
+	if !slices.ContainsFunc(modelReq.NodeStats, func(n placement.NodeStat) bool { return n.Candidate }) {
+		return scorerAnswer // no node is allowed, so there is nothing to ask the model
+	}
 	s.log.Info("Scorer answer is in standby",
 		"requestId", req.RequestID, "scoreAnswer", scorerAnswer)
 
-	modelAnswer, err := s.placementDecider.DecidePlacement(ctx, req)
+	modelAnswer, err := s.placementDecider.DecidePlacement(ctx, modelReq)
 	if err == nil {
-		err = checkPlacementAnswer(modelAnswer, req, s.cfg.ScorerConfig)
+		for _, name := range hidden {
+			modelAnswer.NodeScores = append(modelAnswer.NodeScores, placement.NodeScore{NodeName: name, Score: 0})
+		}
+		err = checkPlacementAnswer(modelAnswer, req)
 	}
 	if err != nil {
 		s.log.Warn("Placement model failed, scorer will be used instead",
@@ -198,34 +206,41 @@ func inputHash(req placement.DecisionRequest) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// checkPlacementAnswer returns why a model answer can't be used, whichever model gave it:
-// each candidate needs exactly one score from 0 to 100, and a node that isn't allowed must score 0.
-func checkPlacementAnswer(answer placement.DecisionResponse, req placement.DecisionRequest,
-	scorerCfg scorer.Config) error {
+// hideNotAllowed copies req with the nodes the pod can't go to no longer candidates, and returns their names.
+func hideNotAllowed(req placement.DecisionRequest, scorerCfg scorer.Config) (placement.DecisionRequest, []string) {
 	strategy := scorer.Strategy(req.AOProfile)
 	pod := scorer.PodRequests(req.Pod)
 	resources := scorer.ScoredResources(req.AOProfile)
-	unscored := map[string]placement.NodeStat{}
+	nodes := slices.Clone(req.NodeStats) // the scorer and the check still need the original
+	var hidden []string
+	for i, node := range nodes {
+		util, known := scorer.Utilization(node, pod, resources) // unknown usage can't be judged, so it stays
+		if node.Candidate && known && !scorer.Allowed(util, strategy, scorerCfg) {
+			nodes[i].Candidate = false
+			hidden = append(hidden, node.Name)
+		}
+	}
+	req.NodeStats = nodes
+	return req, hidden
+}
+
+// checkPlacementAnswer returns why a model answer can't be used, whichever model gave it:
+// each candidate needs exactly one score from 0 to 100.
+func checkPlacementAnswer(answer placement.DecisionResponse, req placement.DecisionRequest) error {
+	unscored := map[string]bool{}
 	for _, node := range req.NodeStats {
 		if node.Candidate {
-			unscored[node.Name] = node
+			unscored[node.Name] = true
 		}
 	}
 	for _, nodeScore := range answer.NodeScores {
 		nodeName := nodeScore.NodeName
-		node, ok := unscored[nodeName]
-		if !ok {
+		if !unscored[nodeName] {
 			return fmt.Errorf("node %s is not a possible node or scored twice", nodeName)
 		}
 		if nodeScore.Score < MinScore ||
 			nodeScore.Score > MaxScore || math.IsNaN(nodeScore.Score) {
 			return fmt.Errorf("node %s has invalid score %v", nodeName, nodeScore.Score)
-		}
-		// unknown usage can't be judged, so it passes, as the scorer gives it UnknownScore
-		util, known := scorer.Utilization(node, pod, resources)
-		if nodeScore.Score > 0 && known && !scorer.Allowed(util, strategy, scorerCfg) {
-			return fmt.Errorf("node %s is not allowed (no fit, or over the Packed limit) but scored %v",
-				nodeName, nodeScore.Score)
 		}
 		delete(unscored, nodeName)
 	}
