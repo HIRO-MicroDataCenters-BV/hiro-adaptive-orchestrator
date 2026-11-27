@@ -93,7 +93,7 @@ Every setting has a default (`server/config.go`) and an env var:
 | `AI_DECISION_SERVICE_MODEL_BASE_URL` | `""` | Model's address; the full URL is base URL + path. Required with a provider |
 | `AI_DECISION_SERVICE_MODEL_PATH` | `""` | Model's API path, e.g. `/v1/systemone` for Kev. Required with a provider |
 | `AI_DECISION_SERVICE_MODEL_NAME` | `""` | Model name sent with each request, e.g. `kev-latest`. Required with a provider |
-| `AI_DECISION_SERVICE_MODEL_TIMEOUT` | `500ms` | Gives up on the model after this; the scorer answers instead |
+| `AI_DECISION_SERVICE_MODEL_TIMEOUT` | `5s` | Gives up on the model after this; the scorer answers instead. Keep it under the operator's `DECISION_AGENT_TIMEOUT` (8s) |
 | `AI_DECISION_SERVICE_REBALANCE_EAO_STALE_AFTER` | `5m` | EAO data older than this is ignored |
 | `AI_DECISION_SERVICE_REBALANCE_FLIP_MOVE_ACTION_WINDOW` | `30m` | How long a Move blocks churn and ping-pong moves |
 | `AI_DECISION_SERVICE_REBALANCE_RISK_CONDITIONS` | `MemoryPressure,DiskPressure,PIDPressure,NetworkUnavailable` | Node conditions that mark a node at risk when `True` |

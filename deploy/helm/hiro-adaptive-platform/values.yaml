@@ -350,6 +350,7 @@ aiDecisionService:
     AI_DECISION_SERVICE_MODEL_BASE_URL: http://host.docker.internal:8009
     AI_DECISION_SERVICE_MODEL_PATH: /v1/systemone
     AI_DECISION_SERVICE_MODEL_NAME: kev-latest
+    # Must stay under the operator's DECISION_AGENT_TIMEOUT, so the scorer can still answer in time.
     AI_DECISION_SERVICE_MODEL_TIMEOUT: 5000ms
 
     # Rebalance rules: EAO data older than this is ignored.

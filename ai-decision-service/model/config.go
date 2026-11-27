@@ -11,7 +11,7 @@ const (
 	DefaultBaseURL   = "" // no default address, it's set when a provider is chosen
 	DefaultPath      = ""
 	DefaultModelName = ""
-	DefaultTimeout   = 500 * time.Millisecond
+	DefaultTimeout   = 5 * time.Second // must stay under the operator's DECISION_AGENT_TIMEOUT (8s)
 )
 
 // Config holds the configuration for the model.
