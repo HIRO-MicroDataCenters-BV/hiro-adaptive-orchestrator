@@ -142,12 +142,13 @@ Every other deployment path — shell scripts, operator-only, scheduler-only, ex
 
 ### <u>Components</u>
 
-Two binaries get deployed, plus an optional mock AI agent for local testing:
+Three binaries get deployed, plus an optional mock AI agent for local testing:
 
 | Deployed unit            | Binary                         | What it is                                                                                                                                                                 |
 | ------------------------ | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Operator**             | `cmd/main.go`                  | One pod, one process, three cooperating parts (below)                                                                                                                      |
 | **Scheduler Plugin**     | `scheduler-plugin/cmd/main.go` | A custom `kube-scheduler` build with the `HIROScore` plugin registered. Only needed for the plugin path — the extender path uses the cluster's existing default scheduler. |
+| **AI Decision Service**  | `ai-decision-service/cmd/main.go` | Decides placement and rebalance for the operator. It asks a pluggable model (Kev today) and checks its answer, with a code scorer and rules as the fallback. See [ai-decision-service/README.md](ai-decision-service/README.md); to replace the model or add one, see [docs/decision-models.md](docs/decision-models.md) |
 | **Mock Decision Agent**  | `deploy/manifests/mock_decision_agent.yaml` | Python HTTP server standing in for a real AI agent in local/CI runs: random placement scores, random `Move`/`NoOp` rebalance answers                                       |
 
 Inside the operator process:
@@ -168,9 +169,9 @@ CRD spec — **[internal/rebalance/README.md](internal/rebalance/README.md)** fo
 engine's decision lifecycle — and **[docs/scheduling-flows.md](docs/scheduling-flows.md)** for
 function-level call traces of both scheduling paths.
 
-The AI Decision Service asks a pluggable model (Kev today) where to place each pod, with a code
-scorer as the fallback. To switch to another model, or plug in a new LLM or other intelligence,
-see **[docs/decision-models.md](docs/decision-models.md)**.
+The AI Decision Service asks a pluggable model (Kev today) where to place each pod and how to
+rebalance, with code as the fallback. To switch to another model, or plug in a new LLM or other
+intelligence, see **[docs/decision-models.md](docs/decision-models.md)**.
 
 ---
 
@@ -193,7 +194,7 @@ graph TB
 - **Multi-dimensional resource awareness** — CPU, Memory, GPU, Energy
 - **Energy-aware orchestration** — optional integration with an `EnergyAwareOrchestration` CRD
 - **Dynamic rebalancing** — trigger-based (energy threshold, CPU/memory threshold, node failure, scheduled); hybrid periodic + event-driven detection feeding a decision lifecycle state machine — see [internal/rebalance/README.md](internal/rebalance/README.md)
-- **AI-delegated scoring** — pluggable external decision agent via HTTP
+- **AI decisions with a replaceable model** — the AI Decision Service asks a model (Kev today, any LLM later) for placement and rebalance, checks every answer, and falls back to code; switching models is config only — see [docs/decision-models.md](docs/decision-models.md)
 - **Custom scheduler plugin** — `HIROScore` runs as a separate `hiro-scheduler` binary; pods opt in via `schedulerName: hiro-scheduler`
 - **Pod scheduler webhook** — `MutatingAdmissionWebhook` auto-sets `spec.schedulerName: hiro-scheduler` on pods governed by an `OrchestrationProfile`; TLS provisioned automatically by cert-manager; enabled with `DEPLOY_SCHEDULER_PLUGIN=true`
 - **Scheduler extender support** — for managed clusters where a custom scheduler pod cannot be deployed; uses ClusterIP for reliable reachability from `hostNetwork` kube-scheduler

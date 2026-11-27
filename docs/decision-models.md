@@ -1,85 +1,61 @@
-# Decision models: switching or adding one
+# Decision models: replace or add one
 
-The [AI Decision Service](../ai-decision-service/README.md) can ask a **model** where to place each new pod. The model can be Kev, an LLM, or any other intelligence. It is a plug-in:
+The [AI Decision Service](../ai-decision-service/README.md) makes two decisions:
 
-- **Switching** between models that already have an adapter is **config only**.
-- **Adding** a new model is **one Go file plus one line**.
-- Everything else stays as it is: the contract with the operator, the safety rule, the answer check, the fallback and the decision log.
+- **Placement:** which node a new pod should go to.
+- **Rebalance:** whether to change an app that is already running (move a pod, scale it, resize it, or leave it).
 
-Sections 1–6 cover placement. Rebalance follows the same pattern, with its own interface, factory and settings, so each flow can use a different model: see [section 7](#7-rebalance-models).
+For each decision it can ask a **model**, such as Kev, an LLM or any other intelligence. The model plugs in through **one adapter file**. Everything around it is shared and stays as it is: the request from the operator, the safety check, the fallback answer and the decision log.
 
-## 1. What stays and what is per model
+| I want to… | Read |
+|---|---|
+| Understand how a model fits in | [1. How it fits together](#1-how-it-fits-together) |
+| Switch to another model, or turn one off | [2. Switch a model](#2-switch-a-model) |
+| Plug in a new model or LLM | [3. Add a new model](#3-add-a-new-model) |
+| Know exactly what an adapter gets and must return | [4. The adapter contract](#4-the-adapter-contract) |
 
-```mermaid
-flowchart LR
-    Op["Operator<br/>(PlacementServer)"] -->|DecisionRequest| Server
-    subgraph Service["AI Decision Service"]
-        Server["server/<br/>contract · answer check · fallback · log"]
-        Scorer["scorer/<br/>strategy formulas · scorer.Allowed"]
-        subgraph Models["model/ (one adapter per model)"]
-            Kev["kev_model.go"]
-            New["your_model.go"]
-        end
-        Server --> Scorer
-        Server --> Models
-    end
-    Kev -->|its own API| KevAPI["Kev"]
-    New -->|its own API| LLM["LLM / other model"]
-```
+## 1. How it fits together
 
-| Part | Same for every model | What it does |
-|---|---|---|
-| `server/` | yes | Takes the request, asks the model, checks the answer, falls back to the scorer, writes one log line |
-| `scorer/` | yes | Placement's fallback answer, and the hard rule `scorer.Allowed` (the pod must fit; Packed stays under its limit) |
-| `rebalance/` | yes | Rebalance's gates, its rules (the fallback answer) and `Assessment.Check` (the gates, validate and the must-do) |
-| `model/decider.go` | yes | The `PlacementDecider` and `RebalanceDecider` interfaces, and one factory per flow (`model.New`, `model.NewRebalance`) that picks an adapter by provider name |
-| `model/<name>_model.go` | **no, one per model** | Turns the request into that model's question or prompt, and its reply into node scores |
-
-**Rule:** an adapter holds only what is specific to its model (wording, prompt, API format). System rules live in `scorer/` or `server/`, so they protect every model.
-
-## 2. How one placement decision flows
+Every decision, for either flow and with any model, goes the same way:
 
 ```mermaid
 flowchart TD
-    A["DecisionRequest for one pod"] --> B["Scorer answers first<br/>kept in standby"]
-    B --> C{"Model provider set?"}
-    C -- no --> S["Send the scorer's answer<br/>decidedBy: scorer"]
-    C -- yes --> D["Adapter asks its model<br/>stops after MODEL_TIMEOUT"]
-    D --> E{"Error or timeout?"}
-    E -- yes --> F["Send the scorer's answer<br/>decidedBy: fallback"]
-    E -- no --> G{"Answer check passes?"}
-    G -- no --> F
-    G -- yes --> M["Send the model's answer<br/>decidedBy: model"]
+    Req["Request from the operator<br/>(placement or rebalance)"] --> FB["The fallback answer is worked out first<br/>placement: the scorer · rebalance: the rules"]
+    FB --> On{"Is a model set for this flow?"}
+    On -- no --> SendFB["Send the fallback answer"]
+    On -- yes --> Ad["The adapter builds the question,<br/>calls its model, and turns the reply into an answer"]
+    Ad --> Ok{"Error, timeout,<br/>or the check fails?"}
+    Ok -- yes --> SendFB2["Send the fallback answer<br/>decidedBy: fallback"]
+    Ok -- no --> SendM["Send the model's answer<br/>decidedBy: model"]
 ```
 
-**The answer check** in `server/server.go` (`checkPlacementAnswer`) rejects an answer when:
-- a candidate node has no score, or has two
-- a node that isn't a candidate is scored
-- a score is outside 0–100, or is NaN
-- a node that isn't allowed (`scorer.Allowed`: the pod doesn't fit, or a Packed node would go over `AI_DECISION_SERVICE_SCORER_PACKED_MAX_UTIL`) has a score above 0
+So a model can only make a decision better. A slow, broken or wrong model costs accuracy, never safety: its answer is checked, and the fallback answer is always ready.
 
-A rejected answer is never sent. The scorer's answer goes out instead, so a bad model can cost accuracy but never safety.
+**What you write, and what is already done:**
 
-**Timeouts** are nested, so the scorer can always answer in time:
-
-```text
-operator → AI Decision Service : DECISION_AGENT_TIMEOUT             (operator, default 8s)
-service  → model               : AI_DECISION_SERVICE_MODEL_TIMEOUT  (default 5s)  ← must stay below the one above
-```
-
-Placement runs for every new pod, so a model that needs several seconds slows every pod start. Pick the timeout from measured latency.
-
-## 3. Switch to a model that already has an adapter
-
-| Env var | Meaning |
+| You write, once per model | Already done, shared by every model |
 |---|---|
-| `AI_DECISION_SERVICE_MODEL_PROVIDER` | Which adapter: `""` = no model (the scorer answers), `kev` = Kev |
-| `AI_DECISION_SERVICE_MODEL_BASE_URL` | The model's address, e.g. `http://host.docker.internal:8009` |
-| `AI_DECISION_SERVICE_MODEL_PATH` | The API path, appended to the base URL |
-| `AI_DECISION_SERVICE_MODEL_NAME` | Model name sent with each call |
-| `AI_DECISION_SERVICE_MODEL_TIMEOUT` | Give up after this, and the scorer answers |
+| `model/<name>_model.go`: build the question or prompt, call the model, turn the reply into an answer | The request from the operator, with every fact the model needs |
+| One `case` line per flow in `model/decider.go` | The fallback answer (the scorer, or the rules) |
+| Its tests, and a page about it | The check on every answer, the timeout, the decision log, and the settings loader |
 
-With Helm, set them under `aiDecisionService.config` in `deploy/helm/hiro-adaptive-platform/values.yaml`, or on the command line:
+**Rule:** an adapter holds only what is specific to its model, such as its wording, prompt or API format. Safety rules live in the shared code, so they protect every model.
+
+## 2. Switch a model
+
+Switching to a model that already has an adapter (see [7. Current adapters](#7-current-adapters)) is **config only**. Each flow has its own five settings, so the two flows can use different models:
+
+| Setting | Placement | Rebalance |
+|---|---|---|
+| Which adapter (`""` = no model) | `AI_DECISION_SERVICE_MODEL_PROVIDER` | `AI_DECISION_SERVICE_REBALANCE_MODEL_PROVIDER` |
+| The model's address | `AI_DECISION_SERVICE_MODEL_BASE_URL` | `AI_DECISION_SERVICE_REBALANCE_MODEL_BASE_URL` |
+| Its API path, added to the address | `AI_DECISION_SERVICE_MODEL_PATH` | `AI_DECISION_SERVICE_REBALANCE_MODEL_PATH` |
+| The model name sent with each call | `AI_DECISION_SERVICE_MODEL_NAME` | `AI_DECISION_SERVICE_REBALANCE_MODEL_NAME` |
+| Give up after this, then use the fallback | `AI_DECISION_SERVICE_MODEL_TIMEOUT` (5s) | `AI_DECISION_SERVICE_REBALANCE_MODEL_TIMEOUT` (30s) |
+
+Each timeout must stay below the operator's own limit for that call: `DECISION_AGENT_TIMEOUT` (8s) for placement, and `REBALANCE_DECISION_TIMEOUT` (60s) for rebalance. That way the fallback can still answer in time.
+
+**With Helm,** set them under `aiDecisionService.config` in `deploy/helm/hiro-adaptive-platform/values.yaml`, or on the command line:
 
 ```bash
 helm upgrade hiro-adaptive-platform deploy/helm/hiro-adaptive-platform \
@@ -90,13 +66,23 @@ helm upgrade hiro-adaptive-platform deploy/helm/hiro-adaptive-platform \
   --set aiDecisionService.config.AI_DECISION_SERVICE_MODEL_NAME=kev-latest
 ```
 
-The Deployment rolls out with the new values. A wrong or missing value stops the service at startup with a clear error.
+The service restarts with the new values. A wrong or missing value stops it at startup with a clear error. To **turn a model off**, set its provider to `""`.
 
-**Turn the model off** with `AI_DECISION_SERVICE_MODEL_PROVIDER=""`. The scorer then answers every request.
+**Check that it worked:** every decision writes one log line with `decidedBy`.
 
-## 4. Add a new model
+```bash
+kubectl logs -n hiro-adaptive-orchestrator-system deploy/ai-decision-service | grep '"msg":"Decision made"'
+```
 
-Say the new model is called `example`.
+| `decidedBy` | Meaning |
+|---|---|
+| `model` | The model decided |
+| `fallback` | The model failed. The warning line just before it (`Placement model failed…` or `Rebalance model failed…`) says why |
+| `scorer` or `rules` | No model is set for that flow, or (rebalance) nothing could change |
+
+## 3. Add a new model
+
+Say the new model is called `example`. An adapter can serve placement, rebalance, or both.
 
 ### Step 1: write the adapter, `ai-decision-service/model/example_model.go`
 
@@ -106,7 +92,7 @@ package model
 // ProviderExample selects the Example model.
 const ProviderExample = "example"
 
-// ExampleDecider asks the Example model where to place a pod.
+// ExampleDecider asks the Example model; it serves placement, rebalance, or both.
 type ExampleDecider struct {
 	cfg        Config
 	scorerCfg  scorer.Config
@@ -114,204 +100,160 @@ type ExampleDecider struct {
 	log        *slog.Logger
 }
 
-var _ PlacementDecider = (*ExampleDecider)(nil) // the build fails if it stops matching the interface
-
 // NewExampleDecider returns an ExampleDecider whose calls stop after cfg.Timeout.
 func NewExampleDecider(cfg Config, scorerCfg scorer.Config, log *slog.Logger) *ExampleDecider {
 	return &ExampleDecider{cfg: cfg, scorerCfg: scorerCfg, httpClient: &http.Client{Timeout: cfg.Timeout}, log: log}
 }
 
-// DecidePlacement asks the Example model to score every candidate node.
+// DecidePlacement scores every candidate node. Leave it out if the model doesn't do placement.
 func (d *ExampleDecider) DecidePlacement(ctx context.Context,
 	req placement.DecisionRequest) (placement.DecisionResponse, error) {
-	// 1. Build the prompt from req, using the scorer helpers below.
+	// 1. Build the prompt from req (see 4.1).
 	// 2. Call d.cfg.BaseURL + d.cfg.Path with ctx; d.httpClient stops after cfg.Timeout.
-	// 3. Turn the reply into one 0–100 score per candidate node (see the contract below).
-	// 4. On anything you can't turn into a valid answer, return an error: the scorer answers instead.
+	// 3. Return one 0–100 score per candidate node, or an error.
+}
+
+// DecideRebalance proposes one rebalance action. Leave it out if the model doesn't do rebalance.
+func (d *ExampleDecider) DecideRebalance(ctx context.Context, req placement.DecisionRequest,
+	assessment rebalance.Assessment) (placement.RebalanceDecisionResponse, error) {
+	// 1. Build the prompt from req.RebalanceContext and assessment.Blocked() (see 4.2).
+	// 2. Call the model with ctx.
+	// 3. Return one action, or an error.
 }
 ```
 
-### Step 2: register it, in `model/decider.go` → `New`
+`model/kev_model.go` is a complete working example for placement.
+
+### Step 2: register it, in `ai-decision-service/model/decider.go`
+
+Add one `case` to the factory of each flow it serves:
 
 ```go
+// in New (placement)
+	case ProviderExample:
+		return NewExampleDecider(cfg, scorerCfg, log), nil
+
+// in NewRebalance (rebalance)
 	case ProviderExample:
 		return NewExampleDecider(cfg, scorerCfg, log), nil
 ```
 
 ### Step 3: add any settings it needs
-The existing `model.Config` (provider, base URL, path, model name, timeout) covers most HTTP models. For anything more, such as an API key or a temperature, follow the repo rule that nothing is hard-coded:
+The five settings in section 2 cover most HTTP models. For anything more, such as an API key or a temperature, follow the repo rule that nothing is hard-coded:
 
-1. Add a field to `model.Config`, and a `Default…` const in `model/config.go`. Check it in `Validate`.
-2. Read it from an env var in `cmd/main.go` → `loadConfig`, using the `AI_DECISION_SERVICE_MODEL_` prefix.
-3. Add the value under `aiDecisionService.config` in the Helm values, and a row in the [service README](../ai-decision-service/README.md#configuration) env table.
-4. **Secrets:** the chart turns `aiDecisionService.config` into plain env values. Never put an API key there. Store it in a Kubernetes Secret, and add a `valueFrom.secretKeyRef` env entry in `deploy/helm/hiro-adaptive-platform/templates/ai-decision-service/deployment.yaml`.
+1. Add a field to `model.Config`, and a `Default…` const, in `model/config.go`. Check it in `Validate`.
+2. Read it in `cmd/main.go` → `envModelConfig`, so both flows get it with their own prefix.
+3. Add it under `aiDecisionService.config` in the Helm values, and add a row to the [service README](../ai-decision-service/README.md#configuration) env table.
+4. **Secrets:** the chart turns `aiDecisionService.config` into plain env values, so never put an API key there. Store it in a Kubernetes Secret, and add a `valueFrom.secretKeyRef` entry in `deploy/helm/hiro-adaptive-platform/templates/ai-decision-service/deployment.yaml`.
 
-### Step 4: tests, in `model/example_model_test.go`
-Copy the pattern in `model/kev_model_test.go`: a fake model server built with `httptest`, plus these cases:
+### Step 4: test it, in `model/example_model_test.go`
+Copy the pattern in `model/kev_model_test.go`: a fake model server built with `httptest`.
 
 | Case | Expected |
 |---|---|
-| good reply | one score per candidate, in 0–100 |
-| node that isn't allowed | scored 0, or left out of the prompt and scored 0 |
-| HTTP error, bad JSON, missing node, too slow, no candidates | an error (the request ID in the message) |
+| A good reply | A valid answer (see section 4) |
+| HTTP error, bad JSON, missing node, too slow | An error that names the request ID |
 
-The server's fallback and answer check are already tested in `server/server_test.go` with a stub decider, so you don't repeat them.
+You don't need to test the fallback or the check: `server/server_test.go` already covers them for every model.
 
-### Step 5: measure before switching
-Run the model on labelled scenarios and judge every answer against the **strategy's purpose**. Don't count agreement with the scorer as success, because the scorer has known flaws. Cover:
-- Balanced, Packed and Spread
-- 2 to 10 nodes
-- close calls
-- nodes over the limit
-- zones
+### Step 5: measure it, before switching
+Run the model on labelled scenarios and judge each answer against the **strategy's purpose**, not against agreement with the fallback, which has known flaws.
+- **Placement:** cover Balanced, Packed and Spread, 2 to 10 nodes, close calls, nodes over the limit, and zones.
+- **Rebalance:** cover healthy apps (expect no change), down nodes, hot nodes, and apps that are too small or too big.
 
-Compare the model with the current model and with the scorer, and record its latency at 2, 5 and 10 nodes.
+Record its latency, too.
 
 ### Step 6: try it on Kind, then switch
-1. Deploy it, set the provider (section 3), and scale an app that has an `OrchestrationProfile`.
-2. Read the decision log:
-   ```bash
-   kubectl logs -n hiro-adaptive-orchestrator-system deploy/ai-decision-service | grep '"flow":"placement"'
-   ```
-   Each line has `decidedBy`. If you see `fallback`, the warning line `Placement model failed, scorer will be used instead` just before it gives the reason.
-3. When `decidedBy: model` is the norm and its picks hold up, make it the default in the Helm values.
+1. Deploy it, and set the provider (section 2).
+2. Exercise it:
+   - **Placement:** scale an app that has an `OrchestrationProfile`.
+   - **Rebalance:** first set `spec.rebalancing.dryRun: true` on the profile, so the operator only reports what it would do. Turn it off once the answers hold up.
+3. Read `decidedBy` in the log (section 2). When `model` is the norm and its answers hold up, make it the default in the Helm values.
 
 ### Step 7: document it
-Add `model/example_model.md` next to the adapter: its wiring, how it works, its measured accuracy, gaps and next steps. Add a row to the table below. Replacing a model then means swapping its adapter files and its `case`.
+Add `model/example_model.md` next to the adapter, with its wiring, how it works, its measured accuracy, gaps and next steps, as `model/kev_model.md` does for Kev. Then add a row to [7. Current adapters](#7-current-adapters). Replacing a model later then means swapping its files and its `case` lines.
 
-## 5. The adapter contract
+## 4. The adapter contract
 
-**Input:** `placement.DecisionRequest` (`pkg/placement/decision.go`). The request holds every fact; an adapter never calls the cluster.
+**For both flows:**
+- The request holds every fact. An adapter never calls the cluster.
+- On anything it can't turn into a valid answer, it returns an **error**, never a guess. Name the request ID in it, e.g. `fmt.Errorf("(requestId=%s) …", req.RequestID)`. Any error sends the fallback answer.
+- Leave `requestId` and `decidedBy` empty in the answer: the server sets them.
 
-| Field | What it holds |
+### 4.1 Placement: `DecidePlacement(ctx, req) (placement.DecisionResponse, error)`
+
+| It gets (`placement.DecisionRequest`) | |
 |---|---|
-| `Pod` | The pod to place, with its containers' requests |
-| `AOProfile.Strategy` | `Balanced` (default), `Packed` or `Spread` |
-| `AOProfile.Awareness` | Which resources matter (CPU, memory, GPU, energy) |
-| `NodeStats[]` | One entry per node. **Only `Candidate: true` nodes may be scored.** Each one has `resources` (`allocatable`, `requested`, live `used`; CPU in millicores, memory in bytes), `appPods` (this app's pods on the node), `labels` (including the zone), `taints`, `conditions`, `imagesPresent`, and `energy` (null until per-node energy data exists). A null value means unknown, never zero. |
-| `EAOProfile` | Energy-aware orchestrator data, when energy awareness is on |
+| `pod` | The pod to place, with its containers' requests |
+| `aoProfile.strategy`, `aoProfile.awareness` | `Balanced` (default), `Packed` or `Spread`; which resources matter |
+| `nodeStats[]` | One entry per node. **Only `candidate: true` nodes may be scored.** Each one has `resources` (`allocatable`, `requested`, live `used`; CPU in millicores, memory in bytes), `appPods`, `labels` (with the zone), `taints`, `conditions` and `imagesPresent`. A null value means unknown, never zero. |
 
-**Output:** `placement.DecisionResponse`
-
-| Field | Rule |
+| It returns (`placement.DecisionResponse`) | |
 |---|---|
-| `NodeScores` | **Exactly one** score per candidate and none for other nodes, each in **0–100**, where higher is better. A node that isn't allowed **must score 0**. |
-| `Reason` | Short text that starts with the strategy, e.g. `Packed: node-2 best (probability 0.83)` |
-| `Confidence` | 0–1, if the model gives one |
-| `RequestID`, `DecidedBy` | Leave empty: the server sets them |
+| `nodeScores` | **Exactly one** score per candidate and none for other nodes, each **0–100**, higher is better. A node that isn't allowed (`scorer.Allowed`) **must score 0**. |
+| `reason` | Short text that starts with the strategy, e.g. `Packed: node-2 best (probability 0.83)` |
+| `confidence` | 0–1, if the model gives one |
 
-**Errors:** return an error, never a guess. Include the request ID, e.g. `fmt.Errorf("(requestId=%s) …", req.RequestID)`. Any error sends the scorer's answer.
-
-**Helpers from `scorer/`,** so the adapter sees the same numbers as the scorer:
+**Helpers** (`scorer/`), so the adapter sees the same numbers as the scorer:
 
 | Helper | Gives |
 |---|---|
-| `scorer.Strategy(req.AOProfile)` | The strategy, with Balanced as the default |
-| `scorer.PodRequests(req.Pod)` | The pod's CPU (millicores) and memory (bytes) requests |
-| `scorer.ScoredResources(req.AOProfile)` | The resources the profile cares about |
-| `scorer.Utilization(node, pod, resources)` | Each resource's share, with the pod placed and live usage counted. `ok` is false when unknown. |
+| `scorer.Strategy`, `scorer.PodRequests`, `scorer.ScoredResources` | The strategy, the pod's requests, and the resources that matter |
+| `scorer.Utilization(node, pod, resources)` | Each resource's share, with the pod placed and live usage counted |
 | `scorer.Allowed(util, strategy, cfg)` | Whether the node may take the pod at all |
-| `scorer.MaxUtil(util)`, `scorer.Average(util)` | The busiest share, and the average share |
-| `scorer.CountAppPodsPerZone(nodes, cfg).ZoneCounts` | This app's pods per zone, over all nodes |
+| `scorer.MaxUtil`, `scorer.Average`, `scorer.CountAppPodsPerZone` | The busiest share, the average share, and this app's pods per zone |
 
-## 6. Before you go live
+### 4.2 Rebalance: `DecideRebalance(ctx, req, assessment) (placement.RebalanceDecisionResponse, error)`
 
-- [ ] The adapter scores every candidate once, in 0–100, and scores nodes that aren't allowed 0.
-- [ ] Every failure returns an error that includes the request ID.
-- [ ] Every new setting has a default, an env var, a Helm value and a README row. Secrets come from a Secret.
-- [ ] `AI_DECISION_SERVICE_MODEL_TIMEOUT` stays below the operator's `DECISION_AGENT_TIMEOUT`.
-- [ ] `make test-ai-decision-service` and `make lint` pass.
-- [ ] Measured on the labelled scenarios (step 5), with the results in `model/<name>_model.md`.
-- [ ] Tried on Kind, and `decidedBy: model` shows in the decision log.
-
-## 7. Rebalance models
-
-Rebalance works the same way as placement: the model proposes, code checks, and the rules are the fallback. It has its own interface, factory and settings, so it can use a different model from placement, or the same one.
-
-```mermaid
-flowchart TD
-    A["Rebalance request"] --> B["rebalance.Assess: facts + gates<br/>rules' answer kept in standby"]
-    B --> C{"Rebalance model set,<br/>and can anything change?"}
-    C -- no --> R["Send the rules' answer<br/>decidedBy: rules"]
-    C -- yes --> D["Adapter asks its model<br/>stops after REBALANCE_MODEL_TIMEOUT"]
-    D --> E{"Error or timeout?"}
-    E -- yes --> F["Send the rules' answer<br/>decidedBy: fallback"]
-    E -- no --> G{"assessment.Check passes?"}
-    G -- no --> F
-    G -- yes --> M["Send the model's answer<br/>decidedBy: model"]
-```
-
-"Can anything change" is false only in a cooldown with no pod on a down node, so the model isn't asked when its answer could only be rejected.
-
-**The check** (`Assessment.Check` in `rebalance/rules.go`) rejects an answer when:
-- a gate blocks it: a cooldown; replicas or resources that another controller manages; a PDB with no disruptions left (Move); a fresh EAO hold (anything that starts new pods); or a recent Move (churn, or ping-pong)
-- a Move names a pod that isn't in the request or isn't scheduled, its own node, a node that isn't a candidate, or a node that isn't healthy
-- an AdjustReplicas goes outside min..max, or keeps the same count
-- an AdjustResources names an unknown container, or has no target or a target that isn't a positive quantity
-- it misses the **must-do**: while a pod is on a down node and a healthy node can take it, the answer must move a pod off a down node
-- the action is unknown
-
-### Adding a rebalance adapter
-It follows section 4, with the rebalance interface and factory. In `model/example_rebalance.go`:
-
-```go
-// DecideRebalance asks the Example model for one rebalance action.
-func (d *ExampleDecider) DecideRebalance(ctx context.Context, req placement.DecisionRequest,
-	assessment rebalance.Assessment) (placement.RebalanceDecisionResponse, error) {
-	// 1. Build the question or prompt from req.RebalanceContext, plus assessment.Blocked().
-	// 2. Call the model with ctx; stop after cfg.Timeout.
-	// 3. Turn the reply into one answer; assessment.Check(answer) says whether it would pass.
-	// 4. On anything you can't turn into a valid answer, return an error: the rules answer instead.
-}
-```
-
-Register it in `model.NewRebalance` (`model/decider.go`):
-
-```go
-	case ProviderExample:
-		return NewExampleDecider(cfg, scorerCfg, log), nil
-```
-
-One adapter type can serve both flows: give it both methods, and register it in both factories.
-
-**Input:** the same `placement.DecisionRequest`, with `RebalanceContext` set:
-
-| Field | What it holds |
+| It gets (`req.RebalanceContext`) | |
 |---|---|
 | `currentPlacements[]` | Each pod of the app: its node, phase and containers (requests, limits, live `cpuUsed` / `memoryUsed`) |
 | `trigger` | What started this review, e.g. a node failure or CPU pressure, with its value and threshold |
 | `workload` | `replicas`, `minReplicas`, `maxReplicas` and `improvementThreshold` |
-| `pdb` | The disruption budget, when one applies |
-| `history`, `cooldownUntil`, `consecutiveFailures` | Recent decisions and their outcomes |
-| `nodeStats[]` | As for placement; nodes the app's pods run on are listed too, with `candidate: false` when they can't take pods |
+| `pdb`, `history`, `cooldownUntil` | The disruption budget, recent decisions, and the cooldown |
+| `nodeStats[]` | As for placement. The app's nodes that can't take pods are listed with `candidate: false`. |
 
-**Helpers on `assessment`:**
-
-| Helper | Gives |
-|---|---|
-| `assessment.Blocked()` | What the gates block right now, in words, for a question or prompt |
-| `assessment.Check(answer)` | Why an answer would be rejected, or `""`; use it to drop options before asking, or before returning |
-| `assessment.AnyChangeAllowed()` | Whether any change is possible; the server already skips the model when it isn't |
-| `assessment.RulesAnswer(scorerCfg)` | The rules' answer, which an adapter may return as its own, e.g. for a pod on a down node |
-
-**Output:** `placement.RebalanceDecisionResponse`
-
-| Field | Rule |
+| It returns (`placement.RebalanceDecisionResponse`) | |
 |---|---|
 | `action` | `NoOp`, `Move`, `AdjustReplicas`, `AdjustResources`, `Defer`, `Reject` or `Escalate` |
 | `podName`, `targetNode` | For Move: a pod from `currentPlacements`, and a healthy candidate |
 | `targetReplicas` | For AdjustReplicas: the new count, not a difference |
 | `containerName`, `targetCpu`, `targetMemory` | For AdjustResources: Kubernetes quantities, e.g. `500m`, `512Mi` |
-| `improvement` | The expected gain. The operator carries out Move, AdjustReplicas and AdjustResources only when it reaches `workload.improvementThreshold` |
-| `reason` | Short text, shown in the profile's status and events |
-| `confidence` | 0–1, if the model gives one |
-| `requestId`, `decidedBy` | Leave empty: the server sets them |
+| `improvement` | The expected gain. The operator carries out Move, AdjustReplicas and AdjustResources only when it reaches `workload.improvementThreshold`. |
+| `reason`, `confidence` | Short text for the profile's status and events; 0–1, if known |
 
-**Settings:** the same five as placement, with the prefix `AI_DECISION_SERVICE_REBALANCE_MODEL_`: `PROVIDER`, `BASE_URL`, `PATH`, `NAME` and `TIMEOUT` (default 30s). The timeout must stay below the operator's `REBALANCE_DECISION_TIMEOUT` (60s). Set them under `aiDecisionService.config` in Helm, as in section 3.
+**Helpers** (`assessment`, worked out by the shared rules):
 
-**Before you go live:** the section 6 checklist applies. Try it on Kind with `spec.rebalancing.dryRun: true` on the profile first: the operator reports what it would do, without doing it.
+| Helper | Gives |
+|---|---|
+| `assessment.Blocked()` | What is blocked right now, in words, for a question or prompt |
+| `assessment.Check(answer)` | Why an answer would be rejected, or `""`; use it to drop options before asking |
+| `assessment.RulesAnswer(scorerCfg)` | The rules' answer, which an adapter may return as its own, e.g. for a pod on a down node |
 
-## 8. Current adapters
+## 5. What the check rejects
+
+The server checks every model's answer before sending it. A rejected answer is never sent: the fallback answer goes out instead.
+
+| Placement rejects an answer when | Rebalance rejects an answer when |
+|---|---|
+| A candidate has no score, or two | A gate blocks it: a cooldown; replicas or resources another controller manages; a PDB with no disruptions left (Move); a fresh energy hold (anything that starts pods); or a recent Move (churn, ping-pong) |
+| A node that isn't a candidate is scored | A Move names a pod that isn't in the request or isn't scheduled, its own node, or a target that isn't a healthy candidate |
+| A score is outside 0–100, or is NaN | AdjustReplicas goes outside min..max, or keeps the same count |
+| A node that isn't allowed (the pod doesn't fit, or a Packed node would go over `AI_DECISION_SERVICE_SCORER_PACKED_MAX_UTIL`) scores above 0 | AdjustResources names an unknown container, or has no target, or a target that isn't a positive quantity |
+| | It skips the **must-do**: while a pod is on a down node and a healthy node can take it, the answer must move a pod off a down node |
+
+The code is `checkPlacementAnswer` in `server/server.go` for placement, and `Assessment.Check` in `rebalance/rules.go` for rebalance. For rebalance, the model isn't asked at all when nothing can change: a cooldown with no pod on a down node.
+
+## 6. Before you go live
+
+- [ ] Every answer meets [section 4](#4-the-adapter-contract), and every failure returns an error that names the request ID.
+- [ ] Every new setting has a default, an env var, a Helm value and a README row. Secrets come from a Secret.
+- [ ] Each timeout stays below the operator's limit for that call (section 2).
+- [ ] `make test-ai-decision-service` and `make lint` pass.
+- [ ] It's measured on labelled scenarios (step 5), with the results in its `model/<name>_model.md`.
+- [ ] It's tried on Kind (step 6), with `decidedBy: model` in the log, and rebalance tried with `dryRun` first.
+
+## 7. Current adapters
 
 | Flow | Provider | Adapter | Details |
 |---|---|---|---|

@@ -87,7 +87,7 @@ flowchart TB
     Agent -->|"POST"| Kev
 ```
 
-The operator calls whatever `DECISION_AGENT_URL` points at: the AI Decision Service or the mock. For the service's scorer, model, answer checks and settings, see [ai-decision-service/README.md](../ai-decision-service/README.md).
+The operator calls whatever `DECISION_AGENT_URL` points at: the AI Decision Service or the mock. For the service's scorer, model, answer checks and settings, see [ai-decision-service/README.md](../ai-decision-service/README.md). To replace the model or add one, see [decision-models.md](decision-models.md).
 
 <a id="reconciliation-flow"></a>
 ## Reconciliation Flow

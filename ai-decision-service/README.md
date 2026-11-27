@@ -71,7 +71,7 @@ Off by default (`AI_DECISION_SERVICE_REBALANCE_MODEL_PROVIDER` empty). It has it
 3. The model is asked, and given up on after `AI_DECISION_SERVICE_REBALANCE_MODEL_TIMEOUT`.
 4. **Check**, the same for every model: the gates and validate above, plus the **must-do**: while a pod is on a down node and a healthy node can take it, the answer must move a pod off a down node. A model error, a timeout or a failed check sends the rules' answer with `decidedBy: fallback`.
 
-No rebalance adapter exists yet. Adding one is a new file in `model/` plus one `case` in `model.NewRebalance`; see [docs/decision-models.md](../docs/decision-models.md#7-rebalance-models).
+No rebalance adapter exists yet. Adding one is a new file in `model/` plus one `case` in `model.NewRebalance`; see [docs/decision-models.md](../docs/decision-models.md#3-add-a-new-model).
 
 Each answer writes one JSON log line: `requestId`, `flow`, `decidedBy`, `latencyMilliSec`, `inputHash` (same input, same hash), `nodes` and the response.
 
