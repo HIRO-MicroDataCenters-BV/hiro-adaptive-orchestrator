@@ -62,6 +62,7 @@ always matches what was deployed:
 | `DEPLOY_PROMETHEUS` | `false` | Bundle kube-prometheus-stack and turn on both ServiceMonitors, so the `hiro_*` metrics are scraped rather than just exposed |
 | `DEPLOY_METRICS_SERVER` | `true` | Bundle metrics-server, which gives the CPU/Memory triggers and each decision request live node and pod usage. Set `false` if the cluster already runs one |
 | `OTLP_ENDPOINT` | *(empty)* | OTLP gRPC collector for traces, e.g. `alloy.observability.svc:4317`. Empty disables tracing entirely |
+| `AI_DECISION_SERVICE_MODEL_*`, `AI_DECISION_SERVICE_REBALANCE_MODEL_*` (`PROVIDER`, `BASE_URL`, `PATH`, `NAME`) | *(empty)* | The model for placement and for rebalance, passed to the AI Decision Service. An empty provider leaves that flow's model off. See [decision-models.md](decision-models.md#2-switch-a-model) |
 
 ```bash
 KIND_CLUSTER_NAME=hiro-platform-verify deploy/scripts/deploy_full_stack_with_helm.sh deploy

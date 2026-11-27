@@ -43,7 +43,7 @@ So a model can only make a decision better. A slow, broken or wrong model costs 
 
 ## 2. Switch a model
 
-Switching to a model that already has an adapter (see [7. Current adapters](#7-current-adapters)) is **config only**. Each flow has its own five settings, so the two flows can use different models:
+Switching to a model that already has an adapter (see [7. Current adapters](#7-current-adapters)) is **config only**. Both flows are off by default, so a fresh install works on any cluster with no model. Each flow has its own five settings, so the two flows can use different models:
 
 | Setting | Placement | Rebalance |
 |---|---|---|
@@ -61,9 +61,21 @@ Each timeout must stay below the operator's own limit for that call: `DECISION_A
 helm upgrade hiro-adaptive-platform deploy/helm/hiro-adaptive-platform \
   -n hiro-adaptive-orchestrator-system --reuse-values \
   --set aiDecisionService.config.AI_DECISION_SERVICE_MODEL_PROVIDER=kev \
-  --set aiDecisionService.config.AI_DECISION_SERVICE_MODEL_BASE_URL=http://host.docker.internal:8009 \
+  --set aiDecisionService.config.AI_DECISION_SERVICE_MODEL_BASE_URL=http://<kev-address>:8009 \
   --set aiDecisionService.config.AI_DECISION_SERVICE_MODEL_PATH=/v1/systemone \
   --set aiDecisionService.config.AI_DECISION_SERVICE_MODEL_NAME=kev-latest
+```
+
+The address is the model's URL as seen from inside the cluster: a Service name when it runs in the cluster, otherwise its URL. For a model on your own machine, the address depends on the OS; see [Kev's wiring](../ai-decision-service/model/kev_model.md#wiring).
+
+**With the Kind script,** pass the same settings when you run it; it hands the model settings to the service:
+
+```bash
+AI_DECISION_SERVICE_MODEL_PROVIDER=kev \
+AI_DECISION_SERVICE_MODEL_BASE_URL=http://<kev-address>:8009 \
+AI_DECISION_SERVICE_MODEL_PATH=/v1/systemone \
+AI_DECISION_SERVICE_MODEL_NAME=kev-latest \
+deploy/scripts/deploy_full_stack_with_helm.sh
 ```
 
 The service restarts with the new values. A wrong or missing value stops it at startup with a clear error. To **turn a model off**, set its provider to `""`.

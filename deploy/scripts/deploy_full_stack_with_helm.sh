@@ -36,6 +36,22 @@
 #                         Set only one of the two to true; the chart points the
 #                         operator at it. Both false: an external agent at
 #                         hiro-operator.config.DECISION_AGENT_URL.
+#
+# ─── Models for the AI Decision Service ──────────────────────────────────────
+# Passed to the service as is (see docs/decision-models.md). An empty provider
+# leaves that flow's model off: the scorer or the rules answer. (default: empty)
+#
+#   AI_DECISION_SERVICE_MODEL_PROVIDER            Placement model, e.g. kev
+#   AI_DECISION_SERVICE_MODEL_BASE_URL            Its address, as seen from the cluster
+#   AI_DECISION_SERVICE_MODEL_PATH                Its API path, e.g. /v1/systemone
+#   AI_DECISION_SERVICE_MODEL_NAME                Model name sent with each call, e.g. kev-latest
+#   AI_DECISION_SERVICE_REBALANCE_MODEL_PROVIDER  Rebalance model
+#   AI_DECISION_SERVICE_REBALANCE_MODEL_BASE_URL  Its address
+#   AI_DECISION_SERVICE_REBALANCE_MODEL_PATH      Its API path
+#   AI_DECISION_SERVICE_REBALANCE_MODEL_NAME      Model name sent with each call
+#
+# For a model on the host, the address depends on the setup: host.docker.internal
+# on Docker Desktop (macOS, Windows), the kind network's gateway IP on Linux.
 #   DEPLOY_SAMPLES        nginx + OrchestrationProfile samples from config/samples/,
 #                         applied with kubectl after Helm, never Helm-owned (default: true)
 #   DEPLOY_PROMETHEUS     Bundle kube-prometheus-stack and turn on both
@@ -111,6 +127,16 @@ DEPLOY_PROMETHEUS=${DEPLOY_PROMETHEUS:-false}
 DEPLOY_METRICS_SERVER=${DEPLOY_METRICS_SERVER:-true}
 OTLP_ENDPOINT=${OTLP_ENDPOINT:-}
 SCHEDULER_MODE=${SCHEDULER_MODE:-plugin}
+
+# Model settings for the AI Decision Service; an empty provider leaves that flow's model off.
+AI_DECISION_SERVICE_MODEL_PROVIDER=${AI_DECISION_SERVICE_MODEL_PROVIDER:-}
+AI_DECISION_SERVICE_MODEL_BASE_URL=${AI_DECISION_SERVICE_MODEL_BASE_URL:-}
+AI_DECISION_SERVICE_MODEL_PATH=${AI_DECISION_SERVICE_MODEL_PATH:-}
+AI_DECISION_SERVICE_MODEL_NAME=${AI_DECISION_SERVICE_MODEL_NAME:-}
+AI_DECISION_SERVICE_REBALANCE_MODEL_PROVIDER=${AI_DECISION_SERVICE_REBALANCE_MODEL_PROVIDER:-}
+AI_DECISION_SERVICE_REBALANCE_MODEL_BASE_URL=${AI_DECISION_SERVICE_REBALANCE_MODEL_BASE_URL:-}
+AI_DECISION_SERVICE_REBALANCE_MODEL_PATH=${AI_DECISION_SERVICE_REBALANCE_MODEL_PATH:-}
+AI_DECISION_SERVICE_REBALANCE_MODEL_NAME=${AI_DECISION_SERVICE_REBALANCE_MODEL_NAME:-}
 KIND_KUBECONFIG_PATH="${REPO_ROOT}/.kind-kubeconfig-${KIND_CLUSTER_NAME}.yaml"
 
 # These two Services each carry a unique app.kubernetes.io/component, so a
@@ -182,6 +208,10 @@ print_config() {
   fi
   echo "Mock agent           : $USE_MOCK_AGENT"
   echo "AI Decision Service  : $USE_AI_DECISION_SERVICE"
+  if [ "$USE_AI_DECISION_SERVICE" = "true" ]; then
+    echo "  Placement model    : ${AI_DECISION_SERVICE_MODEL_PROVIDER:-off}"
+    echo "  Rebalance model    : ${AI_DECISION_SERVICE_REBALANCE_MODEL_PROVIDER:-off}"
+  fi
   echo "Samples              : $DEPLOY_SAMPLES"
   echo "Prometheus           : $DEPLOY_PROMETHEUS"
   echo "Metrics server       : $DEPLOY_METRICS_SERVER"
@@ -369,7 +399,15 @@ deploy_stack() {
       --set aiDecisionService.image.tag=${AI_DS_TAG} \
       --set aiDecisionService.image.pullPolicy=IfNotPresent \
       --set aiDecisionService.serviceName=${AI_DS_SERVICE_NAME} \
-      --set aiDecisionService.port=${AI_DS_PORT}"
+      --set aiDecisionService.port=${AI_DS_PORT} \
+      --set-string aiDecisionService.config.AI_DECISION_SERVICE_MODEL_PROVIDER=${AI_DECISION_SERVICE_MODEL_PROVIDER} \
+      --set-string aiDecisionService.config.AI_DECISION_SERVICE_MODEL_BASE_URL=${AI_DECISION_SERVICE_MODEL_BASE_URL} \
+      --set-string aiDecisionService.config.AI_DECISION_SERVICE_MODEL_PATH=${AI_DECISION_SERVICE_MODEL_PATH} \
+      --set-string aiDecisionService.config.AI_DECISION_SERVICE_MODEL_NAME=${AI_DECISION_SERVICE_MODEL_NAME} \
+      --set-string aiDecisionService.config.AI_DECISION_SERVICE_REBALANCE_MODEL_PROVIDER=${AI_DECISION_SERVICE_REBALANCE_MODEL_PROVIDER} \
+      --set-string aiDecisionService.config.AI_DECISION_SERVICE_REBALANCE_MODEL_BASE_URL=${AI_DECISION_SERVICE_REBALANCE_MODEL_BASE_URL} \
+      --set-string aiDecisionService.config.AI_DECISION_SERVICE_REBALANCE_MODEL_PATH=${AI_DECISION_SERVICE_REBALANCE_MODEL_PATH} \
+      --set-string aiDecisionService.config.AI_DECISION_SERVICE_REBALANCE_MODEL_NAME=${AI_DECISION_SERVICE_REBALANCE_MODEL_NAME}"
   else
     ai_ds_args="--set aiDecisionService.enable=false"
   fi
@@ -526,6 +564,8 @@ print_summary() {
   fi
   if [ "$USE_AI_DECISION_SERVICE" = "true" ]; then
     echo -e "\033[32m    AI Decision Service: deployed  (service/$AI_DS_SERVICE_NAME:$AI_DS_PORT)\033[0m"
+    echo -e "\033[32m      ├─ placement model: ${AI_DECISION_SERVICE_MODEL_PROVIDER:-off (the scorer answers)}\033[0m"
+    echo -e "\033[32m      ├─ rebalance model: ${AI_DECISION_SERVICE_REBALANCE_MODEL_PROVIDER:-off (the rules answer)}\033[0m"
     echo -e "\033[32m      └─ decision log: kubectl logs -n $HELM_NAMESPACE deploy/$AI_DS_SERVICE_NAME -f\033[0m"
   else
     echo -e "\033[33m    AI Decision Service: not deployed\033[0m"

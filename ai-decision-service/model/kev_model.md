@@ -12,15 +12,36 @@ Switching or adding a model is covered in [docs/decision-models.md](../../docs/d
 
 ## Wiring
 
-| Env var | Kind value (Kev on the host machine) | |
+Off by default. To turn Kev on, set:
+
+| Env var | Value | |
 |---|---|---|
 | `AI_DECISION_SERVICE_MODEL_PROVIDER` | `kev` | Selects this adapter |
-| `AI_DECISION_SERVICE_MODEL_BASE_URL` | `http://host.docker.internal:8009` | Kev's address, as seen from inside the cluster |
+| `AI_DECISION_SERVICE_MODEL_BASE_URL` | Kev's address (below) | As seen from inside the cluster |
 | `AI_DECISION_SERVICE_MODEL_PATH` | `/v1/systemone` | Kev's System One endpoint |
 | `AI_DECISION_SERVICE_MODEL_NAME` | `kev-latest` | Sent as `model` in each call |
-| `AI_DECISION_SERVICE_MODEL_TIMEOUT` | `5000ms` | Then the scorer answers. Must stay below the operator's `DECISION_AGENT_TIMEOUT` (8s) |
+| `AI_DECISION_SERVICE_MODEL_TIMEOUT` | `5000ms` (the default) | Then the scorer answers. Must stay below the operator's `DECISION_AGENT_TIMEOUT` (8s) |
 
-The umbrella chart sets these values under `aiDecisionService.config`. Kev must be running and reachable at the base URL; on Kind with Kev on the host, it must listen on all interfaces, not only `localhost`.
+Kev's address depends on where it runs:
+
+| Kev runs | Base URL |
+|---|---|
+| In the cluster | Its Service, e.g. `http://kev.<namespace>.svc:8009` |
+| Anywhere else on the network | Its URL |
+| On the host, with Kind on Docker Desktop (macOS, Windows) | `http://host.docker.internal:8009` |
+| On the host, with Kind on Linux | `http://<gateway>:8009`, where `<gateway>` is the IPv4 `Gateway` from `docker network inspect kind` |
+
+On the host, Kev must listen on all interfaces, not only `localhost`.
+
+- **Helm:** set them under `aiDecisionService.config`.
+- **Kind:** pass them to the deploy script, which hands the model settings to the service:
+  ```bash
+  AI_DECISION_SERVICE_MODEL_PROVIDER=kev \
+  AI_DECISION_SERVICE_MODEL_BASE_URL=http://host.docker.internal:8009 \
+  AI_DECISION_SERVICE_MODEL_PATH=/v1/systemone \
+  AI_DECISION_SERVICE_MODEL_NAME=kev-latest \
+  deploy/scripts/deploy_full_stack_with_helm.sh
+  ```
 
 **Kev's API**, as used here:
 

@@ -134,7 +134,7 @@ curl localhost:8080/healthz
 
 ## Deploy
 
-- **Kind:** `deploy/scripts/deploy_full_stack_with_helm.sh`. The AI Decision Service is on by default (`USE_AI_DECISION_SERVICE=true`).
+- **Kind:** `deploy/scripts/deploy_full_stack_with_helm.sh`. The AI Decision Service is on by default (`USE_AI_DECISION_SERVICE=true`), with no model. To turn one on, pass its settings to the script; see [docs/decision-models.md](../docs/decision-models.md#2-switch-a-model).
 - **Helm:** `--set aiDecisionService.enable=true`. The chart points the operator's `DECISION_AGENT_URL` at it. Enable only one of `aiDecisionService` and `mockAgent`.
 - **Plain manifest:** `deploy/manifests/ai_decision_service.yaml`.
 - **Release:** `release.yml` pushes `ghcr.io/<repo>/ai-decision-service:<version>`. `deploy.yml` turns it on with the `AI_DECISION_SERVICE_ENABLE` repo variable.
