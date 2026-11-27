@@ -15,10 +15,7 @@ type PlacementDecider interface {
 		request placement.DecisionRequest) (placement.DecisionResponse, error)
 }
 
-// ProviderKev selects Kev's System One API.
-const ProviderKev = "kev"
-
-// New returns the decider for cfg.Provider, or nil when the model is off.
+// New returns the decider for cfg.Provider, or nil when the model is off; each provider's const lives in its adapter.
 func New(cfg Config, scorerCfg scorer.Config, log *slog.Logger) (PlacementDecider, error) {
 	switch cfg.Provider {
 	case "":

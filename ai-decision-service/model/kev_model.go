@@ -15,6 +15,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+// ProviderKev selects Kev's System One API.
+const ProviderKev = "kev"
+
 const (
 	kevQuestionID         = "placement"
 	kevQuestionTypeChoice = "choice"
