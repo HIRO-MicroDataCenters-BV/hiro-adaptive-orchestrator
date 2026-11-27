@@ -66,6 +66,11 @@ ai-decision-service/                   # Separate Go module (own go.mod); decide
     config.go                          # Scorer defaults + Validate
     scorer.go                          # Packed / Balanced / Spread node scoring (pure, deterministic)
     scorer_test.go                     # Table tests + benchmark
+  model/                               # Placement models, one adapter per model (see docs/decision-models.md)
+    decider.go                         # PlacementDecider interface + model.New (provider → adapter)
+    config.go                          # Model defaults + Validate
+    kev_model.go                       # Kev adapter (System One API)
+    kev_model.md                       # Kev wiring, how it works, accuracy, gaps, next steps
   Dockerfile                           # Build context: repo root
   go.mod                               # Imports the root module's pkg/placement contract (replace => ../)
 config/

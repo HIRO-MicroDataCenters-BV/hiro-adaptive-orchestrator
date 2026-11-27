@@ -18,7 +18,7 @@ It is a separate Go module (own `go.mod`), like `scheduler-plugin/`. It imports 
 
 ### Placement scorer (`scorer/`)
 
-Utilisation is worked out per resource **after** placing the pod: `(requested + pod request) / allocatable`.
+Utilisation is worked out per resource **after** placing the pod: `(max(requested, used) + pod request) / allocatable`. Live usage (`used`) counts when it is above the requests, so a busy node doesn't look empty; when it's unknown, requests alone are used.
 
 | Strategy | Prefers | Score |
 |----------|---------|-------|
@@ -26,7 +26,7 @@ Utilisation is worked out per resource **after** placing the pod: `(requested + 
 | `Balanced` (default) | Emptier nodes, no hotspots | `100 × (1 − highest utilisation)`, minus a penalty when CPU and memory are uneven |
 | `Spread` | Fewer of the app's pods per zone, then per node | Weighted mix of the zone part, the node part and the Balanced score |
 
-- A pod that doesn't fit (utilisation above 100%) scores 0.
+- **Allowed** (`scorer.Allowed`, one rule for the scorer and every model): the pod must fit (utilisation at most 100%), and under Packed no resource may go above the packed limit. A node that isn't allowed scores 0.
 - A node with unknown usage gets the neutral unknown score, and is never dropped.
 - The awareness flags pick the resources (CPU, memory). None set means both.
 - The reason names the best node, e.g. `Balanced: node-2 best (score 74)`.
@@ -37,13 +37,15 @@ Off by default (`AI_DECISION_SERVICE_MODEL_PROVIDER` empty). With a provider set
 
 1. The scorer runs first, so its answer is ready if the model fails.
 2. The model is asked, and given up on after `AI_DECISION_SERVICE_MODEL_TIMEOUT`.
-3. **Check:** each candidate needs exactly one score from 0 to 100. A model error, a timeout or a failed check sends the scorer's answer with `decidedBy: fallback`.
+3. **Check**, the same for every model: each candidate needs exactly one score from 0 to 100, and a node that isn't allowed must score 0. A model error, a timeout or a failed check sends the scorer's answer with `decidedBy: fallback`.
 
 The log also records the scorer's answer beside the model's, so the two can be compared.
 
-**Kev** (`kev`, System One API): each candidate's facts (share of CPU and memory requested, the app's pods on it) become one option of a `choice` question, with the strategy's rule as the instruction. Each node's probability × 100 is its score, and the reason names Kev's pick, e.g. `Spread: node-2 best (probability 0.75)`.
+| Provider | Adapter | Details |
+|---|---|---|
+| `kev` | `model/kev_model.go` | [model/kev_model.md](model/kev_model.md): wiring, how it works, accuracy, gaps, next steps |
 
-**Adding a model:** a new file in `model/` that implements `PlacementDecider`, plus one `case` in `model.New`.
+**Switching or adding a model** (Kev, an LLM or any other): see [docs/decision-models.md](../docs/decision-models.md). Switching is config only; adding one is a new adapter file plus one `case` in `model.New`.
 
 ### Rebalance (`rebalance/`)
 
@@ -89,7 +91,7 @@ Every setting has a default (`server/config.go`) and an env var:
 | `AI_DECISION_SERVICE_SCORER_SPREAD_BALANCED_WEIGHT` | `0.1` | Spread: weight of the Balanced tie-break |
 | `AI_DECISION_SERVICE_SCORER_ZONE_LABEL` | `topology.kubernetes.io/zone` | Node label that names its zone |
 | `AI_DECISION_SERVICE_SCORER_UNKNOWN_SCORE` | `50` | Score for a node whose usage is unknown |
-| `AI_DECISION_SERVICE_MODEL_PROVIDER` | `""` | Placement model: `""` = off (the scorer answers), `kev` = Kev's System One API |
+| `AI_DECISION_SERVICE_MODEL_PROVIDER` | `""` | Placement model: `""` = off (the scorer answers), `kev` = Kev's System One API. See [docs/decision-models.md](../docs/decision-models.md) |
 | `AI_DECISION_SERVICE_MODEL_BASE_URL` | `""` | Model's address; the full URL is base URL + path. Required with a provider |
 | `AI_DECISION_SERVICE_MODEL_PATH` | `""` | Model's API path, e.g. `/v1/systemone` for Kev. Required with a provider |
 | `AI_DECISION_SERVICE_MODEL_NAME` | `""` | Model name sent with each request, e.g. `kev-latest`. Required with a provider |

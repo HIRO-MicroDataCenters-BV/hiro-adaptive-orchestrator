@@ -168,6 +168,10 @@ CRD spec — **[internal/rebalance/README.md](internal/rebalance/README.md)** fo
 engine's decision lifecycle — and **[docs/scheduling-flows.md](docs/scheduling-flows.md)** for
 function-level call traces of both scheduling paths.
 
+The AI Decision Service asks a pluggable model (Kev today) where to place each pod, with a code
+scorer as the fallback. To switch to another model, or plug in a new LLM or other intelligence,
+see **[docs/decision-models.md](docs/decision-models.md)**.
+
 ---
 
 <a id="features"></a>
