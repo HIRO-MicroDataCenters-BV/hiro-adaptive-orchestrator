@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/model"
+	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/rebalance"
 	orchestrationv1alpha1 "github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/api/v1alpha1"
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/pkg/placement"
 )
@@ -37,6 +38,12 @@ const (
 				"cpu": {"allocatable": 4000, "requested": 3500}, "memory": {"allocatable": 8589934592, "requested": 0}}},
 			{"name":"node2", "candidate": true, "resources": {
 				"cpu": {"allocatable": 4000, "requested": 0}, "memory": {"allocatable": 8589934592, "requested": 0}}}]}`
+	// a healthy app in a cooldown: no change is possible, so the rebalance model isn't asked
+	CooldownRebalanceBody = `{"requestId":"r3",
+		"nodeStats": [{"name":"node1", "candidate": true, "conditions": {"Ready":"True"}},
+			{"name":"node2", "candidate": true, "conditions": {"Ready":"True"}}],
+		"rebalanceContext": {"reason":"test", "cooldownUntil": "2999-01-01T00:00:00Z",
+			"currentPlacements": [{"podName":"p1", "nodeName":"node1", "phase":"Running"}]}}`
 	stubModelReason = "stub model: node2 best"
 )
 
@@ -51,25 +58,38 @@ func (d stubDecider) DecidePlacement(context.Context,
 	return d.answer, d.err
 }
 
+// stubRebalanceDecider stands in for a rebalance model: it returns answer and err, and counts its calls.
+type stubRebalanceDecider struct {
+	answer placement.RebalanceDecisionResponse
+	err    error
+	calls  *int
+}
+
+func (d stubRebalanceDecider) DecideRebalance(context.Context, placement.DecisionRequest,
+	rebalance.Assessment) (placement.RebalanceDecisionResponse, error) {
+	*d.calls++
+	return d.answer, d.err
+}
+
 // do sends one request through the service's routes and returns the recorded response; a nil decider means model off.
-func do(t *testing.T, cfg Config, placementDecider model.PlacementDecider,
+func do(t *testing.T, cfg Config, placementDecider model.PlacementDecider, rebalanceDecider model.RebalanceDecider,
 	method, path string, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	srv := New(cfg, placementDecider, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	srv := New(cfg, placementDecider, rebalanceDecider, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(method, path, strings.NewReader(body)))
 	return rec
 }
 
 func TestHealth(t *testing.T) {
-	rec := do(t, DefaultConfig(), nil, http.MethodGet, DefaultHealthPath, "")
+	rec := do(t, DefaultConfig(), nil, nil, http.MethodGet, DefaultHealthPath, "")
 	if rec.Code != http.StatusOK || rec.Body.String() != "OK" {
 		t.Errorf("expected status %d and body %q, got %d and body %q", http.StatusOK, "OK", rec.Code, rec.Body.String())
 	}
 }
 
 func TestPlacementUsesScorer(t *testing.T) {
-	rec := do(t, DefaultConfig(), nil, http.MethodPost, DefaultDecisionPath, InitialPlacementBody)
+	rec := do(t, DefaultConfig(), nil, nil, http.MethodPost, DefaultDecisionPath, InitialPlacementBody)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 	}
@@ -154,7 +174,7 @@ func TestPlacementUsesModel(t *testing.T) {
 				err:    c.modelErr,
 			}
 			body := cmp.Or(c.body, InitialPlacementBody)
-			rec := do(t, DefaultConfig(), decider, http.MethodPost, DefaultDecisionPath, body)
+			rec := do(t, DefaultConfig(), decider, nil, http.MethodPost, DefaultDecisionPath, body)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 			}
@@ -178,7 +198,7 @@ func TestPlacementUsesModel(t *testing.T) {
 }
 
 func TestRebalanceUsesRules(t *testing.T) {
-	rec := do(t, DefaultConfig(), nil, http.MethodPost, DefaultDecisionPath, InitialRebalanceBody)
+	rec := do(t, DefaultConfig(), nil, nil, http.MethodPost, DefaultDecisionPath, InitialRebalanceBody)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 	}
@@ -190,6 +210,81 @@ func TestRebalanceUsesRules(t *testing.T) {
 	if resp.RequestID != "r2" || resp.Action != orchestrationv1alpha1.RebalanceActionMove ||
 		resp.PodName != "p1" || resp.TargetNode != "node2" || resp.DecidedBy != placement.DecidedByRules {
 		t.Errorf("expected r2 to move p1 off down node1 to node2, decided by rules, got response: %+v", resp)
+	}
+}
+
+func TestRebalanceUsesModel(t *testing.T) {
+	move := func(pod, target string) placement.RebalanceDecisionResponse {
+		return placement.RebalanceDecisionResponse{Action: orchestrationv1alpha1.RebalanceActionMove,
+			PodName: pod, TargetNode: target, Reason: stubModelReason}
+	}
+	cases := []struct {
+		name          string
+		body          string // empty means InitialRebalanceBody: p1 on down node1, node2 healthy
+		modelAnswer   placement.RebalanceDecisionResponse
+		modelErr      error
+		wantDecidedBy string
+		wantCalls     int
+	}{
+		{
+			name:          "good answer",
+			modelAnswer:   move("p1", "node2"),
+			wantDecidedBy: placement.DecidedByModel,
+			wantCalls:     1,
+		},
+		{
+			name:          "model error",
+			modelErr:      errors.New("model unreachable"),
+			wantDecidedBy: placement.DecidedByFallback,
+			wantCalls:     1,
+		},
+		{
+			name:          "NoOp while a pod is on a down node",
+			modelAnswer:   placement.RebalanceDecisionResponse{Action: orchestrationv1alpha1.RebalanceActionNoOp},
+			wantDecidedBy: placement.DecidedByFallback,
+			wantCalls:     1,
+		},
+		{
+			name:          "move to an unknown node",
+			modelAnswer:   move("p1", "node9"),
+			wantDecidedBy: placement.DecidedByFallback,
+			wantCalls:     1,
+		},
+		{
+			name:          "cooldown with nothing down, so the model isn't asked",
+			body:          CooldownRebalanceBody,
+			modelAnswer:   move("p1", "node2"),
+			wantDecidedBy: placement.DecidedByRules,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			calls := 0
+			decider := stubRebalanceDecider{answer: c.modelAnswer, err: c.modelErr, calls: &calls}
+			body := cmp.Or(c.body, InitialRebalanceBody)
+			rec := do(t, DefaultConfig(), nil, decider, http.MethodPost, DefaultDecisionPath, body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+			}
+			var resp placement.RebalanceDecisionResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to unmarshal response: %v", err)
+			}
+			if resp.DecidedBy != c.wantDecidedBy || calls != c.wantCalls {
+				t.Errorf("got decided by %s after %d model calls, want %s after %d; response: %+v",
+					resp.DecidedBy, calls, c.wantDecidedBy, c.wantCalls, resp)
+			}
+			switch c.wantDecidedBy {
+			case placement.DecidedByModel: // the model's answer, with the request ID the server sets
+				if resp.Reason != stubModelReason || resp.RequestID != "r2" {
+					t.Errorf("expected the model's answer for r2, got response: %+v", resp)
+				}
+			case placement.DecidedByFallback: // the rules' answer: move p1 off down node1
+				if resp.Action != orchestrationv1alpha1.RebalanceActionMove || resp.TargetNode != "node2" {
+					t.Errorf("expected the rules' move of p1 to node2, got response: %+v", resp)
+				}
+			}
+		})
 	}
 }
 
@@ -210,7 +305,7 @@ func TestRejectsBadRequests(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			rec := do(t, c.config, nil, c.method, DefaultDecisionPath, c.body)
+			rec := do(t, c.config, nil, nil, c.method, DefaultDecisionPath, c.body)
 			if rec.Code != c.expectedStatus {
 				t.Fatalf("expected status %d, got %d", c.expectedStatus, rec.Code)
 			}

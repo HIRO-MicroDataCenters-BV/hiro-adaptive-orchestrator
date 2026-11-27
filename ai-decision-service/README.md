@@ -14,7 +14,7 @@ It is a separate Go module (own `go.mod`), like `scheduler-plugin/`. It imports 
 | Flow | Answer | `decidedBy` |
 |------|--------|-------------|
 | Placement | The model scores the candidates when one is set; otherwise the scorer, with the profile's strategy (below) | `model`; `scorer` when the model is off; `fallback` when it fails |
-| Rebalance | Moves a pod off a down node to the best healthy node; otherwise `NoOp`, listing what is blocked | `rules` (`fallback` if the answer fails validation) |
+| Rebalance | The model answers when one is set; otherwise the rules: move a pod off a down node to the best healthy node, else `NoOp`, listing what is blocked | `model`; `rules` when the model is off or nothing can change; `fallback` when the model fails or its answer fails the check |
 
 ### Placement scorer (`scorer/`)
 
@@ -62,6 +62,17 @@ It decides from facts in the request (node conditions, history, PDB, EAO), not f
 
 A node is at risk when it is cordoned or has a risk condition (below); it is never a Move target.
 
+### Rebalance model (`model/`)
+
+Off by default (`AI_DECISION_SERVICE_REBALANCE_MODEL_PROVIDER` empty). It has its own settings, separate from placement's, so each flow can use a different model. With a provider set:
+
+1. The gates and the rules run first (`rebalance.Assess`), so the rules' answer is ready if the model fails.
+2. **Nothing can change** (a cooldown, with no pod on a down node): the rules answer, and the model isn't asked.
+3. The model is asked, and given up on after `AI_DECISION_SERVICE_REBALANCE_MODEL_TIMEOUT`.
+4. **Check**, the same for every model: the gates and validate above, plus the **must-do**: while a pod is on a down node and a healthy node can take it, the answer must move a pod off a down node. A model error, a timeout or a failed check sends the rules' answer with `decidedBy: fallback`.
+
+No rebalance adapter exists yet. Adding one is a new file in `model/` plus one `case` in `model.NewRebalance`; see [docs/decision-models.md](../docs/decision-models.md#7-rebalance-models).
+
 Each answer writes one JSON log line: `requestId`, `flow`, `decidedBy`, `latencyMilliSec`, `inputHash` (same input, same hash), `nodes` and the response.
 
 ## Endpoints
@@ -96,6 +107,11 @@ Every setting has a default (`server/config.go`) and an env var:
 | `AI_DECISION_SERVICE_MODEL_PATH` | `""` | Model's API path, e.g. `/v1/systemone` for Kev. Required with a provider |
 | `AI_DECISION_SERVICE_MODEL_NAME` | `""` | Model name sent with each request, e.g. `kev-latest`. Required with a provider |
 | `AI_DECISION_SERVICE_MODEL_TIMEOUT` | `5s` | Gives up on the model after this; the scorer answers instead. Keep it under the operator's `DECISION_AGENT_TIMEOUT` (8s) |
+| `AI_DECISION_SERVICE_REBALANCE_MODEL_PROVIDER` | `""` | Rebalance model: `""` = off (the rules answer). See [docs/decision-models.md](../docs/decision-models.md) |
+| `AI_DECISION_SERVICE_REBALANCE_MODEL_BASE_URL` | `""` | Rebalance model's address; the full URL is base URL + path. Required with a provider |
+| `AI_DECISION_SERVICE_REBALANCE_MODEL_PATH` | `""` | Rebalance model's API path. Required with a provider |
+| `AI_DECISION_SERVICE_REBALANCE_MODEL_NAME` | `""` | Rebalance model name sent with each request. Required with a provider |
+| `AI_DECISION_SERVICE_REBALANCE_MODEL_TIMEOUT` | `30s` | Gives up on the rebalance model after this; the rules answer instead. Keep it under the operator's `REBALANCE_DECISION_TIMEOUT` (60s) |
 | `AI_DECISION_SERVICE_REBALANCE_EAO_STALE_AFTER` | `5m` | EAO data older than this is ignored |
 | `AI_DECISION_SERVICE_REBALANCE_FLIP_MOVE_ACTION_WINDOW` | `30m` | How long a Move blocks churn and ping-pong moves |
 | `AI_DECISION_SERVICE_REBALANCE_RISK_CONDITIONS` | `MemoryPressure,DiskPressure,PIDPressure,NetworkUnavailable` | Node conditions that mark a node at risk when `True` |

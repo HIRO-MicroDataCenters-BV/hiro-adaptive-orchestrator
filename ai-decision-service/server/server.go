@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -30,13 +31,16 @@ const (
 type AIDecisionService struct {
 	cfg              Config
 	placementDecider model.PlacementDecider // nil when the model is off, so the scorer answers.
+	rebalanceDecider model.RebalanceDecider // nil when the model is off, so the rules answer.
 	log              *slog.Logger
 }
 
-func New(cfg Config, placementDecider model.PlacementDecider, log *slog.Logger) *AIDecisionService {
+func New(cfg Config, placementDecider model.PlacementDecider, rebalanceDecider model.RebalanceDecider,
+	log *slog.Logger) *AIDecisionService {
 	return &AIDecisionService{
 		cfg:              cfg,
 		placementDecider: placementDecider,
+		rebalanceDecider: rebalanceDecider,
 		log:              log,
 	}
 }
@@ -93,7 +97,7 @@ func (s *AIDecisionService) handleDecision(w http.ResponseWriter, r *http.Reques
 	var resp any
 	var flow, decidedBy string
 	if req.RebalanceContext != nil {
-		ans := s.rebalanceAnswer(req)
+		ans := s.rebalanceAnswer(r.Context(), req)
 		resp, flow, decidedBy = ans, "rebalance", ans.DecidedBy
 	} else {
 		ans := s.placementAnswer(r.Context(), req)
@@ -150,9 +154,34 @@ func (s *AIDecisionService) placementAnswer(ctx context.Context,
 	return modelAnswer
 }
 
-func (s *AIDecisionService) rebalanceAnswer(
+// rebalanceAnswer has the rules' answer ready first; it asks the rebalance model when one is set and a change
+// is possible, and sends the rules' answer whenever the model fails or its answer fails the check.
+func (s *AIDecisionService) rebalanceAnswer(ctx context.Context,
 	req placement.DecisionRequest) placement.RebalanceDecisionResponse {
-	return rebalance.Decide(req, time.Now(), s.cfg.RebalanceConfig, s.cfg.ScorerConfig)
+	assessment := rebalance.Assess(req, time.Now(), s.cfg.RebalanceConfig)
+	rulesAnswer := assessment.RulesAnswer(s.cfg.ScorerConfig)
+	if s.rebalanceDecider == nil || !assessment.AnyChangeAllowed() {
+		return rulesAnswer
+	}
+	s.log.Info("Rules answer is in standby", "requestId", req.RequestID, "rulesAnswer", rulesAnswer)
+
+	modelAnswer, err := s.rebalanceDecider.DecideRebalance(ctx, req, assessment)
+	if err == nil {
+		if why := assessment.Check(modelAnswer); why != "" {
+			err = errors.New(why)
+		}
+	}
+	if err != nil {
+		s.log.Warn("Rebalance model failed, rules will be used instead",
+			"requestId", req.RequestID, "error", err)
+		rulesAnswer.DecidedBy = placement.DecidedByFallback
+		return rulesAnswer
+	}
+	modelAnswer.RequestID = req.RequestID
+	modelAnswer.DecidedBy = placement.DecidedByModel
+	s.log.Info("Rebalance model answered successfully",
+		"requestId", req.RequestID, "modelAnswer", modelAnswer)
+	return modelAnswer
 }
 
 // inputHash fingerprints what was asked, ignoring the IDs and time that change on every call.

@@ -6,7 +6,7 @@ The [AI Decision Service](../ai-decision-service/README.md) can ask a **model** 
 - **Adding** a new model is **one Go file plus one line**.
 - Everything else stays as it is: the contract with the operator, the safety rule, the answer check, the fallback and the decision log.
 
-This guide covers placement. Rebalance doesn't use a model yet.
+Sections 1–6 cover placement. Rebalance follows the same pattern, with its own interface, factory and settings, so each flow can use a different model: see [section 7](#7-rebalance-models).
 
 ## 1. What stays and what is per model
 
@@ -30,8 +30,9 @@ flowchart LR
 | Part | Same for every model | What it does |
 |---|---|---|
 | `server/` | yes | Takes the request, asks the model, checks the answer, falls back to the scorer, writes one log line |
-| `scorer/` | yes | The fallback answer, and the hard rule `scorer.Allowed` (the pod must fit; Packed stays under its limit) |
-| `model/decider.go` | yes | The `PlacementDecider` interface and the `model.New` factory that picks an adapter by provider name |
+| `scorer/` | yes | Placement's fallback answer, and the hard rule `scorer.Allowed` (the pod must fit; Packed stays under its limit) |
+| `rebalance/` | yes | Rebalance's gates, its rules (the fallback answer) and `Assessment.Check` (the gates, validate and the must-do) |
+| `model/decider.go` | yes | The `PlacementDecider` and `RebalanceDecider` interfaces, and one factory per flow (`model.New`, `model.NewRebalance`) that picks an adapter by provider name |
 | `model/<name>_model.go` | **no, one per model** | Turns the request into that model's question or prompt, and its reply into node scores |
 
 **Rule:** an adapter holds only what is specific to its model (wording, prompt, API format). System rules live in `scorer/` or `server/`, so they protect every model.
@@ -223,8 +224,96 @@ Add `model/example_model.md` next to the adapter: its wiring, how it works, its 
 - [ ] Measured on the labelled scenarios (step 5), with the results in `model/<name>_model.md`.
 - [ ] Tried on Kind, and `decidedBy: model` shows in the decision log.
 
-## 7. Current adapters
+## 7. Rebalance models
 
-| Provider | Adapter | Details |
-|---|---|---|
-| `kev` | `model/kev_model.go` | [model/kev_model.md](../ai-decision-service/model/kev_model.md): wiring, how it works, accuracy, gaps, next steps |
+Rebalance works the same way as placement: the model proposes, code checks, and the rules are the fallback. It has its own interface, factory and settings, so it can use a different model from placement, or the same one.
+
+```mermaid
+flowchart TD
+    A["Rebalance request"] --> B["rebalance.Assess: facts + gates<br/>rules' answer kept in standby"]
+    B --> C{"Rebalance model set,<br/>and can anything change?"}
+    C -- no --> R["Send the rules' answer<br/>decidedBy: rules"]
+    C -- yes --> D["Adapter asks its model<br/>stops after REBALANCE_MODEL_TIMEOUT"]
+    D --> E{"Error or timeout?"}
+    E -- yes --> F["Send the rules' answer<br/>decidedBy: fallback"]
+    E -- no --> G{"assessment.Check passes?"}
+    G -- no --> F
+    G -- yes --> M["Send the model's answer<br/>decidedBy: model"]
+```
+
+"Can anything change" is false only in a cooldown with no pod on a down node, so the model isn't asked when its answer could only be rejected.
+
+**The check** (`Assessment.Check` in `rebalance/rules.go`) rejects an answer when:
+- a gate blocks it: a cooldown; replicas or resources that another controller manages; a PDB with no disruptions left (Move); a fresh EAO hold (anything that starts new pods); or a recent Move (churn, or ping-pong)
+- a Move names a pod that isn't in the request or isn't scheduled, its own node, a node that isn't a candidate, or a node that isn't healthy
+- an AdjustReplicas goes outside min..max, or keeps the same count
+- an AdjustResources names an unknown container, or has no target or a target that isn't a positive quantity
+- it misses the **must-do**: while a pod is on a down node and a healthy node can take it, the answer must move a pod off a down node
+- the action is unknown
+
+### Adding a rebalance adapter
+It follows section 4, with the rebalance interface and factory. In `model/example_rebalance.go`:
+
+```go
+// DecideRebalance asks the Example model for one rebalance action.
+func (d *ExampleDecider) DecideRebalance(ctx context.Context, req placement.DecisionRequest,
+	assessment rebalance.Assessment) (placement.RebalanceDecisionResponse, error) {
+	// 1. Build the question or prompt from req.RebalanceContext, plus assessment.Blocked().
+	// 2. Call the model with ctx; stop after cfg.Timeout.
+	// 3. Turn the reply into one answer; assessment.Check(answer) says whether it would pass.
+	// 4. On anything you can't turn into a valid answer, return an error: the rules answer instead.
+}
+```
+
+Register it in `model.NewRebalance` (`model/decider.go`):
+
+```go
+	case ProviderExample:
+		return NewExampleDecider(cfg, scorerCfg, log), nil
+```
+
+One adapter type can serve both flows: give it both methods, and register it in both factories.
+
+**Input:** the same `placement.DecisionRequest`, with `RebalanceContext` set:
+
+| Field | What it holds |
+|---|---|
+| `currentPlacements[]` | Each pod of the app: its node, phase and containers (requests, limits, live `cpuUsed` / `memoryUsed`) |
+| `trigger` | What started this review, e.g. a node failure or CPU pressure, with its value and threshold |
+| `workload` | `replicas`, `minReplicas`, `maxReplicas` and `improvementThreshold` |
+| `pdb` | The disruption budget, when one applies |
+| `history`, `cooldownUntil`, `consecutiveFailures` | Recent decisions and their outcomes |
+| `nodeStats[]` | As for placement; nodes the app's pods run on are listed too, with `candidate: false` when they can't take pods |
+
+**Helpers on `assessment`:**
+
+| Helper | Gives |
+|---|---|
+| `assessment.Blocked()` | What the gates block right now, in words, for a question or prompt |
+| `assessment.Check(answer)` | Why an answer would be rejected, or `""`; use it to drop options before asking, or before returning |
+| `assessment.AnyChangeAllowed()` | Whether any change is possible; the server already skips the model when it isn't |
+| `assessment.RulesAnswer(scorerCfg)` | The rules' answer, which an adapter may return as its own, e.g. for a pod on a down node |
+
+**Output:** `placement.RebalanceDecisionResponse`
+
+| Field | Rule |
+|---|---|
+| `action` | `NoOp`, `Move`, `AdjustReplicas`, `AdjustResources`, `Defer`, `Reject` or `Escalate` |
+| `podName`, `targetNode` | For Move: a pod from `currentPlacements`, and a healthy candidate |
+| `targetReplicas` | For AdjustReplicas: the new count, not a difference |
+| `containerName`, `targetCpu`, `targetMemory` | For AdjustResources: Kubernetes quantities, e.g. `500m`, `512Mi` |
+| `improvement` | The expected gain. The operator carries out Move, AdjustReplicas and AdjustResources only when it reaches `workload.improvementThreshold` |
+| `reason` | Short text, shown in the profile's status and events |
+| `confidence` | 0–1, if the model gives one |
+| `requestId`, `decidedBy` | Leave empty: the server sets them |
+
+**Settings:** the same five as placement, with the prefix `AI_DECISION_SERVICE_REBALANCE_MODEL_`: `PROVIDER`, `BASE_URL`, `PATH`, `NAME` and `TIMEOUT` (default 30s). The timeout must stay below the operator's `REBALANCE_DECISION_TIMEOUT` (60s). Set them under `aiDecisionService.config` in Helm, as in section 3.
+
+**Before you go live:** the section 6 checklist applies. Try it on Kind with `spec.rebalancing.dryRun: true` on the profile first: the operator reports what it would do, without doing it.
+
+## 8. Current adapters
+
+| Flow | Provider | Adapter | Details |
+|---|---|---|---|
+| Placement | `kev` | `model/kev_model.go` | [model/kev_model.md](../ai-decision-service/model/kev_model.md): wiring, how it works, accuracy, gaps, next steps |
+| Rebalance | none yet | | The rules answer |

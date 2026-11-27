@@ -15,37 +15,67 @@ const (
 	evacuationImprovement = 100
 )
 
-// Decide answers one rebalance request: facts, gates, then the first rule that matches, checked by validate.
-func Decide(req placement.DecisionRequest,
-	now time.Time, rebalanceCfg Config,
-	scoreConfig scorer.Config) placement.RebalanceDecisionResponse {
-	classes := classifyNodes(req, rebalanceCfg)
-	g := applyGates(req, now, rebalanceCfg, classes)
+// Assessment is one rebalance request with its node classes and gates worked out;
+// the rules' answer and every model's answer are judged against it.
+type Assessment struct {
+	req     placement.DecisionRequest
+	classes map[string]nodeClass
+	gates   gates
+}
 
-	answer, matched := evacuateDownNode(req, classes, scoreConfig)
+// Assess works out the facts and gates for one rebalance request.
+func Assess(req placement.DecisionRequest, now time.Time, cfg Config) Assessment {
+	classes := classifyNodes(req, cfg)
+	return Assessment{req: req, classes: classes, gates: applyGates(req, now, cfg, classes)}
+}
+
+// RulesAnswer is the first rule that matches, checked like any model's answer; it is every model's fallback.
+func (a Assessment) RulesAnswer(scorerCfg scorer.Config) placement.RebalanceDecisionResponse {
+	answer, matched := evacuateDownNode(a.req, a.classes, scorerCfg)
 	if !matched {
-		answer = noOp(req, g)
+		answer = noOp(a.req, a.gates)
 	}
-	// Later the model answers first; validate checks it the same way, and this answer is its fallback.
-	if why := validate(answer, req, g, classes); why != "" {
-		return rejectedAnswer(req, why)
+	if why := a.Check(answer); why != "" {
+		return rejectedAnswer(a.req, why)
 	}
 	return answer
+}
+
+// Check says why an answer can't be sent, or "" when it can: the gates and limits, then the must-do
+// that a pod on a down node moves first whenever a healthy node can take it.
+func (a Assessment) Check(resp placement.RebalanceDecisionResponse) string {
+	if why := validate(resp, a.req, a.gates, a.classes); why != "" {
+		return why
+	}
+	stranded, found := firstPodOnDownNode(a.req, a.classes)
+	if !found || !hasHealthyCandidate(a.req, a.classes) {
+		return ""
+	}
+	if resp.Action == orchestrationv1alpha1.RebalanceActionMove {
+		if pod, ok := findPod(a.req.RebalanceContext.CurrentPlacements, resp.PodName); ok &&
+			a.classes[pod.NodeName] == classDown {
+			return ""
+		}
+	}
+	return fmt.Sprintf("pod %s is on down node %s and must move first", stranded.PodName, stranded.NodeName)
+}
+
+// Blocked lists what the gates block right now, in words, for a model's question or prompt.
+func (a Assessment) Blocked() []string {
+	return a.gates.blockedReasons()
+}
+
+// AnyChangeAllowed is false only in a cooldown with no pod on a down node, when no model could change anything.
+func (a Assessment) AnyChangeAllowed() bool {
+	_, stranded := firstPodOnDownNode(a.req, a.classes)
+	return a.gates.cooldown == "" || stranded
 }
 
 // evacuateDownNode moves one pod off a dead node to the scorer's best healthy candidate.
 func evacuateDownNode(req placement.DecisionRequest, classes map[string]nodeClass,
 	scorerCfg scorer.Config) (placement.RebalanceDecisionResponse, bool) {
 	// 1. The first pod on a dead node.
-	var pod placement.PodPlacement
-	found := false
-	for _, p := range req.RebalanceContext.CurrentPlacements {
-		if classes[p.NodeName] == classDown {
-			pod = p
-			found = true
-			break
-		}
-	}
+	pod, found := firstPodOnDownNode(req, classes)
 	if !found {
 		return placement.RebalanceDecisionResponse{}, false
 	}

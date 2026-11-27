@@ -103,3 +103,26 @@ func TestNew(t *testing.T) {
 		t.Errorf("expected error for unknown provider, got nil")
 	}
 }
+
+func TestNewRebalance(t *testing.T) {
+	// model off: a true nil, so the server can check decider == nil
+	d, err := NewRebalance(DefaultRebalanceConfig(), scorer.DefaultConfig(), discardLog)
+	if d != nil || err != nil {
+		t.Errorf("model off: got %v, %v, want nil, nil", d, err)
+	}
+
+	// a provider without a rebalance adapter
+	if _, err := NewRebalance(Config{Provider: "unknown"}, scorer.DefaultConfig(), discardLog); err == nil {
+		t.Error("unknown provider: got no error, want one")
+	}
+}
+
+func TestDefaultRebalanceConfig(t *testing.T) {
+	cfg := DefaultRebalanceConfig()
+	if cfg.Timeout != DefaultRebalanceTimeout {
+		t.Errorf("got timeout %v, want %v", cfg.Timeout, DefaultRebalanceTimeout)
+	}
+	if cfg.Provider != DefaultProvider {
+		t.Errorf("got provider %q, want the model off", cfg.Provider)
+	}
+}

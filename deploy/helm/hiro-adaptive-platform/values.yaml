@@ -353,6 +353,14 @@ aiDecisionService:
     # Must stay under the operator's DECISION_AGENT_TIMEOUT, so the scorer can still answer in time.
     AI_DECISION_SERVICE_MODEL_TIMEOUT: 5000ms
 
+    # Model for rebalance: provider "" = off (the rules answer). Separate from placement's, so each flow can use its own.
+    # Its timeout must stay under the operator's REBALANCE_DECISION_TIMEOUT, so the rules can still answer in time.
+    AI_DECISION_SERVICE_REBALANCE_MODEL_PROVIDER: ""
+    AI_DECISION_SERVICE_REBALANCE_MODEL_BASE_URL: http://host.docker.internal:8009
+    AI_DECISION_SERVICE_REBALANCE_MODEL_PATH: /v1/systemone
+    AI_DECISION_SERVICE_REBALANCE_MODEL_NAME: kev-latest
+    AI_DECISION_SERVICE_REBALANCE_MODEL_TIMEOUT: 30s
+
     # Rebalance rules: EAO data older than this is ignored.
     AI_DECISION_SERVICE_REBALANCE_EAO_STALE_AFTER: 5m
     AI_DECISION_SERVICE_REBALANCE_FLIP_MOVE_ACTION_WINDOW: 30m

@@ -28,20 +28,23 @@ type Config struct {
 	MaxBodyBytes    int64
 	ScorerConfig    scorer.Config
 	RebalanceConfig rebalance.Config
-	ModelConfig     model.Config
-	LogLevel        slog.Level
+	ModelConfig     model.Config // placement's model
+	// RebalanceModelConfig is the rebalance flow's own model, so each flow can use a different one
+	RebalanceModelConfig model.Config
+	LogLevel             slog.Level
 }
 
 func DefaultConfig() Config {
 	return Config{
-		Port:            DefaultPort,
-		HealthPath:      DefaultHealthPath,
-		DecisionPath:    DefaultDecisionPath,
-		ReadTimeout:     DefaultReadTimeout,
-		MaxBodyBytes:    DefaultMaxBodyBytes,
-		ScorerConfig:    scorer.DefaultConfig(),
-		RebalanceConfig: rebalance.DefaultConfig(),
-		ModelConfig:     model.DefaultConfig(),
-		LogLevel:        DefaultLogLevel,
+		Port:                 DefaultPort,
+		HealthPath:           DefaultHealthPath,
+		DecisionPath:         DefaultDecisionPath,
+		ReadTimeout:          DefaultReadTimeout,
+		MaxBodyBytes:         DefaultMaxBodyBytes,
+		ScorerConfig:         scorer.DefaultConfig(),
+		RebalanceConfig:      rebalance.DefaultConfig(),
+		ModelConfig:          model.DefaultConfig(),
+		RebalanceModelConfig: model.DefaultRebalanceConfig(),
+		LogLevel:             DefaultLogLevel,
 	}
 }

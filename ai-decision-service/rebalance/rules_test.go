@@ -21,7 +21,7 @@ func sized(name string, usedPercent int64) placement.NodeStat {
 	return n
 }
 
-func TestDecide(t *testing.T) {
+func TestRulesAnswer(t *testing.T) {
 	down := stat("n1", "False", false)
 	atRisk := stat("n2", "True", true)
 	atRisk.Unschedulable = true
@@ -82,7 +82,7 @@ func TestDecide(t *testing.T) {
 			if c.setup != nil {
 				c.setup(&req)
 			}
-			got := Decide(req, testNow, DefaultConfig(), scorer.DefaultConfig())
+			got := Assess(req, testNow, DefaultConfig()).RulesAnswer(scorer.DefaultConfig())
 			if got.Action != c.wantAction || got.TargetNode != c.wantTarget || !strings.Contains(got.Reason, c.wantReason) {
 				t.Errorf("got %s to %q (%q), want %s to %q (%q)",
 					got.Action, got.TargetNode, got.Reason, c.wantAction, c.wantTarget, c.wantReason)
@@ -93,6 +93,90 @@ func TestDecide(t *testing.T) {
 			isMove := got.Action == orchestrationv1alpha1.RebalanceActionMove
 			if isMove && (got.PodName != "p1" || got.Improvement != evacuationImprovement) {
 				t.Errorf("move = %+v, want p1 with improvement %d", got, evacuationImprovement)
+			}
+		})
+	}
+}
+
+func TestCheckMustMove(t *testing.T) {
+	down := stat("n1", "False", false)
+	atRisk := stat("n2", "True", true)
+	atRisk.Unschedulable = true
+	noOp := placement.RebalanceDecisionResponse{Action: orchestrationv1alpha1.RebalanceActionNoOp}
+	move := func(pod, target string) placement.RebalanceDecisionResponse {
+		return placement.RebalanceDecisionResponse{
+			Action: orchestrationv1alpha1.RebalanceActionMove, PodName: pod, TargetNode: target}
+	}
+
+	cases := []struct {
+		name    string
+		req     placement.DecisionRequest
+		answer  placement.RebalanceDecisionResponse
+		wantWhy string // part of the reason; "" means the answer may be sent
+	}{
+		{
+			name:    "NoOp while a pod is on a down node",
+			req:     request([]placement.NodeStat{down, sized("n2", 20)}, running("p1", "n1")),
+			answer:  noOp,
+			wantWhy: "pod p1 is on down node n1 and must move first",
+		},
+		{
+			name: "moving another pod while one is on a down node",
+			req: request([]placement.NodeStat{down, sized("n2", 20), sized("n3", 20)},
+				running("p1", "n1"), running("p2", "n2")),
+			answer:  move("p2", "n3"),
+			wantWhy: "must move first",
+		},
+		{
+			name:   "moving the pod off the down node",
+			req:    request([]placement.NodeStat{down, sized("n2", 20)}, running("p1", "n1")),
+			answer: move("p1", "n2"),
+		},
+		{
+			name:   "NoOp when no healthy node can take the pod",
+			req:    request([]placement.NodeStat{down, atRisk}, running("p1", "n1")),
+			answer: noOp,
+		},
+		{
+			name:   "NoOp when no pod is on a down node",
+			req:    request([]placement.NodeStat{sized("n1", 50), sized("n2", 20)}, running("p1", "n1")),
+			answer: noOp,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			why := Assess(c.req, testNow, DefaultConfig()).Check(c.answer)
+			if c.wantWhy == "" && why != "" {
+				t.Errorf("got rejected (%q), want allowed", why)
+			}
+			if c.wantWhy != "" && !strings.Contains(why, c.wantWhy) {
+				t.Errorf("got %q, want it to contain %q", why, c.wantWhy)
+			}
+		})
+	}
+}
+
+func TestAnyChangeAllowed(t *testing.T) {
+	healthy := []placement.NodeStat{sized("n1", 50), sized("n2", 20)}
+	withDown := []placement.NodeStat{stat("n1", "False", false), sized("n2", 20)}
+	cases := []struct {
+		name     string
+		nodes    []placement.NodeStat
+		cooldown bool
+		want     bool
+	}{
+		{name: "no cooldown", nodes: healthy, want: true},
+		{name: "cooldown, nothing on a down node", nodes: healthy, cooldown: true, want: false},
+		{name: "cooldown, a pod on a down node", nodes: withDown, cooldown: true, want: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := request(c.nodes, running("p1", "n1"))
+			if c.cooldown {
+				req.RebalanceContext.CooldownUntil = at(5 * time.Minute)
+			}
+			if got := Assess(req, testNow, DefaultConfig()).AnyChangeAllowed(); got != c.want {
+				t.Errorf("AnyChangeAllowed() = %v, want %v", got, c.want)
 			}
 		})
 	}

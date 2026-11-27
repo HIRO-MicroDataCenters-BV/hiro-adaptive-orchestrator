@@ -12,6 +12,8 @@ const (
 	DefaultPath      = ""
 	DefaultModelName = ""
 	DefaultTimeout   = 5 * time.Second // must stay under the operator's DECISION_AGENT_TIMEOUT (8s)
+	// one review asks about every pod; must stay under the operator's REBALANCE_DECISION_TIMEOUT (60s)
+	DefaultRebalanceTimeout = 30 * time.Second
 )
 
 // Config holds the configuration for the model.
@@ -32,6 +34,13 @@ func DefaultConfig() Config {
 		ModelName: DefaultModelName,
 		Timeout:   DefaultTimeout,
 	}
+}
+
+// DefaultRebalanceConfig is DefaultConfig with the longer rebalance timeout.
+func DefaultRebalanceConfig() Config {
+	cfg := DefaultConfig()
+	cfg.Timeout = DefaultRebalanceTimeout
+	return cfg
 }
 
 // Validate checks if the configuration is valid.

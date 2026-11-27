@@ -26,8 +26,13 @@ func main() {
 		log.Error("Failed to create placement decider", slog.Any("error", err))
 		os.Exit(1)
 	}
+	rebalanceDecider, err := model.NewRebalance(cfg.RebalanceModelConfig, cfg.ScorerConfig, log)
+	if err != nil {
+		log.Error("Failed to create rebalance decider", slog.Any("error", err))
+		os.Exit(1)
+	}
 
-	srv := server.New(cfg, placementDecider, log)
+	srv := server.New(cfg, placementDecider, rebalanceDecider, log)
 	log.Info("Starting AI Decision Service", "config", cfg)
 	err = srv.Start()
 	if err != nil {
@@ -101,11 +106,11 @@ func loadConfig() (server.Config, error) {
 	if err != nil {
 		return cfg, err
 	}
-	cfg.ModelConfig.Provider = envString("AI_DECISION_SERVICE_MODEL_PROVIDER", cfg.ModelConfig.Provider)
-	cfg.ModelConfig.BaseURL = envString("AI_DECISION_SERVICE_MODEL_BASE_URL", cfg.ModelConfig.BaseURL)
-	cfg.ModelConfig.Path = envString("AI_DECISION_SERVICE_MODEL_PATH", cfg.ModelConfig.Path)
-	cfg.ModelConfig.ModelName = envString("AI_DECISION_SERVICE_MODEL_NAME", cfg.ModelConfig.ModelName)
-	cfg.ModelConfig.Timeout, err = envDuration("AI_DECISION_SERVICE_MODEL_TIMEOUT", cfg.ModelConfig.Timeout)
+	cfg.ModelConfig, err = envModelConfig("AI_DECISION_SERVICE_MODEL_", cfg.ModelConfig) // placement
+	if err != nil {
+		return cfg, err
+	}
+	cfg.RebalanceModelConfig, err = envModelConfig("AI_DECISION_SERVICE_REBALANCE_MODEL_", cfg.RebalanceModelConfig)
 	if err != nil {
 		return cfg, err
 	}
@@ -136,6 +141,9 @@ func validateConfig(cfg server.Config) error {
 	}
 	if err := cfg.ModelConfig.Validate(); err != nil {
 		return fmt.Errorf("invalid model config: %w", err)
+	}
+	if err := cfg.RebalanceModelConfig.Validate(); err != nil {
+		return fmt.Errorf("invalid rebalance model config: %w", err)
 	}
 	return nil
 }
@@ -174,6 +182,17 @@ func envString(name string, defaultValue string) string {
 		return defaultValue
 	}
 	return val
+}
+
+// envModelConfig reads one flow's model settings from env vars with this prefix, keeping cfg's value for unset ones.
+func envModelConfig(prefix string, cfg model.Config) (model.Config, error) {
+	cfg.Provider = envString(prefix+"PROVIDER", cfg.Provider)
+	cfg.BaseURL = envString(prefix+"BASE_URL", cfg.BaseURL)
+	cfg.Path = envString(prefix+"PATH", cfg.Path)
+	cfg.ModelName = envString(prefix+"NAME", cfg.ModelName)
+	var err error
+	cfg.Timeout, err = envDuration(prefix+"TIMEOUT", cfg.Timeout)
+	return cfg, err
 }
 
 // envFloat returns defaultValue when name is unset, or an error when it isn't a valid float64.

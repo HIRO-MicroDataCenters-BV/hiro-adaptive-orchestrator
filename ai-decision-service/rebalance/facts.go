@@ -45,3 +45,23 @@ func classifyNodes(req placement.DecisionRequest, cfg Config) map[string]nodeCla
 	}
 	return classes
 }
+
+// firstPodOnDownNode returns the first of the app's pods on a down node, if any.
+func firstPodOnDownNode(req placement.DecisionRequest, classes map[string]nodeClass) (placement.PodPlacement, bool) {
+	for _, p := range req.RebalanceContext.CurrentPlacements {
+		if classes[p.NodeName] == classDown {
+			return p, true
+		}
+	}
+	return placement.PodPlacement{}, false
+}
+
+// hasHealthyCandidate reports whether any candidate node is healthy, so a pod on a down node has somewhere to go.
+func hasHealthyCandidate(req placement.DecisionRequest, classes map[string]nodeClass) bool {
+	for _, n := range req.NodeStats {
+		if n.Candidate && classes[n.Name] == classHealthy {
+			return true
+		}
+	}
+	return false
+}
