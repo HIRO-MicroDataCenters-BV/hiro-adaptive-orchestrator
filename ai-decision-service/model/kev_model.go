@@ -1,9 +1,7 @@
 package model
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -77,40 +75,10 @@ func (kd *KevDecider) DecidePlacement(ctx context.Context,
 	kd.log.Debug("Sent request to Kev", "requestId", req.RequestID,
 		"kevRequest", kevReq)
 
-	body, err := json.Marshal(kevReq)
-	if err != nil {
-		return placement.DecisionResponse{},
-			fmt.Errorf("failed to marshal Kev request: %w", err)
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		kd.cfg.BaseURL+kd.cfg.Path, bytes.NewReader(body))
-	if err != nil {
-		return placement.DecisionResponse{},
-			fmt.Errorf("(requestId=%s) failed to create request to Kev: %w", req.RequestID, err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := kd.httpClient.Do(httpReq)
-	if err != nil {
-		return placement.DecisionResponse{},
-			fmt.Errorf("(requestId=%s) failed to send request to Kev: %w",
-				req.RequestID, err)
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode != http.StatusOK {
-		return placement.DecisionResponse{},
-			fmt.Errorf("(requestId=%s) Kev responded with error status: %s",
-				req.RequestID, resp.Status)
-	}
-
 	var kevResp kevResponse
-	err = json.NewDecoder(resp.Body).Decode(&kevResp)
+	err := postJSON(ctx, kd.httpClient, kd.cfg.BaseURL+kd.cfg.Path, kd.cfg.APIKey, kevReq, &kevResp)
 	if err != nil {
-		return placement.DecisionResponse{},
-			fmt.Errorf("(requestId=%s) failed to decode Kev response: %w",
-				req.RequestID, err)
+		return placement.DecisionResponse{}, fmt.Errorf("(requestId=%s) Kev call failed: %w", req.RequestID, err)
 	}
 
 	answer, found := kevResp.Answers[kevQuestionID]

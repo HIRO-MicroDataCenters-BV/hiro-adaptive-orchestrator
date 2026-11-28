@@ -63,7 +63,7 @@ graph LR
 Needs Go, Docker, kubectl, Helm, and Kind on your machine — see [Prerequisites](#prerequisites)
 for versions. No Kubernetes cluster required up front; step 1 creates a local Kind one.
 
-**1. Deploy.** Installs the operator, webhook, scheduler, and mock agent as one Helm release
+**1. Deploy.** Installs the operator, webhook, scheduler, and AI Decision Service as one Helm release
 against a local Kind cluster — no registry or GHCR token needed, since images build locally and
 load straight into Kind:
 
@@ -72,7 +72,7 @@ deploy/scripts/deploy_full_stack_with_helm.sh deploy
 ```
 
 **2. Verify.** The deploy health-checks the PlacementServer and prints the pods, then ends with
-copy-pasteable port-forward commands and access URLs — the PlacementServer, the mock agent, and
+copy-pasteable port-forward commands and access URLs — the PlacementServer, the AI Decision Service, and
 both `hiro_*` metrics endpoints, with a bearer token already granted so the `curl`s work as
 printed. To re-check the pods later:
 
@@ -122,11 +122,26 @@ KIND_CLUSTER_NAME=my-cluster deploy/scripts/deploy_full_stack_with_helm.sh deplo
 SCHEDULER_MODE=extender    deploy/scripts/deploy_full_stack_with_helm.sh deploy   # patch kube-scheduler instead
 DEPLOY_PROMETHEUS=true     deploy/scripts/deploy_full_stack_with_helm.sh deploy   # bundle Prometheus and scrape hiro_*
 OTLP_ENDPOINT=alloy:4317   deploy/scripts/deploy_full_stack_with_helm.sh deploy   # export traces
-USE_MOCK_AGENT=false       deploy/scripts/deploy_full_stack_with_helm.sh deploy   # point at a real AI agent
+USE_MOCK_AGENT=true USE_AI_DECISION_SERVICE=false \
+                           deploy/scripts/deploy_full_stack_with_helm.sh deploy   # the mock agent instead of the AI Decision Service
 ```
 
 Each of these drives both the Helm values and the script's closing summary, so what it prints
 always matches what was deployed.
+
+**Use a model.** Placement and rebalance are decided by code until you turn a model on. For
+example, Kev for placement, with Kev on your machine and Kind on Docker Desktop:
+
+```bash
+AI_DECISION_SERVICE_MODEL_PROVIDER=kev \
+AI_DECISION_SERVICE_MODEL_BASE_URL=http://host.docker.internal:8009 \
+AI_DECISION_SERVICE_MODEL_PATH=/v1/systemone \
+AI_DECISION_SERVICE_MODEL_NAME=kev-latest \
+deploy/scripts/deploy_full_stack_with_helm.sh deploy
+```
+
+The address for other setups, using an LLM instead, and what changes for a new model are in
+**[docs/decision-models.md](docs/decision-models.md#what-changes-for-a-new-model)**.
 
 Every other deployment path — shell scripts, operator-only, scheduler-only, extender-only, mock agent, manual Kustomize, YAML bundle — plus the full environment-variable reference and phase-by-phase breakdown, is documented in **[docs/deployment.md](docs/deployment.md)**.
 
@@ -213,7 +228,7 @@ flowchart LR
 
 A running Kubernetes cluster (v1.29+) with `~/.kube/config` pointing to it is required for deployment.
 
-Some paths need more — cert-manager for the scheduler webhook's TLS, a reachable Decision Agent (a mock is used by default). The recommended Helm path handles both automatically; see [docs/deployment.md](docs/deployment.md) for what each other path needs.
+Some paths need more — cert-manager for the scheduler webhook's TLS, a reachable Decision Agent (the AI Decision Service is deployed by default). The recommended Helm path handles both automatically; see [docs/deployment.md](docs/deployment.md) for what each other path needs.
 
 ---
 

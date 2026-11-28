@@ -107,11 +107,13 @@ Every setting has a default (`server/config.go`) and an env var:
 | `AI_DECISION_SERVICE_MODEL_BASE_URL` | `""` | Model's address; the full URL is base URL + path. Required with a provider |
 | `AI_DECISION_SERVICE_MODEL_PATH` | `""` | Model's API path, e.g. `/v1/systemone` for Kev. Required with a provider |
 | `AI_DECISION_SERVICE_MODEL_NAME` | `""` | Model name sent with each request, e.g. `kev-latest`. Required with a provider |
+| `AI_DECISION_SERVICE_MODEL_API_KEY` | `""` | Key for a hosted model, sent as a bearer token; empty = no key. In the chart it comes from a Secret (`aiDecisionService.modelApiKeySecret`), never from `aiDecisionService.config` |
 | `AI_DECISION_SERVICE_MODEL_TIMEOUT` | `5s` | Gives up on the model after this; the scorer answers instead. Keep it under the operator's `DECISION_AGENT_TIMEOUT` (8s) |
 | `AI_DECISION_SERVICE_REBALANCE_MODEL_PROVIDER` | `""` | Rebalance model: `""` = off (the rules answer). See [docs/decision-models.md](../docs/decision-models.md) |
 | `AI_DECISION_SERVICE_REBALANCE_MODEL_BASE_URL` | `""` | Rebalance model's address; the full URL is base URL + path. Required with a provider |
 | `AI_DECISION_SERVICE_REBALANCE_MODEL_PATH` | `""` | Rebalance model's API path. Required with a provider |
 | `AI_DECISION_SERVICE_REBALANCE_MODEL_NAME` | `""` | Rebalance model name sent with each request. Required with a provider |
+| `AI_DECISION_SERVICE_REBALANCE_MODEL_API_KEY` | `""` | Key for a hosted rebalance model; empty = no key. In the chart it comes from a Secret (`aiDecisionService.rebalanceModelApiKeySecret`) |
 | `AI_DECISION_SERVICE_REBALANCE_MODEL_TIMEOUT` | `30s` | Gives up on the rebalance model after this; the rules answer instead. Keep it under the operator's `REBALANCE_DECISION_TIMEOUT` (60s) |
 | `AI_DECISION_SERVICE_REBALANCE_EAO_STALE_AFTER` | `5m` | EAO data older than this is ignored |
 | `AI_DECISION_SERVICE_REBALANCE_FLIP_MOVE_ACTION_WINDOW` | `30m` | How long a Move blocks churn and ping-pong moves |

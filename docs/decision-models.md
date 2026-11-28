@@ -44,6 +44,7 @@ For a model that already has an adapter (see [6. Current adapters](#6-current-ad
 | The model's address (below) | `AI_DECISION_SERVICE_MODEL_BASE_URL` | `AI_DECISION_SERVICE_REBALANCE_MODEL_BASE_URL` |
 | Its API path, added to the address | `AI_DECISION_SERVICE_MODEL_PATH` | `AI_DECISION_SERVICE_REBALANCE_MODEL_PATH` |
 | The model name sent with each call | `AI_DECISION_SERVICE_MODEL_NAME` | `AI_DECISION_SERVICE_REBALANCE_MODEL_NAME` |
+| API key for a hosted model; empty means none (below) | `AI_DECISION_SERVICE_MODEL_API_KEY` | `AI_DECISION_SERVICE_REBALANCE_MODEL_API_KEY` |
 | Give up after this, and use the fallback | `AI_DECISION_SERVICE_MODEL_TIMEOUT` (5s) | `AI_DECISION_SERVICE_REBALANCE_MODEL_TIMEOUT` (30s) |
 
 Keep each timeout below the operator's limit for that call, so the fallback can still answer in time: `DECISION_AGENT_TIMEOUT` (8s) for placement, `REBALANCE_DECISION_TIMEOUT` (60s) for rebalance.
@@ -58,6 +59,15 @@ Keep each timeout below the operator's limit for that call, so the fallback can 
 | On your machine, with Kind on Linux | `http://<gateway>:<port>`, where `<gateway>` is the IPv4 `Gateway` from `docker network inspect kind` |
 
 A model on your machine must listen on all interfaces, not only `localhost`.
+
+**The API key**, only for a hosted model, always comes from a Kubernetes Secret, never from `aiDecisionService.config`:
+
+```bash
+kubectl create secret generic llm-api-key -n hiro-adaptive-orchestrator-system --from-literal=api-key=<your-key>
+# then, with Helm:
+--set aiDecisionService.modelApiKeySecret.name=llm-api-key            # placement
+--set aiDecisionService.rebalanceModelApiKeySecret.name=llm-api-key   # rebalance
+```
 
 **Turn it on.** For example, Kev for placement. With Helm:
 
@@ -104,7 +114,7 @@ Say the new model is called `example`:
 |---|---|---|
 | 1 | Write the adapter: build the question, call the model, read the reply | `ai-decision-service/model/example_model.go` (new) |
 | 2 | Register it: one `case` line per flow it serves | `ai-decision-service/model/decider.go` |
-| 3 | Add settings, only if the five in section 2 aren't enough | `model/config.go`, `cmd/main.go`, Helm values |
+| 3 | Add settings, only if the six in section 2 aren't enough | `model/config.go`, `cmd/main.go`, Helm values |
 | 4 | Test it against a fake model server | `ai-decision-service/model/example_model_test.go` (new) |
 | 5 | Measure it, try it on Kind, then switch to it | — |
 | 6 | Document it, and add it to [6. Current adapters](#6-current-adapters) | `ai-decision-service/model/example_model.md` (new) |
@@ -162,12 +172,12 @@ func (d *ExampleDecider) DecideRebalance(ctx context.Context, req placement.Deci
 
 ### Step 3: add settings, only if needed
 
-For anything beyond the five settings, such as an API key, nothing is hard-coded:
+For anything beyond the six settings in section 2, nothing is hard-coded:
 
 1. A field and a `Default…` const in `model/config.go`, checked in `Validate`.
 2. Read it in `cmd/main.go` → `envModelConfig`, so each flow gets it with its own prefix.
 3. A Helm value under `aiDecisionService.config`, and a row in the [service README](../ai-decision-service/README.md#configuration).
-4. **An API key goes in a Kubernetes Secret, never in `aiDecisionService.config`**, which becomes plain env values. Add a `valueFrom.secretKeyRef` entry in `deploy/helm/hiro-adaptive-platform/templates/ai-decision-service/deployment.yaml`.
+4. **A secret goes in a Kubernetes Secret, never in `aiDecisionService.config`**, which becomes plain env values. Copy how the API key does it: `modelApiKeySecret` in the Helm values and `deploy/helm/hiro-adaptive-platform/templates/ai-decision-service/deployment.yaml`, and `json:"-"` on its field so the startup log never prints it.
 
 ### Step 4: test it
 

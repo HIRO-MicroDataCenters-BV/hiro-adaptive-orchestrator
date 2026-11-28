@@ -32,6 +32,16 @@ spec:
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}
+            {{- with .Values.aiDecisionService.modelApiKeySecret }}{{ if .name }}
+            - name: AI_DECISION_SERVICE_MODEL_API_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ .name | quote }}, key: {{ .key | quote }} }
+            {{- end }}{{ end }}
+            {{- with .Values.aiDecisionService.rebalanceModelApiKeySecret }}{{ if .name }}
+            - name: AI_DECISION_SERVICE_REBALANCE_MODEL_API_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ .name | quote }}, key: {{ .key | quote }} }
+            {{- end }}{{ end }}
           ports:
             - name: http
               containerPort: {{ .Values.aiDecisionService.port }}

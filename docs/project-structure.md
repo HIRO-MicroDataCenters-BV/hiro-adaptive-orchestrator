@@ -69,6 +69,7 @@ ai-decision-service/                   # Separate Go module (own go.mod); decide
   model/                               # Decision models, one adapter per model (see docs/decision-models.md)
     decider.go                         # Placement/RebalanceDecider interfaces + one factory per flow (provider → adapter)
     config.go                          # Model defaults + Validate
+    http.go                            # postJSON: the one HTTP call every adapter makes (JSON, API key, status)
     kev_model.go                       # Kev adapter (System One API)
     kev_model.md                       # Kev wiring, how it works, accuracy, gaps, next steps
   Dockerfile                           # Build context: repo root

@@ -328,6 +328,14 @@ aiDecisionService:
     repository: ghcr.io/hiro-microdatacenters-bv/hiro-adaptive-orchestrator/ai-decision-service
     tag: v0.1.0
     pullPolicy: IfNotPresent
+  # API key for a hosted model, one per flow, read from an existing Secret; never put a key under `config`.
+  # An empty name means no key, as for a model running in the cluster or on your machine.
+  modelApiKeySecret:
+    name: ""
+    key: api-key
+  rebalanceModelApiKeySecret:
+    name: ""
+    key: api-key
   # Extra AI_DECISION_SERVICE_* settings; the port is set from `port` above.
   config:
     # Log level: debug, info, warn or error. debug adds the full request body.

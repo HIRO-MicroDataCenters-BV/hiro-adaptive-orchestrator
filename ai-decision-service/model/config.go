@@ -11,6 +11,7 @@ const (
 	DefaultBaseURL   = "" // no default address, it's set when a provider is chosen
 	DefaultPath      = ""
 	DefaultModelName = ""
+	DefaultAPIKey    = ""              // empty = no key, as for a model running in the cluster or on your machine
 	DefaultTimeout   = 5 * time.Second // must stay under the operator's DECISION_AGENT_TIMEOUT (8s)
 	// one review asks about every pod; must stay under the operator's REBALANCE_DECISION_TIMEOUT (60s)
 	DefaultRebalanceTimeout = 30 * time.Second
@@ -22,6 +23,7 @@ type Config struct {
 	BaseURL   string
 	Path      string
 	ModelName string
+	APIKey    string `json:"-"` // kept out of the startup log, which prints the config as JSON
 	Timeout   time.Duration
 }
 
@@ -32,6 +34,7 @@ func DefaultConfig() Config {
 		BaseURL:   DefaultBaseURL,
 		Path:      DefaultPath,
 		ModelName: DefaultModelName,
+		APIKey:    DefaultAPIKey,
 		Timeout:   DefaultTimeout,
 	}
 }

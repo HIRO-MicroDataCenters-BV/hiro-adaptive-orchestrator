@@ -190,6 +190,7 @@ func envModelConfig(prefix string, cfg model.Config) (model.Config, error) {
 	cfg.BaseURL = envString(prefix+"BASE_URL", cfg.BaseURL)
 	cfg.Path = envString(prefix+"PATH", cfg.Path)
 	cfg.ModelName = envString(prefix+"NAME", cfg.ModelName)
+	cfg.APIKey = envString(prefix+"API_KEY", cfg.APIKey) // set from a Secret by the Helm chart
 	var err error
 	cfg.Timeout, err = envDuration(prefix+"TIMEOUT", cfg.Timeout)
 	return cfg, err

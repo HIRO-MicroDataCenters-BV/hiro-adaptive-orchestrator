@@ -1,8 +1,10 @@
 package model
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/HIRO-MicroDataCenters-BV/hiro-adaptive-orchestrator/ai-decision-service/scorer"
@@ -124,5 +126,15 @@ func TestDefaultRebalanceConfig(t *testing.T) {
 	}
 	if cfg.Provider != DefaultProvider {
 		t.Errorf("got provider %q, want the model off", cfg.Provider)
+	}
+}
+
+func TestAPIKeyNotLogged(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.APIKey = "secret-key-123"
+	var out bytes.Buffer
+	slog.New(slog.NewJSONHandler(&out, nil)).Info("Starting AI Decision Service", "config", cfg) // as cmd/main.go does
+	if strings.Contains(out.String(), cfg.APIKey) {
+		t.Errorf("the API key is in the log line: %s", out.String())
 	}
 }
